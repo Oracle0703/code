@@ -48,9 +48,15 @@ Windows 默认优先使用可用的 PowerShell，后续可把 `pwsh.exe`、Windo
 
 ## 打包
 
-Electron Forge 负责启动、原生模块 rebuild 与平台打包；Vite 分别构建 Main、Preload 和 Renderer。`node-pty` 保持外部依赖，并由 auto-unpack-natives 从 ASAR 解包。应用同时启用 Electron fuses，关闭 Node CLI 参数和 `NODE_OPTIONS` 等非必要入口。Windows ConPTY 的关闭流程依赖 `child_process.fork`，因此保留 RunAsNode；Windows CI 会对打包后的终端执行创建、写入和关闭冒烟测试。
+Electron Forge 负责启动、原生模块 rebuild 与平台打包；Vite 分别构建 Main、Preload 和 Renderer。通过项目 npm scripts 启动或打包前，会清理明确的 `.vite` 与 `out` 目录，防止旧入口或旧安装包混入产物。`node-pty` 保持外部依赖，并由 auto-unpack-natives 从 ASAR 解包。
+
+应用启用 Electron fuses，关闭 Node CLI 参数、`NODE_OPTIONS` 和浏览器专用 V8 snapshot 等非必要入口。Windows ConPTY 的关闭流程依赖 `child_process.fork`，因此必须保留 RunAsNode。可信 Renderer 当前通过 `file://` 加载，所以暂时显式保留该协议的额外权限；迁移到自定义 `app://` 协议后再关闭。
+
+Electron 43 有 9 项 V1 fuse，而 Forge 7 当前兼容的 `@electron/fuses` 1.x 只能命名前 8 项。打包验证会直接断言 wire 长度和全部 9 项状态（包括 `WasmTrapHandlers`）；Electron 新增 fuse 或任一状态漂移都会使 CI 失败。Windows CI 还会对同一打包产物执行原生文件检查与终端创建、写入、关闭冒烟测试，成功后才生成校验和并上传安装制品。
 
 原生模块不能跨系统复用。Windows 安装包必须在 Windows x64 环境执行 `npm ci` 与 `npm run make`，并在升级 Electron 或 `node-pty` 后验证打包产物中的真实终端。
+
+完整依赖树与生产依赖采用两层门禁：生产依赖不允许任何等级的已知漏洞；Forge 尚未修复的开发期链路按 GHSA 设置有期限例外，任何新漏洞、例外过期或风险进入生产树都会阻断。详见[依赖风险说明](DEPENDENCY_RISKS.md)。
 
 ## 下一阶段的数据边界
 

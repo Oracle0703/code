@@ -12,30 +12,18 @@ const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
     executableName: 'daily-workbench',
-    ignore: (filePath) => {
-      if (!filePath || filePath === '/package.json' || filePath.startsWith('/.vite')) {
-        return false;
-      }
-
-      // The Vite main bundle deliberately keeps node-pty external so Forge can
-      // rebuild it for Electron's ABI. Preserve its parent traversal and full
-      // package; AutoUnpackNativesPlugin moves the native binary out of ASAR.
-      if (
-        filePath === '/node_modules' ||
-        filePath === '/node_modules/node-pty' ||
-        filePath.startsWith('/node_modules/node-pty/') ||
-        filePath === '/node_modules/node-addon-api' ||
-        filePath.startsWith('/node_modules/node-addon-api/')
-      ) {
-        return false;
-      }
-
-      return true;
-    },
+    ignore: shouldIgnorePackagerPath,
   },
   rebuildConfig: {},
   makers: [
-    new MakerSquirrel({ name: 'DailyWorkbench' }),
+    new MakerSquirrel({
+      name: 'DailyWorkbench',
+      authors: 'Oracle0703',
+      description: 'A personal workspace for tasks, notes, browsing, and terminal workflows.',
+      exe: 'daily-workbench.exe',
+      setupExe: 'DailyWorkbenchSetup.exe',
+      noMsi: true,
+    }),
     new MakerZIP({}, ['darwin']),
     new MakerRpm({}),
     new MakerDeb({}),
@@ -72,8 +60,34 @@ const config: ForgeConfig = {
       [FuseV1Options.EnableNodeCliInspectArguments]: false,
       [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
       [FuseV1Options.OnlyLoadAppFromAsar]: true,
+      [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot]: false,
+      // The trusted renderer currently loads through file://. Keep this explicit
+      // until the app moves to a custom privileged protocol.
+      [FuseV1Options.GrantFileProtocolExtraPrivileges]: true,
     }),
   ],
 };
 
 export default config;
+
+export function shouldIgnorePackagerPath(filePath: string): boolean {
+  const isViteOutput = filePath === '/.vite' || filePath.startsWith('/.vite/');
+  if (!filePath || filePath === '/package.json' || isViteOutput) {
+    return false;
+  }
+
+  // The Vite main bundle deliberately keeps node-pty external so Forge can
+  // rebuild it for Electron's ABI. Preserve its parent traversal and full
+  // package; AutoUnpackNativesPlugin moves the native binary out of ASAR.
+  if (
+    filePath === '/node_modules' ||
+    filePath === '/node_modules/node-pty' ||
+    filePath.startsWith('/node_modules/node-pty/') ||
+    filePath === '/node_modules/node-addon-api' ||
+    filePath.startsWith('/node_modules/node-addon-api/')
+  ) {
+    return false;
+  }
+
+  return true;
+}

@@ -14,14 +14,15 @@
 - 适配 Windows 的 PowerShell/CMD 扩展路径，并兼容 macOS/Linux 默认 shell
 - 严格的 preload 白名单 API、IPC 参数校验、远程网页隔离与权限默认拒绝
 - TypeScript、ESLint、Prettier、Vitest 和 GitHub Actions 基础质量链路
-- Electron Forge 打包，以及 Windows/macOS/Linux maker 配置
+- Electron Forge 打包，以及经过 ConPTY 冒烟测试的 Windows x64 安装包制品
+- 完整依赖审计报告、开发期风险基线和打包后 Electron fuse 状态校验
 
 ## 快速开始
 
 ### 环境要求
 
-- Node.js 24+
-- npm 10+
+- Node.js 24.14.0（见 `.nvmrc`）
+- npm 11.9.0
 - Windows 10 1809 或更新版本（使用 ConPTY）；Windows 10 22H2 可直接使用
 
 `node-pty` 是原生模块。如果本机没有匹配的预编译包，Windows 还需要 Visual Studio 2022 的“使用 C++ 的桌面开发”、Windows SDK 与 Python 3。
@@ -29,7 +30,8 @@
 ```bash
 git clone https://github.com/Oracle0703/code.git
 cd code
-npm install
+nvm use
+npm ci
 npm start
 ```
 
@@ -39,6 +41,7 @@ npm start
 npm run lint
 npm run typecheck
 npm test
+npm run audit:all
 npm run package
 ```
 
@@ -47,6 +50,18 @@ npm run package
 ```bash
 npm run check
 ```
+
+`npm run audit:all` 会把完整报告写入 `reports/npm-audit.json`，并阻止未审查、已过期或进入生产依赖的漏洞。当前 Forge 构建链中的受控例外和复查期限见[依赖风险说明](docs/DEPENDENCY_RISKS.md)。
+
+## 构建支持矩阵
+
+| 目标            | 当前验证级别                                     |
+| --------------- | ------------------------------------------------ |
+| Windows x64     | Squirrel 安装包、原生文件、fuse 与 ConPTY 全链路 |
+| Linux x64       | Electron package、fuse、包体与终端冒烟测试       |
+| macOS x64/arm64 | 已配置 ZIP maker，尚未进入 CI 实机验证           |
+
+GitHub Actions 的 Windows 作业会保存通过该作业内全部检查的安装包、完整 NuGet 更新包、`RELEASES` 和 `SHA256SUMS.txt`，保留 14 天。
 
 ## 快捷键
 

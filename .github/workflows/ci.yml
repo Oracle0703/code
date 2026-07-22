@@ -11,21 +11,26 @@ permissions:
 jobs:
   quality:
     name: Quality and package
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Use Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
 
       - name: Lint
         run: npm run lint
@@ -36,11 +41,34 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Audit complete dependency tree
+        run: npm run audit:all
+
+      - name: Upload complete dependency audit
+        if: ${{ always() && hashFiles('reports/npm-audit.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/npm-audit.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Audit production dependencies
         run: npm run audit:prod
 
       - name: Package Electron app
-        run: npm run package
+        run: npm run package:linux
+
+      - name: Verify packaged app and Electron fuses
+        run: node scripts/verify-packaged-app.mjs 'out/Daily Workbench-linux-x64/daily-workbench'
+
+      - name: Smoke-test packaged terminal
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+        run: >-
+          'out/Daily Workbench-linux-x64/daily-workbench'
+          scripts/smoke-packaged-terminal.cjs
+          'out/Daily Workbench-linux-x64/resources/app.asar'
 
   windows-package:
     name: Windows package smoke test
@@ -51,19 +79,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Use Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build Windows installer
-        run: npm run make
+        run: npm run make:windows
 
       - name: Verify unpacked node-pty binaries
         shell: pwsh
@@ -74,6 +104,17 @@ jobs:
             throw 'Packaged output does not contain unpacked node-pty native files.'
           }
           $nativeFiles | Select-Object -ExpandProperty FullName
+
+      - name: Verify packaged app and Electron fuses
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -Path out -Recurse -File -Filter daily-workbench.exe |
+            Where-Object { $_.FullName -match 'win32-x64' } |
+            Select-Object -First 1
+          if (-not $executable) {
+            throw 'Could not find the packaged Daily Workbench executable.'
+          }
+          node scripts/verify-packaged-app.mjs $executable.FullName
 
       - name: Smoke-test packaged terminal
         shell: pwsh
@@ -95,3 +136,44 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."
           }
+
+      - name: Prepare verified installer artifacts
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $PWD 'out\make\squirrel.windows\x64'
+          if (-not (Test-Path $artifactDirectory -PathType Container)) {
+            throw "Could not find Squirrel artifact directory: $artifactDirectory"
+          }
+
+          $setupFiles = @(Get-ChildItem -Path $artifactDirectory -File -Filter 'DailyWorkbenchSetup.exe')
+          $packages = @(Get-ChildItem -Path $artifactDirectory -File -Filter '*-full.nupkg')
+          $releases = @(Get-ChildItem -Path $artifactDirectory -File -Filter 'RELEASES')
+          if ($setupFiles.Count -ne 1 -or $packages.Count -ne 1 -or $releases.Count -ne 1) {
+            throw "Expected exactly one setup EXE, full NUPKG, and RELEASES file."
+          }
+
+          $verifiedFiles = @($setupFiles[0], $packages[0], $releases[0]) | Sort-Object Name
+          $checksumLines = $verifiedFiles | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $checksumPath = Join-Path $artifactDirectory 'SHA256SUMS.txt'
+          [System.IO.File]::WriteAllLines(
+            $checksumPath,
+            $checksumLines,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          Get-Content $checksumPath
+
+      - name: Upload verified Windows installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: daily-workbench-windows-x64-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            out/make/squirrel.windows/x64/DailyWorkbenchSetup.exe
+            out/make/squirrel.windows/x64/*-full.nupkg
+            out/make/squirrel.windows/x64/RELEASES
+            out/make/squirrel.windows/x64/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
