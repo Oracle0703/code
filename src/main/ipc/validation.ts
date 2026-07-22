@@ -3,7 +3,17 @@ import {
   type BrowserBounds,
   type TerminalCreateOptions,
   type TerminalShell,
+  type WorkspaceCreateInput,
+  type WorkspacePreferencesInput,
+  type WorkspaceRenameInput,
+  type WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  normalizeWorkspaceColor,
+  normalizeWorkspaceId,
+  normalizeWorkspaceName,
+  normalizeWorkspacePreferencesPatch,
+} from '../../shared/workspace-domain';
 
 const MAX_URL_LENGTH = 4_096;
 const MAX_PATH_LENGTH = 4_096;
@@ -81,6 +91,47 @@ export function assertNoArguments(values: readonly unknown[], operation: string)
   if (values.length !== 0) {
     throw new TypeError(`${operation} does not accept arguments`);
   }
+}
+
+export function parseWorkspaceCreateInput(value: unknown): WorkspaceCreateInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Workspace creation input must be an object');
+  }
+  assertOnlyKeys(value, ['name', 'color']);
+  return {
+    name: normalizeWorkspaceName(value.name),
+    color: normalizeWorkspaceColor(value.color),
+  };
+}
+
+export function parseWorkspaceRenameInput(value: unknown): WorkspaceRenameInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Workspace rename input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'name']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    name: normalizeWorkspaceName(value.name),
+  };
+}
+
+export function parseWorkspaceTargetInput(value: unknown): WorkspaceTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Workspace target input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId']);
+  return { workspaceId: normalizeWorkspaceId(value.workspaceId) };
+}
+
+export function parseWorkspacePreferencesInput(value: unknown): WorkspacePreferencesInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Workspace preference input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'patch']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    patch: normalizeWorkspacePreferencesPatch(value.patch),
+  };
 }
 
 export function parseTerminalCreateOptions(value: unknown): TerminalCreateOptions {

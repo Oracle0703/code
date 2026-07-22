@@ -6,7 +6,14 @@ import {
   parseSessionId,
   parseTerminalCreateOptions,
   parseTerminalSize,
+  parseWorkspaceCreateInput,
+  parseWorkspacePreferencesInput,
+  parseWorkspaceRenameInput,
+  parseWorkspaceTargetInput,
 } from '../src/main/ipc/validation';
+import { WORKSPACE_COLORS } from '../src/shared/contracts';
+
+const WORKSPACE_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -56,6 +63,84 @@ describe('IPC validation', () => {
     expect(() => assertNoArguments([], 'Creating a database backup')).not.toThrow();
     expect(() =>
       assertNoArguments(['/tmp/attacker.sqlite3'], 'Creating a database backup'),
+    ).toThrow(TypeError);
+  });
+
+  it('normalizes bounded workspace names and accepts only palette colors', () => {
+    expect(
+      parseWorkspaceCreateInput({ name: '  Ａlpha 工作区  ', color: WORKSPACE_COLORS[1] }),
+    ).toEqual({ name: 'Alpha 工作区', color: WORKSPACE_COLORS[1] });
+    expect(() => parseWorkspaceCreateInput({ name: '', color: WORKSPACE_COLORS[0] })).toThrow(
+      TypeError,
+    );
+    expect(() => parseWorkspaceCreateInput({ name: 'x\n', color: WORKSPACE_COLORS[0] })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      parseWorkspaceCreateInput({
+        name: `x${String.fromCodePoint(0x85)}`,
+        color: WORKSPACE_COLORS[0],
+      }),
+    ).toThrow(TypeError);
+    expect(() => parseWorkspaceCreateInput({ name: 'x', color: '#ffffff' })).toThrow(TypeError);
+    expect(() =>
+      parseWorkspaceCreateInput({ name: 'x', color: WORKSPACE_COLORS[0], id: WORKSPACE_ID }),
+    ).toThrow(TypeError);
+  });
+
+  it('requires exact workspace target and rename objects with UUID v4 ids', () => {
+    expect(parseWorkspaceTargetInput({ workspaceId: WORKSPACE_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(parseWorkspaceRenameInput({ workspaceId: WORKSPACE_ID, name: '新的名称' })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      name: '新的名称',
+    });
+    expect(() => parseWorkspaceTargetInput({ workspaceId: '../../workspace' })).toThrow(TypeError);
+    expect(() => parseWorkspaceTargetInput({ workspaceId: WORKSPACE_ID.toUpperCase() })).toThrow(
+      TypeError,
+    );
+    expect(() => parseWorkspaceTargetInput({ workspaceId: WORKSPACE_ID, extra: true })).toThrow(
+      TypeError,
+    );
+  });
+
+  it('accepts non-empty preference patches and rejects coercion or unknown keys', () => {
+    expect(
+      parseWorkspacePreferencesInput({
+        workspaceId: WORKSPACE_ID,
+        patch: { activeView: 'notes', browserOpen: false, terminalHeight: 420 },
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      patch: { activeView: 'notes', browserOpen: false, terminalHeight: 420 },
+    });
+    expect(() => parseWorkspacePreferencesInput({ workspaceId: WORKSPACE_ID, patch: {} })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      parseWorkspacePreferencesInput({
+        workspaceId: WORKSPACE_ID,
+        patch: { browserOpen: 'false' },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseWorkspacePreferencesInput({
+        workspaceId: WORKSPACE_ID,
+        patch: { browserWidth: 721 },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseWorkspacePreferencesInput({
+        workspaceId: WORKSPACE_ID,
+        patch: { theme: 'system' },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseWorkspacePreferencesInput({
+        workspaceId: WORKSPACE_ID,
+        patch: { theme: 'light', databasePath: '/tmp/escape' },
+      }),
     ).toThrow(TypeError);
   });
 });

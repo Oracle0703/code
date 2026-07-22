@@ -11,7 +11,9 @@ if (!rootElement) {
 }
 
 try {
-  const savedTheme = JSON.parse(window.localStorage.getItem('daily.appearance.theme') ?? '"dark"');
+  // This cache only avoids a first-paint flash. The active SQLite workspace
+  // replaces it as soon as the trusted workspace snapshot has loaded.
+  const savedTheme = JSON.parse(window.localStorage.getItem('daily.paint.theme') ?? '"dark"');
   document.documentElement.dataset.theme = savedTheme === 'light' ? 'light' : 'dark';
 } catch {
   document.documentElement.dataset.theme = 'dark';

@@ -23,15 +23,7 @@ export class MetadataRepository {
     }
     this.#database.exec('BEGIN IMMEDIATE');
     try {
-      this.#insertIfMissing('database_id', id, now);
-      this.#insertIfMissing('created_at', now, now);
-      this.#database.run(
-        `INSERT INTO app_metadata (key, value, updated_at)
-         VALUES ('last_opened_at', ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-        [now, now],
-      );
-      const metadata = this.read();
+      const metadata = this.#initializeRows(now, id);
       this.#database.exec('COMMIT');
       return metadata;
     } catch (error) {
@@ -42,6 +34,22 @@ export class MetadataRepository {
       } catch {
         // Preserve the original repository error.
       }
+      throw new DatabaseIntegrityError('Database metadata could not be initialized.', {
+        cause: error,
+      });
+    }
+  }
+
+  initializeWithinTransaction(now: string, id: string): DatabaseMetadata {
+    if (!this.#database.isTransaction) {
+      throw new DatabaseIntegrityError('Database metadata requires an active transaction.');
+    }
+    if (!isIsoTimestamp(now) || !isUuid(id)) {
+      throw new DatabaseIntegrityError('Database metadata inputs are invalid.');
+    }
+    try {
+      return this.#initializeRows(now, id);
+    } catch (error) {
       throw new DatabaseIntegrityError('Database metadata could not be initialized.', {
         cause: error,
       });
@@ -86,6 +94,18 @@ export class MetadataRepository {
        ON CONFLICT(key) DO NOTHING`,
       [key, value, updatedAt],
     );
+  }
+
+  #initializeRows(now: string, id: string): DatabaseMetadata {
+    this.#insertIfMissing('database_id', id, now);
+    this.#insertIfMissing('created_at', now, now);
+    this.#database.run(
+      `INSERT INTO app_metadata (key, value, updated_at)
+       VALUES ('last_opened_at', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [now, now],
+    );
+    return this.read();
   }
 }
 

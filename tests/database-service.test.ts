@@ -37,11 +37,11 @@ describe('DatabaseService', () => {
     const service = new DatabaseService({ dataDirectory });
 
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 1 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 2 });
     expect(initialized.preMigrationBackup).toBeUndefined();
     await expect(service.getStatus()).resolves.toMatchObject({
-      schemaVersion: 1,
-      appliedMigrations: 1,
+      schemaVersion: 2,
+      appliedMigrations: 2,
       journalMode: 'wal',
       integrityCheck: 'ok',
       backupCount: 0,
@@ -55,8 +55,8 @@ describe('DatabaseService', () => {
     const reopened = new DatabaseService({ dataDirectory });
     const secondInitialization = await reopened.open();
     expect(secondInitialization.migration).toEqual({
-      fromVersion: 1,
-      toVersion: 1,
+      fromVersion: 2,
+      toVersion: 2,
       applied: [],
     });
     await reopened.close();
@@ -68,8 +68,8 @@ describe('DatabaseService', () => {
     await service.open();
 
     const backup = await service.createBackup();
-    expect(backup).toMatchObject({ reason: 'manual', schemaVersion: 1 });
-    expect(backup.fileName).toMatch(/^daily-workbench-v1-manual-.+\.sqlite3$/u);
+    expect(backup).toMatchObject({ reason: 'manual', schemaVersion: 2 });
+    expect(backup.fileName).toMatch(/^daily-workbench-v2-manual-.+\.sqlite3$/u);
     expect(backup).not.toHaveProperty('path');
     expect(await service.listBackups()).toEqual([backup]);
     expect((await service.getStatus()).backupCount).toBe(1);
@@ -78,7 +78,7 @@ describe('DatabaseService', () => {
       readOnly: true,
     });
     try {
-      expect(snapshot.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 });
+      expect(snapshot.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 });
       expect(snapshot.prepare('PRAGMA quick_check').get()).toEqual({ quick_check: 'ok' });
       expect(
         snapshot.prepare("SELECT value FROM app_metadata WHERE key = 'database_id'").get(),
@@ -100,27 +100,27 @@ describe('DatabaseService', () => {
       migrations: [
         ...DEFAULT_MIGRATIONS,
         {
-          version: 2,
+          version: 3,
           name: 'add_upgrade_probe',
           sql: 'CREATE TABLE upgrade_probe (id INTEGER PRIMARY KEY) STRICT;',
         },
       ],
     });
     const result = await upgraded.open();
-    expect(result.migration).toMatchObject({ fromVersion: 1, toVersion: 2 });
+    expect(result.migration).toMatchObject({ fromVersion: 2, toVersion: 3 });
     expect(result.preMigrationBackup).toMatchObject({
       reason: 'pre-migration',
-      schemaVersion: 1,
+      schemaVersion: 2,
     });
     const backups = await upgraded.listBackups();
     expect(backups).toHaveLength(1);
-    expect(backups[0]).toMatchObject({ reason: 'pre-migration', schemaVersion: 1 });
+    expect(backups[0]).toMatchObject({ reason: 'pre-migration', schemaVersion: 2 });
 
     const snapshot = new DatabaseSync(join(dataDirectory, 'backups', backups[0].fileName), {
       readOnly: true,
     });
     try {
-      expect(snapshot.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 });
+      expect(snapshot.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 });
       expect(
         snapshot
           .prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'upgrade_probe'")
@@ -260,7 +260,7 @@ describe('DatabaseService', () => {
       migrations: [
         ...DEFAULT_MIGRATIONS,
         {
-          version: 2,
+          version: 3,
           name: 'shadow_pragma_modules',
           sql: `
             CREATE TABLE pragma_journal_mode (journal_mode TEXT NOT NULL) STRICT;
@@ -280,7 +280,7 @@ describe('DatabaseService', () => {
 
     await service.open();
     await expect(service.getStatus()).resolves.toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       journalMode: 'wal',
       integrityCheck: 'ok',
     });

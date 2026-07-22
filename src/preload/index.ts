@@ -11,6 +11,12 @@ import {
   type TerminalSessionInfo,
   type Unsubscribe,
   type WorkbenchApi,
+  type WorkspaceCreateInput,
+  type WorkspacePreferences,
+  type WorkspacePreferencesInput,
+  type WorkspaceRenameInput,
+  type WorkspaceSnapshot,
+  type WorkspaceTargetInput,
 } from '../shared/contracts';
 
 function invoke<TResult>(channel: string, ...args: unknown[]): Promise<TResult> {
@@ -36,6 +42,19 @@ const workbenchApi: WorkbenchApi = Object.freeze({
     getStatus: () => invoke<DatabaseStatus>(IPC_CHANNELS.database.getStatus),
     createBackup: () => invoke<DatabaseBackupInfo>(IPC_CHANNELS.database.createBackup),
     listBackups: () => invoke<DatabaseBackupInfo[]>(IPC_CHANNELS.database.listBackups),
+  }),
+  workspace: Object.freeze({
+    getSnapshot: () => invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.getSnapshot),
+    create: (input: WorkspaceCreateInput) =>
+      invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.create, input),
+    rename: (input: WorkspaceRenameInput) =>
+      invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.rename, input),
+    activate: (input: WorkspaceTargetInput) =>
+      invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.activate, input),
+    archive: (input: WorkspaceTargetInput) =>
+      invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.archive, input),
+    updatePreferences: (input: WorkspacePreferencesInput) =>
+      invoke<WorkspacePreferences>(IPC_CHANNELS.workspace.updatePreferences, input),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),

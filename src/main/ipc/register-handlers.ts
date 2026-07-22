@@ -1,5 +1,15 @@
 import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
-import { IPC_CHANNELS, type DatabaseBackupInfo, type DatabaseStatus } from '../../shared/contracts';
+import {
+  IPC_CHANNELS,
+  type DatabaseBackupInfo,
+  type DatabaseStatus,
+  type WorkspaceCreateInput,
+  type WorkspacePreferences,
+  type WorkspacePreferencesInput,
+  type WorkspaceRenameInput,
+  type WorkspaceSnapshot,
+  type WorkspaceTargetInput,
+} from '../../shared/contracts';
 import type { BrowserController } from '../browser/browser-controller';
 import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/trusted-renderer';
 import type { TerminalManager } from '../terminal/terminal-manager';
@@ -12,6 +22,10 @@ import {
   parseTerminalCreateOptions,
   parseTerminalData,
   parseTerminalSize,
+  parseWorkspaceCreateInput,
+  parseWorkspacePreferencesInput,
+  parseWorkspaceRenameInput,
+  parseWorkspaceTargetInput,
 } from './validation';
 
 interface IpcDependencies {
@@ -21,6 +35,14 @@ interface IpcDependencies {
     getStatus(): Promise<DatabaseStatus>;
     createBackup(): Promise<DatabaseBackupInfo>;
     listBackups(): Promise<DatabaseBackupInfo[]>;
+  };
+  workspace: {
+    getWorkspaceSnapshot(): Promise<WorkspaceSnapshot>;
+    createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot>;
+    renameWorkspace(input: WorkspaceRenameInput): Promise<WorkspaceSnapshot>;
+    activateWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+    archiveWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+    updateWorkspacePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
   };
   terminal: TerminalManager;
   trustedRendererLocation: TrustedRendererLocation;
@@ -32,6 +54,7 @@ export function registerIpcHandlers({
   window,
   browser,
   database,
+  workspace,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -67,6 +90,31 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.database.listBackups, (_event, ...args) => {
     assertNoArguments(args, 'Listing database backups');
     return database.listBackups();
+  });
+
+  register(IPC_CHANNELS.workspace.getSnapshot, (_event, ...args) => {
+    assertNoArguments(args, 'Getting the workspace snapshot');
+    return workspace.getWorkspaceSnapshot();
+  });
+  register(IPC_CHANNELS.workspace.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating a workspace');
+    return workspace.createWorkspace(parseWorkspaceCreateInput(input));
+  });
+  register(IPC_CHANNELS.workspace.rename, (_event, input, ...args) => {
+    assertNoArguments(args, 'Renaming a workspace');
+    return workspace.renameWorkspace(parseWorkspaceRenameInput(input));
+  });
+  register(IPC_CHANNELS.workspace.activate, (_event, input, ...args) => {
+    assertNoArguments(args, 'Activating a workspace');
+    return workspace.activateWorkspace(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.workspace.archive, (_event, input, ...args) => {
+    assertNoArguments(args, 'Archiving a workspace');
+    return workspace.archiveWorkspace(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.workspace.updatePreferences, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating workspace preferences');
+    return workspace.updateWorkspacePreferences(parseWorkspacePreferencesInput(input));
   });
 
   register(IPC_CHANNELS.window.minimize, () => {

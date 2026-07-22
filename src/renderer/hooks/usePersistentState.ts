@@ -1,5 +1,9 @@
 import { useCallback, useState, type Dispatch, type SetStateAction } from 'react';
 
+/**
+ * Transitional storage for prototype content that has not reached its own
+ * SQLite milestone yet. Workspace identity and layout must not use this hook.
+ */
 export function usePersistentState<T>(
   key: string,
   initialValue: T | (() => T),
@@ -11,7 +15,7 @@ export function usePersistentState<T>(
         return JSON.parse(savedValue) as T;
       }
     } catch {
-      // A corrupt preference should never prevent the workbench from opening.
+      // Prototype content can still open with its default value.
     }
 
     return initialValue instanceof Function ? initialValue() : initialValue;
@@ -21,13 +25,11 @@ export function usePersistentState<T>(
     (nextValue) => {
       setValue((currentValue) => {
         const resolvedValue = nextValue instanceof Function ? nextValue(currentValue) : nextValue;
-
         try {
           window.localStorage.setItem(key, JSON.stringify(resolvedValue));
         } catch {
-          // Preferences can still live in memory if storage is unavailable.
+          // Keep the prototype content in memory if storage is unavailable.
         }
-
         return resolvedValue;
       });
     },

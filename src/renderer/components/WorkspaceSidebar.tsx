@@ -1,24 +1,37 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  Archive,
   ChevronDown,
   Clock3,
   FileText,
   Folder,
   Hash,
   MoreHorizontal,
+  Pencil,
   Plus,
   Star,
   Users,
 } from 'lucide-react';
-import type { ViewId, Workspace } from '../model';
+import type { WorkspaceInfo } from '../../shared/contracts';
+import { createWorkspaceMark } from '../../shared/workspace-domain';
+import type { WorkspaceSaveStatus } from '../hooks/useWorkspaceController';
+import type { ViewId } from '../model';
 import { IconButton } from './IconButton';
 
 interface WorkspaceSidebarProps {
   activeView: ViewId;
-  workspaceId: string;
-  workspaces: Workspace[];
+  activeWorkspace: WorkspaceInfo;
+  workspaces: readonly WorkspaceInfo[];
+  busy: boolean;
+  pendingWorkspaceId: string | null;
+  saveError: string | null;
+  saveStatus: WorkspaceSaveStatus;
+  onRetrySave: () => void;
   onSelectView: (view: ViewId) => void;
   onSelectWorkspace: (workspaceId: string) => void;
+  onCreateWorkspace: () => void;
+  onRenameWorkspace: (workspace: WorkspaceInfo) => void;
+  onArchiveWorkspace: (workspace: WorkspaceInfo) => void;
 }
 
 const sidebarLinks: Array<{
@@ -41,16 +54,22 @@ const projects = [
 
 export function WorkspaceSidebar({
   activeView,
-  workspaceId,
+  activeWorkspace,
   workspaces,
+  busy,
+  pendingWorkspaceId,
+  saveError,
+  saveStatus,
+  onRetrySave,
   onSelectView,
   onSelectWorkspace,
+  onCreateWorkspace,
+  onRenameWorkspace,
+  onArchiveWorkspace,
 }: WorkspaceSidebarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const activeWorkspace =
-    workspaces.find((workspace) => workspace.id === workspaceId) ?? workspaces[0];
-
+  const switcherButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!menuOpen) return;
 
@@ -58,7 +77,10 @@ export function WorkspaceSidebar({
       if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setMenuOpen(false);
+      if (event.key === 'Escape') {
+        setMenuOpen(false);
+        window.requestAnimationFrame(() => switcherButtonRef.current?.focus());
+      }
     };
 
     window.addEventListener('pointerdown', closeMenu);
@@ -74,9 +96,10 @@ export function WorkspaceSidebar({
       <div className="workspace-switcher" ref={menuRef}>
         <button
           type="button"
+          ref={switcherButtonRef}
           className="workspace-switcher__button"
-          aria-haspopup="menu"
           aria-expanded={menuOpen}
+          aria-controls="workspace-switcher-popup"
           onClick={() => setMenuOpen((open) => !open)}
         >
           <span
@@ -84,35 +107,82 @@ export function WorkspaceSidebar({
             style={{ backgroundColor: activeWorkspace.color }}
             aria-hidden="true"
           >
-            {activeWorkspace.shortName}
+            {createWorkspaceMark(activeWorkspace.name)}
           </span>
           <span className="workspace-switcher__copy">
             <strong>{activeWorkspace.name}</strong>
-            <small>个人工作区</small>
+            <small>本地工作区</small>
           </span>
           <ChevronDown size={15} aria-hidden="true" />
         </button>
 
         {menuOpen ? (
-          <div className="workspace-menu" role="menu" aria-label="切换工作区">
+          <div
+            className="workspace-menu"
+            id="workspace-switcher-popup"
+            role="group"
+            aria-label="切换工作区"
+            aria-busy={busy}
+          >
             <p className="workspace-menu__label">工作区</p>
             {workspaces.map((workspace) => (
               <button
                 key={workspace.id}
                 type="button"
-                role="menuitemradio"
-                aria-checked={workspace.id === workspaceId}
-                className={workspace.id === workspaceId ? 'is-selected' : ''}
+                aria-current={workspace.id === activeWorkspace.id ? 'true' : undefined}
+                className={workspace.id === activeWorkspace.id ? 'is-selected' : ''}
+                disabled={busy}
                 onClick={() => {
                   onSelectWorkspace(workspace.id);
                   setMenuOpen(false);
                 }}
               >
-                <span style={{ backgroundColor: workspace.color }}>{workspace.shortName}</span>
-                {workspace.name}
+                <span style={{ backgroundColor: workspace.color }}>
+                  {createWorkspaceMark(workspace.name)}
+                </span>
+                <span className="workspace-menu__name">{workspace.name}</span>
+                {pendingWorkspaceId === workspace.id ? <small>切换中…</small> : null}
               </button>
             ))}
-            <button type="button" role="menuitem" className="workspace-menu__new">
+            <div className="workspace-menu__current-actions" aria-label="当前工作区操作">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setMenuOpen(false);
+                  onRenameWorkspace(activeWorkspace);
+                }}
+              >
+                <Pencil size={13} aria-hidden="true" />
+                重命名
+              </button>
+              <button
+                type="button"
+                disabled={busy || workspaces.length <= 1}
+                aria-describedby={workspaces.length <= 1 ? 'archive-disabled-reason' : undefined}
+                onClick={() => {
+                  setMenuOpen(false);
+                  onArchiveWorkspace(activeWorkspace);
+                }}
+              >
+                <Archive size={13} aria-hidden="true" />
+                归档
+              </button>
+            </div>
+            {workspaces.length <= 1 ? (
+              <p id="archive-disabled-reason" className="workspace-menu__hint">
+                至少保留一个工作区
+              </p>
+            ) : null}
+            <button
+              type="button"
+              className="workspace-menu__new"
+              disabled={busy}
+              onClick={() => {
+                setMenuOpen(false);
+                onCreateWorkspace();
+              }}
+            >
               <span>
                 <Plus size={14} />
               </span>
@@ -184,17 +254,22 @@ export function WorkspaceSidebar({
         </div>
       </div>
 
-      <div className="sidebar-storage" aria-label="本地数据使用情况">
+      <div className="sidebar-storage" aria-label="本地数据使用情况" aria-live="polite">
         <div>
-          <span>本地数据</span>
-          <span>24 MB</span>
-        </div>
-        <div className="storage-meter">
-          <span />
+          <span>SQLite 本地保存</span>
+          <span>
+            {saveStatus === 'saving' ? '保存中' : saveStatus === 'error' ? '需重试' : '已同步'}
+          </span>
         </div>
         <p>
-          <Hash size={12} aria-hidden="true" /> 所有内容已保存
+          <Hash size={12} aria-hidden="true" />{' '}
+          {saveStatus === 'saving' ? '正在保存工作区更改…' : (saveError ?? '工作区更改已自动保存')}
         </p>
+        {saveStatus === 'error' ? (
+          <button type="button" className="sidebar-storage__retry" onClick={onRetrySave}>
+            重试保存
+          </button>
+        ) : null}
       </div>
     </aside>
   );
