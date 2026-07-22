@@ -3,6 +3,8 @@ import {
   IPC_CHANNELS,
   type BrowserBounds,
   type BrowserState,
+  type DatabaseBackupInfo,
+  type DatabaseStatus,
   type TerminalCreateOptions,
   type TerminalDataEvent,
   type TerminalExitEvent,
@@ -29,6 +31,11 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): Unsubscr
 const workbenchApi: WorkbenchApi = Object.freeze({
   app: Object.freeze({
     getVersion: () => invoke<string>(IPC_CHANNELS.app.getVersion),
+  }),
+  database: Object.freeze({
+    getStatus: () => invoke<DatabaseStatus>(IPC_CHANNELS.database.getStatus),
+    createBackup: () => invoke<DatabaseBackupInfo>(IPC_CHANNELS.database.createBackup),
+    listBackups: () => invoke<DatabaseBackupInfo[]>(IPC_CHANNELS.database.listBackups),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),

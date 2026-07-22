@@ -1,9 +1,10 @@
 import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
-import { IPC_CHANNELS } from '../../shared/contracts';
+import { IPC_CHANNELS, type DatabaseBackupInfo, type DatabaseStatus } from '../../shared/contracts';
 import type { BrowserController } from '../browser/browser-controller';
 import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/trusted-renderer';
 import type { TerminalManager } from '../terminal/terminal-manager';
 import {
+  assertNoArguments,
   parseBoolean,
   parseBrowserBounds,
   parseBrowserUrl,
@@ -16,6 +17,11 @@ import {
 interface IpcDependencies {
   window: BrowserWindow;
   browser: BrowserController;
+  database: {
+    getStatus(): Promise<DatabaseStatus>;
+    createBackup(): Promise<DatabaseBackupInfo>;
+    listBackups(): Promise<DatabaseBackupInfo[]>;
+  };
   terminal: TerminalManager;
   trustedRendererLocation: TrustedRendererLocation;
 }
@@ -25,6 +31,7 @@ type InvokeHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 export function registerIpcHandlers({
   window,
   browser,
+  database,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -48,6 +55,19 @@ export function registerIpcHandlers({
   };
 
   register(IPC_CHANNELS.app.getVersion, () => app.getVersion());
+
+  register(IPC_CHANNELS.database.getStatus, (_event, ...args) => {
+    assertNoArguments(args, 'Getting database status');
+    return database.getStatus();
+  });
+  register(IPC_CHANNELS.database.createBackup, (_event, ...args) => {
+    assertNoArguments(args, 'Creating a database backup');
+    return database.createBackup();
+  });
+  register(IPC_CHANNELS.database.listBackups, (_event, ...args) => {
+    assertNoArguments(args, 'Listing database backups');
+    return database.listBackups();
+  });
 
   register(IPC_CHANNELS.window.minimize, () => {
     window.minimize();

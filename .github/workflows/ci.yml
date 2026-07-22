@@ -59,6 +59,9 @@ jobs:
       - name: Package Electron app
         run: npm run package:linux
 
+      - name: Build real database service smoke bundle
+        run: npm run build:database-smoke
+
       - name: Verify packaged app and Electron fuses
         run: node scripts/verify-packaged-app.mjs 'out/Daily Workbench-linux-x64/daily-workbench' 70
 
@@ -69,6 +72,16 @@ jobs:
           'out/Daily Workbench-linux-x64/daily-workbench'
           scripts/smoke-packaged-terminal.cjs
           'out/Daily Workbench-linux-x64/resources/app.asar'
+
+      - name: Smoke-test packaged database
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+        run: |
+          'out/Daily Workbench-linux-x64/daily-workbench' \
+            reports/database-smoke/database-service-smoke.cjs
+          'out/Daily Workbench-linux-x64/daily-workbench' \
+            scripts/smoke-packaged-database.cjs \
+            'out/Daily Workbench-linux-x64/resources/app.asar'
 
   windows-package:
     name: Windows package smoke test
@@ -94,6 +107,9 @@ jobs:
 
       - name: Build Windows installer
         run: npm run make:windows
+
+      - name: Build real database service smoke bundle
+        run: npm run build:database-smoke
 
       - name: Verify unpacked node-pty binaries
         shell: pwsh
@@ -137,7 +153,37 @@ jobs:
             throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."
           }
 
-      - name: Prepare verified installer artifacts
+      - name: Smoke-test packaged database
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -Path out -Recurse -File -Filter daily-workbench.exe |
+            Where-Object { $_.FullName -match 'win32-x64' } |
+            Select-Object -First 1
+          if (-not $executable) {
+            throw 'Could not find the packaged Daily Workbench executable.'
+          }
+          $asarPath = Join-Path $executable.Directory.FullName 'resources\app.asar'
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          $serviceProcess = Start-Process `
+            -FilePath $executable.FullName `
+            -ArgumentList @('reports\database-smoke\database-service-smoke.cjs') `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+          if ($serviceProcess.ExitCode -ne 0) {
+            throw "Packaged DatabaseService smoke test failed with exit code $($serviceProcess.ExitCode)."
+          }
+          $process = Start-Process `
+            -FilePath $executable.FullName `
+            -ArgumentList @('scripts/smoke-packaged-database.cjs', "`"$asarPath`"") `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged database smoke test failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Prepare installer artifacts and checksums
         shell: pwsh
         run: |
           $artifactDirectory = Join-Path $PWD 'out\make\squirrel.windows\x64'
@@ -165,7 +211,7 @@ jobs:
           )
           Get-Content $checksumPath
 
-      - name: Upload verified Windows installer
+      - name: Upload Windows installer artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: daily-workbench-windows-x64-${{ github.sha }}-${{ github.run_attempt }}

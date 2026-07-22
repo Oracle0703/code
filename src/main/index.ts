@@ -1,15 +1,20 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, type WebContents } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { IPC_CHANNELS } from '../shared/contracts';
 import { BrowserController } from './browser/browser-controller';
+import { DatabaseError, DatabaseService } from './database';
 import { registerIpcHandlers } from './ipc/register-handlers';
 import { isAllowedBrowserUrl } from './security/browser-url';
 import { createTrustedRendererLocation } from './security/trusted-renderer';
 import { TerminalManager } from './terminal/terminal-manager';
 
 let mainWindow: BrowserWindow | null = null;
+let databaseService: DatabaseService | null = null;
+let databaseShutdownPromise: Promise<void> | null = null;
+let allowQuit = false;
+let startupFailureShown = false;
 
 if (squirrelStartup) {
   app.quit();
@@ -27,7 +32,7 @@ function denyWebviewAttachment(contents: WebContents): void {
   });
 }
 
-async function createMainWindow(): Promise<void> {
+async function createMainWindow(database: DatabaseService): Promise<void> {
   const rendererHtmlPath = join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`);
   const isDevelopmentRenderer = Boolean(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   const rendererEntryUrl = isDevelopmentRenderer
@@ -71,6 +76,7 @@ async function createMainWindow(): Promise<void> {
   const unregisterIpc = registerIpcHandlers({
     window,
     browser,
+    database,
     terminal,
     trustedRendererLocation,
   });
@@ -128,7 +134,15 @@ async function createMainWindow(): Promise<void> {
 }
 
 function quitAfterStartupFailure(error: unknown): void {
-  console.error('Daily Workbench failed to create its main window.', error);
+  console.error('Daily Workbench failed to start.', error);
+  if (!startupFailureShown) {
+    startupFailureShown = true;
+    const reference = error instanceof DatabaseError ? `\n\nReference: ${error.code}` : '';
+    dialog.showErrorBox(
+      'Daily Workbench could not start',
+      `The local workspace could not be opened safely. Check application data permissions and try again.${reference}`,
+    );
+  }
   app.quit();
 }
 
@@ -154,6 +168,26 @@ if (!hasSingleInstanceLock) {
     denyWebviewAttachment(contents);
   });
 
+  app.on('before-quit', (event) => {
+    if (allowQuit || !databaseService) {
+      return;
+    }
+
+    event.preventDefault();
+    if (!databaseShutdownPromise) {
+      databaseShutdownPromise = databaseService
+        .close()
+        .catch((error: unknown) => {
+          console.error('Daily Workbench failed to close its database cleanly.', error);
+        })
+        .finally(() => {
+          databaseService = null;
+          allowQuit = true;
+          app.quit();
+        });
+    }
+  });
+
   void app
     .whenReady()
     .then(async () => {
@@ -161,11 +195,25 @@ if (!hasSingleInstanceLock) {
         app.setAppUserModelId('com.squirrel.DailyWorkbench.daily-workbench');
       }
 
-      await createMainWindow();
+      const database = new DatabaseService({
+        dataDirectory: join(app.getPath('userData'), 'data'),
+      });
+      databaseService = database;
+      await database.open();
+      if (databaseShutdownPromise) {
+        return;
+      }
+
+      await createMainWindow(database);
 
       app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) {
-          void createMainWindow().catch(quitAfterStartupFailure);
+        const activeDatabase = databaseService;
+        if (
+          activeDatabase &&
+          !databaseShutdownPromise &&
+          BrowserWindow.getAllWindows().length === 0
+        ) {
+          void createMainWindow(activeDatabase).catch(quitAfterStartupFailure);
         }
       });
     })

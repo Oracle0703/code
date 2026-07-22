@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertNoArguments,
   parseBoolean,
   parseBrowserBounds,
   parseSessionId,
@@ -49,5 +50,12 @@ describe('IPC validation', () => {
   it('does not coerce boolean values', () => {
     expect(parseBoolean(true, 'visible')).toBe(true);
     expect(() => parseBoolean('true', 'visible')).toThrow(TypeError);
+  });
+
+  it('rejects surplus arguments for parameterless operations', () => {
+    expect(() => assertNoArguments([], 'Creating a database backup')).not.toThrow();
+    expect(() =>
+      assertNoArguments(['/tmp/attacker.sqlite3'], 'Creating a database backup'),
+    ).toThrow(TypeError);
   });
 });
