@@ -8,17 +8,26 @@
   "author": "Oracle0703",
   "license": "MIT",
   "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "prestart": "npm run clean",
     "start": "electron-forge start",
+    "prepackage": "npm run clean",
     "package": "electron-forge package",
+    "prepackage:linux": "npm run clean",
+    "package:linux": "electron-forge package --platform=linux --arch=x64",
+    "premake": "npm run clean",
     "make": "electron-forge make",
+    "premake:windows": "npm run clean",
+    "make:windows": "electron-forge make --platform=win32 --arch=x64",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && tsc -p tsconfig.tools.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "audit:prod": "npm audit --omit=dev --audit-level=high",
+    "audit:all": "node scripts/audit-dependencies.mjs",
+    "audit:prod": "npm audit --omit=dev --audit-level=info",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run lint && npm run typecheck && npm run test && npm run audit:prod && npm run package"
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run audit:all && npm run audit:prod && npm run package"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
@@ -53,10 +62,24 @@
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.65.0",
-    "vite": "5.4.21",
+    "vite": "6.4.3",
     "vitest": "3.2.7"
   },
+  "packageManager": "npm@11.9.0",
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "24.14.0",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "11.9.0",
+      "onFail": "error"
+    }
+  },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.14.0 <25",
+    "npm": ">=11.9.0 <12"
   }
 }

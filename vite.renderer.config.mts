@@ -10,6 +10,7 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: path.resolve(currentDirectory, '.vite/renderer/main_window'),
+    emptyOutDir: true,
   },
   server: {
     host: '127.0.0.1',

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "package": "tar",
+      "advisoryIds": [
+        "GHSA-34x7-hfp2-rc4v",
+        "GHSA-8qq5-rm4j-mr97",
+        "GHSA-83g3-92jg-28cx",
+        "GHSA-qffp-2rhf-9h96",
+        "GHSA-9ppj-qmqm-q256",
+        "GHSA-r6q2-hw4h-h46w",
+        "GHSA-vmf3-w455-68vh",
+        "GHSA-w8wr-v893-vjvp",
+        "GHSA-23hp-3jrh-7fpw",
+        "GHSA-8x88-c5mf-7j5w",
+        "GHSA-gvwx-54wh-qm9j"
+      ],
+      "expiresOn": "2026-10-31",
+      "scope": "Development-only Electron Forge rebuild chain",
+      "rationale": "Forge 7.11.2 depends on @electron/rebuild 3.x and Electron's node-gyp fork, which still resolves tar 6.2.1. A forced tar major override could break the Windows node-pty rebuild."
+    },
+    {
+      "package": "tmp",
+      "advisoryIds": ["GHSA-52f5-9888-hmc6", "GHSA-ph9p-34f9-6g65"],
+      "expiresOn": "2026-10-31",
+      "scope": "Development-only Electron Forge interactive CLI chain",
+      "rationale": "Forge CLI reaches tmp 0.0.33 through Inquirer and external-editor. The application does not ship or invoke this build-time prompt chain."
+    }
+  ]
+}

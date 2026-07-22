@@ -2,10 +2,10 @@
 
 ## 本地开发
 
-1. 使用 Node.js 24 和 npm 安装依赖。
+1. 使用 `.nvmrc` 中固定的 Node.js 24.14.0 和 npm 11.9.0。
 2. 从 `main` 创建主题分支。
 3. 保持 Main、Preload、Renderer 的信任边界，不要从 preload 暴露通用 Electron/Node API。
-4. 提交前运行 `npm run check`。
+4. 使用 `npm ci` 从锁文件安装，并在提交前运行 `npm run check`。
 
 ## 代码约定
 
@@ -14,7 +14,10 @@
 - 远程内容必须使用独立 `WebContentsView`，不能放入可信 Renderer。
 - 纯逻辑优先提取到 `src/shared` 并添加单元测试。
 - 原生依赖升级必须同时验证开发模式和打包产物。
+- 依赖改动必须提交同步生成的 `package-lock.json`，不能手工编辑锁文件。
+- 不使用 `npm audit fix --force` 或跨主版本 override 掩盖构建链漏洞。
+- 审计例外必须绑定 GHSA、限定为开发依赖并设置复查期限；新增或过期例外需要明确评审。
 
 ## Pull Request
 
-PR 描述应说明变更、原因、用户影响和验证命令。界面变更请附截图；安全边界或 IPC 变更请同步更新 `docs/ARCHITECTURE.md`。
+PR 描述应说明范围、非范围、验收标准、变更原因、用户影响、迁移/回滚方式和验证命令。界面变更请附截图；安全边界或 IPC 变更请同步更新 `docs/ARCHITECTURE.md`。
