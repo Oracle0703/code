@@ -8,6 +8,11 @@ export const IPC_CHANNELS = {
   app: {
     getVersion: 'app:get-version',
   },
+  database: {
+    getStatus: 'database:get-status',
+    createBackup: 'database:create-backup',
+    listBackups: 'database:list-backups',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -49,6 +54,26 @@ export interface BrowserState {
   isLoading: boolean;
 }
 
+export type DatabaseBackupReason = 'manual' | 'pre-migration';
+
+export interface DatabaseBackupInfo {
+  id: string;
+  fileName: string;
+  createdAt: string;
+  sizeBytes: number;
+  reason: DatabaseBackupReason;
+  schemaVersion: number;
+}
+
+export interface DatabaseStatus {
+  schemaVersion: number;
+  appliedMigrations: number;
+  sqliteVersion: string;
+  journalMode: 'wal';
+  integrityCheck: 'ok';
+  backupCount: number;
+}
+
 export const TERMINAL_SHELLS = ['default', 'powershell', 'cmd', 'wsl', 'bash', 'zsh'] as const;
 
 export type TerminalShell = (typeof TERMINAL_SHELLS)[number];
@@ -80,6 +105,11 @@ export type Unsubscribe = () => void;
 export interface WorkbenchApi {
   app: {
     getVersion(): Promise<string>;
+  };
+  database: {
+    getStatus(): Promise<DatabaseStatus>;
+    createBackup(): Promise<DatabaseBackupInfo>;
+    listBackups(): Promise<DatabaseBackupInfo[]>;
   };
   window: {
     minimize(): Promise<void>;

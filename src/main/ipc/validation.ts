@@ -77,6 +77,12 @@ export function parseBoolean(value: unknown, name: string): boolean {
   return value;
 }
 
+export function assertNoArguments(values: readonly unknown[], operation: string): void {
+  if (values.length !== 0) {
+    throw new TypeError(`${operation} does not accept arguments`);
+  }
+}
+
 export function parseTerminalCreateOptions(value: unknown): TerminalCreateOptions {
   if (value === undefined) {
     return {};

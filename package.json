@@ -19,6 +19,7 @@
     "make": "electron-forge make",
     "premake:windows": "npm run clean",
     "make:windows": "electron-forge make --platform=win32 --arch=x64",
+    "build:database-smoke": "vite build --config vite.database-smoke.config.ts",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && tsc -p tsconfig.tools.json",
     "test": "vitest run",

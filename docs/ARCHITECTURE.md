@@ -46,6 +46,16 @@ Windows 默认优先使用可用的 PowerShell，后续可把 `pwsh.exe`、Windo
 
 新增功能时，应先在共享层定义输入与输出，再实现 Main handler 和 Preload 映射，最后接入 Renderer。
 
+## 数据库
+
+SQLite 连接、迁移、Repository 和备份都只存在于 Main。应用从 `userData` 推导固定的数据与备份目录，Renderer 不能提供路径、SQL、迁移版本或备份原因。对外只暴露健康状态、受控手动备份和备份列表。
+
+数据库服务是应用级单例：首个窗口创建前打开，窗口关闭时保持，正常受控退出前排空操作队列并关闭。Windows 注销/关机和强制终止依靠 SQLite 事务与 WAL 做崩溃恢复，未完成的临时备份不会被列为可用备份。连接启用 foreign keys、WAL、busy timeout、defensive mode 与 `trusted_schema=OFF`，禁止加载扩展。
+
+迁移通过构建期 raw import 嵌入 Main bundle，按连续版本在事务中执行，并把名称与 SHA-256 校验和写入历史表。已应用迁移发生漂移或数据库版本高于当前代码时拒绝启动。已有数据库升级前会先创建经过完整性验证的一致性备份；备份失败时不会继续迁移。
+
+当前不暴露恢复或删除接口。恢复需要在关闭连接后完成验证、恢复前快照、原子替换与失败回滚，后续以独立安全边界实现。详细规则见[数据库与迁移](DATABASE.md)。
+
 ## 打包
 
 Electron Forge 负责启动、原生模块 rebuild 与平台打包；Vite 分别构建 Main、Preload 和 Renderer。通过项目 npm scripts 启动或打包前，会清理明确的 `.vite` 与 `out` 目录，防止旧入口或旧安装包混入产物。`node-pty` 保持外部依赖，并由 auto-unpack-natives 从 ASAR 解包。
@@ -58,9 +68,9 @@ Electron 43 有 9 项 V1 fuse，而 Forge 7 当前兼容的 `@electron/fuses` 1.
 
 完整依赖树与生产依赖采用两层门禁：生产依赖不允许任何等级的已知漏洞；Forge 尚未修复的开发期链路按 GHSA 设置有期限例外，任何新漏洞、例外过期或风险进入生产树都会阻断。详见[依赖风险说明](DEPENDENCY_RISKS.md)。
 
-## 下一阶段的数据边界
+## 业务数据边界
 
-计划在 Main 内新增 SQLite repository 层，Renderer 仍只能经 preload 使用业务 API：
+后续业务 Repository 会继续放在 Main，Renderer 仍只能经 preload 使用业务 API：
 
 ```text
 Workspace

@@ -3,7 +3,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   build: {
     rollupOptions: {
-      external: ['electron', 'node-pty'],
+      external: ['electron', 'node:sqlite', 'node-pty'],
     },
   },
 });
