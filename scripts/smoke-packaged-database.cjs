@@ -233,12 +233,27 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'SQLITE_ATTACH',
     'SQLITE_DETACH',
     'database_foundation',
+    'workspaces',
     'schema_migrations',
     'CREATE TABLE app_metadata',
+    'CREATE TABLE workspaces',
+    'CREATE TABLE workspace_preferences',
+    'CREATE TABLE workspace_app_state',
+    'workspace:get-snapshot',
+    'workspace:update-preferences',
+    'current workspace must be switched before archive',
   ]) {
     assert.ok(
       mainBundle.includes(requiredToken),
       `Packaged main bundle does not contain the database runtime token ${requiredToken}.`,
+    );
+  }
+
+  const preloadBundle = await readFile(path.join(asarPath, '.vite', 'build', 'preload.js'), 'utf8');
+  for (const requiredToken of ['workspace:get-snapshot', 'workspace:update-preferences']) {
+    assert.ok(
+      preloadBundle.includes(requiredToken),
+      `Packaged preload bundle does not contain the workspace IPC token ${requiredToken}.`,
     );
   }
 }

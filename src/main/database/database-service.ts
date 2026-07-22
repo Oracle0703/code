@@ -1,7 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { DatabaseBackupInfo, DatabaseStatus } from '../../shared/contracts';
+import type {
+  DatabaseBackupInfo,
+  DatabaseStatus,
+  WorkspaceCreateInput,
+  WorkspacePreferences,
+  WorkspacePreferencesInput,
+  WorkspaceRenameInput,
+  WorkspaceSnapshot,
+  WorkspaceTargetInput,
+} from '../../shared/contracts';
+import { WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
 import { DEFAULT_MIGRATIONS } from './default-migrations';
 import {
@@ -61,9 +71,10 @@ export interface DatabaseServiceOptions {
   readonly adapterFactory?: SqliteAdapterFactory;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
+  readonly workspaceIdFactory?: () => string;
 }
 
-type ServiceState = 'closed' | 'opening' | 'open' | 'closing';
+type ServiceState = 'closed' | 'opening' | 'open' | 'closing' | 'poisoned';
 
 export class DatabaseService {
   readonly #paths;
@@ -71,6 +82,7 @@ export class DatabaseService {
   readonly #migrationRunner: MigrationRunner;
   readonly #now: () => Date;
   readonly #idFactory: () => string;
+  readonly #workspaceService: WorkspaceService;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
   #backupManager: BackupManager | undefined;
@@ -78,6 +90,7 @@ export class DatabaseService {
   #openPromise: Promise<DatabaseInitializationResult> | undefined;
   #closePromise: Promise<void> | undefined;
   #operationTail: Promise<void> = Promise.resolve();
+  #fatalOperationError: DatabaseIntegrityError | undefined;
 
   constructor({
     dataDirectory,
@@ -86,12 +99,19 @@ export class DatabaseService {
     adapterFactory = createNodeSqliteAdapter,
     now = () => new Date(),
     idFactory = randomUUID,
+    workspaceIdFactory = randomUUID,
   }: DatabaseServiceOptions) {
     this.#paths = resolveDatabasePaths(dataDirectory, databaseFileName);
     this.#adapterFactory = adapterFactory;
     this.#migrationRunner = new MigrationRunner(migrations);
     this.#now = now;
     this.#idFactory = idFactory;
+    this.#workspaceService = new WorkspaceService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      idFactory: workspaceIdFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
   }
 
   async open(): Promise<DatabaseInitializationResult> {
@@ -104,7 +124,14 @@ export class DatabaseService {
     if (this.#state === 'closing') {
       throw new DatabaseStateError('The database is closing.');
     }
+    if (this.#state === 'poisoned' || this.#fatalOperationError) {
+      throw new DatabaseStateError(
+        'The database entered a fatal state and must be closed before it can reopen.',
+        { cause: this.#fatalOperationError },
+      );
+    }
 
+    this.#fatalOperationError = undefined;
     this.#state = 'opening';
     this.#openPromise = this.#initialize();
     try {
@@ -117,6 +144,7 @@ export class DatabaseService {
       this.#database = undefined;
       this.#backupManager = undefined;
       this.#initialization = undefined;
+      this.#fatalOperationError = undefined;
       this.#state = 'closed';
       if (error instanceof DatabaseError) {
         throw error;
@@ -174,6 +202,7 @@ export class DatabaseService {
       this.#database = undefined;
       this.#backupManager = undefined;
       this.#initialization = undefined;
+      this.#fatalOperationError = undefined;
       this.#state = 'closed';
       this.#closePromise = undefined;
       if (closeError) {
@@ -211,6 +240,30 @@ export class DatabaseService {
     return this.#enqueue((_database, backups) => backups.list());
   }
 
+  getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
+    return this.#workspaceService.getSnapshot();
+  }
+
+  createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot> {
+    return this.#workspaceService.create(input);
+  }
+
+  renameWorkspace(input: WorkspaceRenameInput): Promise<WorkspaceSnapshot> {
+    return this.#workspaceService.rename(input);
+  }
+
+  activateWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot> {
+    return this.#workspaceService.activate(input);
+  }
+
+  archiveWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot> {
+    return this.#workspaceService.archive(input);
+  }
+
+  updateWorkspacePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences> {
+    return this.#workspaceService.updatePreferences(input);
+  }
+
   async #initialize(): Promise<DatabaseInitializationResult> {
     await prepareDatabaseDirectories(this.#paths);
     const existed = await databaseFileExists(this.#paths.databasePath);
@@ -241,8 +294,24 @@ export class DatabaseService {
 
       const migration = this.#migrationRunner.apply(database);
       this.#readFoundationHealth(database);
-      new MetadataRepository(database).initialize(this.#now().toISOString(), this.#idFactory());
-      const health = this.#readHealth(database);
+      const openedAt = this.#now().toISOString();
+      database.exec('BEGIN IMMEDIATE');
+      let health: DatabaseHealth;
+      try {
+        new MetadataRepository(database).initializeWithinTransaction(openedAt, this.#idFactory());
+        this.#workspaceService.initializeWithinTransaction(database, openedAt);
+        health = this.#readHealth(database);
+        database.exec('COMMIT');
+      } catch (error) {
+        try {
+          if (database.isTransaction) {
+            database.exec('ROLLBACK');
+          }
+        } catch {
+          // Preserve the startup integrity error.
+        }
+        throw error;
+      }
 
       return { health, migration, preMigrationBackup };
     } catch (error) {
@@ -257,18 +326,40 @@ export class DatabaseService {
   #enqueue<T>(
     operation: (database: SqliteAdapter, backups: BackupManager) => Promise<T> | T,
   ): Promise<T> {
+    if (this.#state === 'poisoned' || this.#fatalOperationError) {
+      return Promise.reject(
+        new DatabaseStateError('The database is unavailable after a fatal transaction failure.', {
+          cause: this.#fatalOperationError,
+        }),
+      );
+    }
     if (this.#state !== 'open' || !this.#database || !this.#backupManager) {
       return Promise.reject(new DatabaseStateError('The database is not open.'));
     }
 
     const database = this.#database;
     const backups = this.#backupManager;
-    const result = this.#operationTail.then(() => operation(database, backups));
+    const result = this.#operationTail.then(() => {
+      if (this.#fatalOperationError) {
+        throw new DatabaseStateError(
+          'The database is unavailable after a fatal transaction failure.',
+          { cause: this.#fatalOperationError },
+        );
+      }
+      return operation(database, backups);
+    });
     this.#operationTail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
+  }
+
+  #markPoisoned(error: DatabaseIntegrityError): void {
+    this.#fatalOperationError = error;
+    if (this.#state === 'open') {
+      this.#state = 'poisoned';
+    }
   }
 
   #validateSnapshot(database: SqliteAdapter, expectedVersion: number): void {
@@ -279,6 +370,9 @@ export class DatabaseService {
     assertIntegrity(database);
     if (expectedVersion > 0) {
       new MetadataRepository(database).read();
+    }
+    if (expectedVersion >= 2) {
+      this.#workspaceService.validateSnapshot(database);
     }
   }
 

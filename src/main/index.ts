@@ -77,6 +77,7 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     window,
     browser,
     database,
+    workspace: database,
     terminal,
     trustedRendererLocation,
   });

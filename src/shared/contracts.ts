@@ -13,6 +13,14 @@ export const IPC_CHANNELS = {
     createBackup: 'database:create-backup',
     listBackups: 'database:list-backups',
   },
+  workspace: {
+    getSnapshot: 'workspace:get-snapshot',
+    create: 'workspace:create',
+    rename: 'workspace:rename',
+    activate: 'workspace:activate',
+    archive: 'workspace:archive',
+    updatePreferences: 'workspace:update-preferences',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -74,6 +82,87 @@ export interface DatabaseStatus {
   backupCount: number;
 }
 
+export const WORKSPACE_VIEW_IDS = [
+  'today',
+  'inbox',
+  'tasks',
+  'notes',
+  'automations',
+  'settings',
+] as const;
+
+export type WorkspaceViewId = (typeof WORKSPACE_VIEW_IDS)[number];
+
+export const WORKSPACE_THEMES = ['dark', 'light'] as const;
+
+export type WorkspaceTheme = (typeof WORKSPACE_THEMES)[number];
+
+export const WORKSPACE_COLORS = [
+  '#7b6ee8',
+  '#348bd4',
+  '#2da77e',
+  '#d97757',
+  '#c6579a',
+  '#b68b32',
+] as const;
+
+export type WorkspaceColor = (typeof WORKSPACE_COLORS)[number];
+
+export interface WorkspaceInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly color: WorkspaceColor;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface WorkspacePreferences {
+  readonly activeView: WorkspaceViewId;
+  readonly theme: WorkspaceTheme;
+  readonly sidebarCollapsed: boolean;
+  readonly browserOpen: boolean;
+  readonly browserWidth: number;
+  readonly terminalOpen: boolean;
+  readonly terminalHeight: number;
+}
+
+export const DEFAULT_WORKSPACE_PREFERENCES: WorkspacePreferences = Object.freeze({
+  activeView: 'today',
+  theme: 'dark',
+  sidebarCollapsed: false,
+  browserOpen: true,
+  browserWidth: 430,
+  terminalOpen: true,
+  terminalHeight: 260,
+});
+
+export interface WorkspaceSnapshot {
+  readonly currentWorkspaceId: string;
+  readonly workspaces: readonly WorkspaceInfo[];
+  readonly preferences: WorkspacePreferences;
+}
+
+export interface WorkspaceCreateInput {
+  readonly name: string;
+  readonly color: WorkspaceColor;
+}
+
+export interface WorkspaceRenameInput {
+  readonly workspaceId: string;
+  readonly name: string;
+}
+
+export interface WorkspaceTargetInput {
+  readonly workspaceId: string;
+}
+
+export type WorkspacePreferencesPatch = Partial<WorkspacePreferences>;
+
+export interface WorkspacePreferencesInput {
+  readonly workspaceId: string;
+  readonly patch: WorkspacePreferencesPatch;
+}
+
 export const TERMINAL_SHELLS = ['default', 'powershell', 'cmd', 'wsl', 'bash', 'zsh'] as const;
 
 export type TerminalShell = (typeof TERMINAL_SHELLS)[number];
@@ -110,6 +199,14 @@ export interface WorkbenchApi {
     getStatus(): Promise<DatabaseStatus>;
     createBackup(): Promise<DatabaseBackupInfo>;
     listBackups(): Promise<DatabaseBackupInfo[]>;
+  };
+  workspace: {
+    getSnapshot(): Promise<WorkspaceSnapshot>;
+    create(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot>;
+    rename(input: WorkspaceRenameInput): Promise<WorkspaceSnapshot>;
+    activate(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+    archive(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+    updatePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
   };
   window: {
     minimize(): Promise<void>;

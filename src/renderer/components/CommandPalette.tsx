@@ -23,6 +23,8 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   const filteredCommands = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -33,11 +35,19 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
         .includes(normalizedQuery),
     );
   }, [commands, query]);
+  const effectiveSelectedIndex =
+    filteredCommands.length === 0 ? 0 : Math.min(selectedIndex, filteredCommands.length - 1);
 
   useEffect(() => {
     if (!open) return;
+    returnFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      returnFocusRef.current?.focus();
+      returnFocusRef.current = null;
+    };
   }, [open]);
 
   if (!open) return null;
@@ -63,23 +73,43 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
       }}
     >
       <section
+        ref={dialogRef}
         className="command-palette"
         role="dialog"
         aria-modal="true"
         aria-label="命令中心"
         onKeyDown={(event) => {
-          if (event.key === 'Escape') {
+          if (event.key === 'Tab') {
+            const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+              'input, button:not(:disabled), [tabindex]:not([tabindex="-1"])',
+            );
+            const first = focusable?.[0];
+            const last = focusable?.[focusable.length - 1];
+            if (first && last) {
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+              }
+            }
+          } else if (event.key === 'Escape') {
             event.preventDefault();
             closePalette();
           } else if (event.key === 'ArrowDown') {
             event.preventDefault();
-            setSelectedIndex((index) => Math.min(index + 1, filteredCommands.length - 1));
+            if (filteredCommands.length > 0) {
+              setSelectedIndex(Math.min(effectiveSelectedIndex + 1, filteredCommands.length - 1));
+            }
           } else if (event.key === 'ArrowUp') {
             event.preventDefault();
-            setSelectedIndex((index) => Math.max(index - 1, 0));
+            if (filteredCommands.length > 0) {
+              setSelectedIndex(Math.max(effectiveSelectedIndex - 1, 0));
+            }
           } else if (event.key === 'Enter') {
             event.preventDefault();
-            runCommand(filteredCommands[selectedIndex]);
+            runCommand(filteredCommands[effectiveSelectedIndex]);
           }
         }}
       >
@@ -98,7 +128,14 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
             }}
             placeholder="搜索页面、操作或设置…"
             autoComplete="off"
+            role="combobox"
+            aria-expanded="true"
             aria-controls="command-results"
+            aria-activedescendant={
+              filteredCommands[effectiveSelectedIndex]
+                ? `command-option-${filteredCommands[effectiveSelectedIndex].id}`
+                : undefined
+            }
           />
           <span className="key-hint">Esc</span>
         </div>
@@ -112,10 +149,11 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
                 <div className="command-result-group" key={command.id}>
                   {showGroup ? <p>{command.group}</p> : null}
                   <button
+                    id={`command-option-${command.id}`}
                     type="button"
                     role="option"
-                    aria-selected={selectedIndex === index}
-                    className={`command-result ${selectedIndex === index ? 'is-selected' : ''}`}
+                    aria-selected={effectiveSelectedIndex === index}
+                    className={`command-result ${effectiveSelectedIndex === index ? 'is-selected' : ''}`}
                     onMouseMove={() => setSelectedIndex(index)}
                     onClick={() => runCommand(command)}
                   >
