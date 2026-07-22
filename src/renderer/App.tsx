@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useCallback,
   useMemo,
   useRef,
   useState,
@@ -38,16 +39,21 @@ import {
   WORKSPACE_COLORS,
   type WorkspaceViewId,
 } from '../shared/contracts';
+import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { findCurrentWorkspace } from '../shared/workspace-domain';
 import { ActivityRail } from './components/ActivityRail';
 import { BrowserPanel } from './components/BrowserPanel';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { IconButton } from './components/IconButton';
+import { InboxPage } from './components/InboxPage';
+import { InboxUndoStack } from './components/InboxUndoStack';
+import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
 import { SectionPage } from './components/SectionPage';
 import { TerminalPanel } from './components/TerminalPanel';
 import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
+import { useInboxController } from './hooks/useInboxController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import type { ViewId } from './model';
 
@@ -79,13 +85,23 @@ export function App() {
   const workspaceController = useWorkspaceController();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [workspaceDialog, setWorkspaceDialog] = useState<WorkspaceDialogState | null>(null);
+  const [quickCaptureTarget, setQuickCaptureTarget] = useState<QuickCaptureTarget | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
-  const quickCaptureRef = useRef<HTMLInputElement>(null);
   const activeResizeFinishRef = useRef<(() => void) | null>(null);
   const snapshot = workspaceController.snapshot;
+  const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const activeWorkspace = snapshot ? findCurrentWorkspace(snapshot) : null;
+  const visibleUndoNotices = useMemo(
+    () =>
+      activeWorkspace
+        ? inboxController.undoNotices.filter(
+            ({ workspaceId }) => workspaceId === activeWorkspace.id,
+          )
+        : [],
+    [activeWorkspace, inboxController.undoNotices],
+  );
   const preferences = snapshot?.preferences ?? DEFAULT_WORKSPACE_PREFERENCES;
   const {
     activeView,
@@ -96,11 +112,25 @@ export function App() {
     terminalOpen,
     theme,
   } = preferences;
-  const overlayOpen = paletteOpen || workspaceDialog !== null;
+  const overlayOpen = paletteOpen || workspaceDialog !== null || quickCaptureTarget !== null;
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
   const updatePreferences = workspaceController.updatePreferences;
+  const openQuickCapture = useCallback(() => {
+    if (
+      !activeWorkspace ||
+      workspaceDialog !== null ||
+      workspaceController.pendingOperation !== null
+    ) {
+      return;
+    }
+    setPaletteOpen(false);
+    setQuickCaptureTarget(
+      (current) =>
+        current ?? { workspaceId: activeWorkspace.id, workspaceName: activeWorkspace.name },
+    );
+  }, [activeWorkspace, workspaceController.pendingOperation, workspaceDialog]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -113,6 +143,8 @@ export function App() {
       .then(setAppVersion)
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => window.workbench.inbox.onCaptureRequest(openQuickCapture), [openQuickCapture]);
 
   useEffect(() => {
     const updateViewport = () => setViewportHeight(window.innerHeight);
@@ -130,14 +162,28 @@ export function App() {
   useEffect(() => {
     if (!snapshot) return;
     const handleShortcut = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        workspaceDialog !== null ||
-        workspaceController.pendingOperation !== null
-      ) {
+      if (workspaceDialog !== null || workspaceController.pendingOperation !== null) {
         return;
       }
       const commandKey = event.ctrlKey || event.metaKey;
+      if (
+        isQuickCaptureShortcut({
+          type: 'keyDown',
+          key: event.key,
+          control: event.ctrlKey,
+          meta: event.metaKey,
+          alt: event.altKey,
+          shift: event.shiftKey,
+          repeat: event.repeat,
+          composing: event.isComposing,
+        })
+      ) {
+        event.preventDefault();
+        if (!quickCaptureTarget) openQuickCapture();
+        return;
+      }
+      if (event.defaultPrevented || event.isComposing) return;
+      if (quickCaptureTarget) return;
       if (commandKey && event.key.toLowerCase() === 'k' && !isTerminalTarget(event.target)) {
         event.preventDefault();
         setPaletteOpen((open) => !open);
@@ -160,10 +206,6 @@ export function App() {
       } else if (event.key.toLowerCase() === 'j' || event.code === 'Backquote') {
         event.preventDefault();
         updatePreferences({ terminalOpen: !terminalOpen });
-      } else if (event.key.toLowerCase() === 'n') {
-        event.preventDefault();
-        updatePreferences({ activeView: 'today' });
-        window.requestAnimationFrame(() => quickCaptureRef.current?.focus());
       } else if (event.key === ',') {
         event.preventDefault();
         updatePreferences({ activeView: 'settings' });
@@ -175,10 +217,12 @@ export function App() {
   }, [
     browserOpen,
     paletteOpen,
+    quickCaptureTarget,
     sidebarCollapsed,
     snapshot,
     terminalOpen,
     updatePreferences,
+    openQuickCapture,
     workspaceController.pendingOperation,
     workspaceDialog,
   ]);
@@ -209,8 +253,7 @@ export function App() {
         shortcut: 'Ctrl N',
         keywords: '新建 添加 任务 笔记',
         action: () => {
-          updatePreferences({ activeView: 'today' });
-          window.requestAnimationFrame(() => quickCaptureRef.current?.focus());
+          openQuickCapture();
         },
       },
       {
@@ -327,6 +370,7 @@ export function App() {
   }, [
     activeWorkspace,
     browserOpen,
+    openQuickCapture,
     snapshot,
     terminalOpen,
     theme,
@@ -499,7 +543,11 @@ export function App() {
       </header>
 
       <div className="workbench-shell">
-        <ActivityRail activeView={activeView} onSelect={setActiveView} />
+        <ActivityRail
+          activeView={activeView}
+          inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
+          onSelect={setActiveView}
+        />
         <div
           className={`sidebar-slot ${sidebarCollapsed ? 'is-collapsed' : ''}`}
           aria-hidden={sidebarCollapsed}
@@ -513,6 +561,7 @@ export function App() {
             pendingWorkspaceId={workspaceController.pendingWorkspaceId}
             saveError={workspaceController.saveError}
             saveStatus={workspaceController.saveStatus}
+            inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
             onRetrySave={workspaceController.retryPreferences}
             onSelectView={setActiveView}
             onSelectWorkspace={(workspaceId) => {
@@ -564,10 +613,31 @@ export function App() {
               <div className="page-scroll">
                 {activeView === 'today' ? (
                   <TodayDashboard
-                    quickCaptureRef={quickCaptureRef}
+                    key={snapshot.currentWorkspaceId}
+                    inboxStatus={inboxController.status}
+                    inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
+                    uncategorizedCount={
+                      inboxController.snapshot ? inboxController.counts.uncategorized : null
+                    }
+                    capturePending={inboxController.pendingCapture}
+                    onCapture={(content) =>
+                      inboxController.create(snapshot.currentWorkspaceId, content, 'uncategorized')
+                    }
                     onOpenInbox={() => setActiveView('inbox')}
                     onOpenTasks={() => setActiveView('tasks')}
                     onOpenNotes={() => setActiveView('notes')}
+                  />
+                ) : activeView === 'inbox' ? (
+                  <InboxPage
+                    entries={inboxController.entries}
+                    status={inboxController.status}
+                    loadError={inboxController.loadError}
+                    operationError={inboxController.operationError}
+                    pendingEntryIds={inboxController.pendingEntryIds}
+                    onRetry={inboxController.retry}
+                    onOpenCapture={openQuickCapture}
+                    onCategorize={inboxController.categorize}
+                    onArchive={inboxController.archive}
                   />
                 ) : (
                   <SectionPage
@@ -663,8 +733,14 @@ export function App() {
           <footer className="statusbar">
             <div>
               <span className="status-dot" />
-              <span role={workspaceController.operationError ? 'alert' : undefined}>
-                {workspaceController.operationError ?? '已就绪'}
+              <span
+                role={
+                  workspaceController.operationError || inboxController.operationError
+                    ? 'alert'
+                    : undefined
+                }
+              >
+                {workspaceController.operationError ?? inboxController.operationError ?? '已就绪'}
               </span>
             </div>
             <div className="statusbar__context">
@@ -704,6 +780,19 @@ export function App() {
           onArchive={workspaceController.archive}
         />
       ) : null}
+      {quickCaptureTarget ? (
+        <QuickCaptureDialog
+          target={quickCaptureTarget}
+          onClose={() => setQuickCaptureTarget(null)}
+          onSubmit={inboxController.create}
+        />
+      ) : null}
+      <InboxUndoStack
+        notices={visibleUndoNotices}
+        pendingTokens={inboxController.pendingUndoTokens}
+        onUndo={inboxController.undoArchive}
+        onDismiss={inboxController.dismissUndo}
+      />
     </div>
   );
 }

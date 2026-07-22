@@ -17,12 +17,17 @@ import {
   Sparkles,
   Target,
 } from 'lucide-react';
-import { useEffect, useMemo, useState, type FormEvent, type RefObject } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { usePersistentState } from '../hooks/usePersistentState';
+import { INBOX_CONTENT_MAX_LENGTH } from '../../shared/inbox-domain';
 import { IconButton } from './IconButton';
 
 interface TodayDashboardProps {
-  quickCaptureRef: RefObject<HTMLInputElement | null>;
+  inboxStatus: 'loading' | 'ready' | 'error';
+  inboxCount: number | null;
+  uncategorizedCount: number | null;
+  capturePending: boolean;
+  onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
   onOpenTasks: () => void;
   onOpenNotes: () => void;
@@ -94,7 +99,11 @@ function formatTimer(seconds: number) {
 }
 
 export function TodayDashboard({
-  quickCaptureRef,
+  inboxStatus,
+  inboxCount,
+  uncategorizedCount,
+  capturePending,
+  onCapture,
   onOpenInbox,
   onOpenTasks,
   onOpenNotes,
@@ -102,8 +111,11 @@ export function TodayDashboard({
   const [tasks, setTasks] = usePersistentState<Task[]>('daily.today.tasks', initialTasks);
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
   const [focusRunning, setFocusRunning] = useState(false);
   const [focusSeconds, setFocusSeconds] = useState(25 * 60);
+  const captureLength = Array.from(capture.trim()).length;
+  const captureTooLong = captureLength > INBOX_CONTENT_MAX_LENGTH;
 
   const remainingTasks = useMemo(() => tasks.filter((task) => !task.done).length, [tasks]);
 
@@ -115,23 +127,18 @@ export function TodayDashboard({
     return () => window.clearInterval(timer);
   }, [focusRunning, focusSeconds]);
 
-  const addCapture = (event: FormEvent) => {
+  const addCapture = async (event: FormEvent) => {
     event.preventDefault();
     const title = capture.trim();
-    if (!title) return;
-
-    setTasks((currentTasks) => [
-      ...currentTasks,
-      {
-        id: `captured-${Date.now()}`,
-        title,
-        project: '收件箱',
-        accent: '#8b7cf6',
-        done: false,
-      },
-    ]);
-    setRecentCapture(title);
-    setCapture('');
+    if (!title || capturePending || captureTooLong) return;
+    setCaptureError(null);
+    try {
+      await onCapture(title);
+      setRecentCapture(title);
+      setCapture('');
+    } catch (error) {
+      setCaptureError(error instanceof Error ? error.message : '快速记录失败，请重试。');
+    }
   };
 
   return (
@@ -152,31 +159,43 @@ export function TodayDashboard({
         </div>
       </header>
 
-      <form className="quick-capture" onSubmit={addCapture}>
+      <form className="quick-capture" onSubmit={(event) => void addCapture(event)}>
         <div className="quick-capture__icon">
           <Plus size={18} aria-hidden="true" />
         </div>
         <label htmlFor="quick-capture-input" className="sr-only">
-          快速添加任务或笔记
+          快速记录到收件箱
         </label>
         <input
-          ref={quickCaptureRef}
           id="quick-capture-input"
           value={capture}
           onChange={(event) => setCapture(event.target.value)}
-          placeholder="快速添加任务或笔记…"
+          placeholder="记录到收件箱…"
           autoComplete="off"
+          aria-invalid={captureTooLong}
         />
         <div className="quick-capture__actions">
-          <span className="key-hint">Ctrl N</span>
-          <button type="submit" disabled={!capture.trim()}>
-            添加
+          <span className={`key-hint${captureTooLong ? ' is-error' : ''}`}>
+            {captureTooLong ? `${captureLength} / ${INBOX_CONTENT_MAX_LENGTH}` : 'Ctrl N'}
+          </span>
+          <button type="submit" disabled={!capture.trim() || capturePending || captureTooLong}>
+            {capturePending ? '保存中…' : '添加'}
           </button>
         </div>
       </form>
+      {captureTooLong ? (
+        <div className="capture-confirmation is-error" role="alert">
+          记录内容最多 {INBOX_CONTENT_MAX_LENGTH} 个字符。
+        </div>
+      ) : null}
       {recentCapture ? (
         <div className="capture-confirmation" role="status">
           <Check size={14} aria-hidden="true" /> “{recentCapture}” 已加入收件箱
+        </div>
+      ) : null}
+      {captureError ? (
+        <div className="capture-confirmation is-error" role="alert">
+          {captureError}
         </div>
       ) : null}
 
@@ -204,10 +223,18 @@ export function TodayDashboard({
           <span className="metric-card__copy">
             <small>收件箱</small>
             <strong>
-              7 <em>项</em>
+              {inboxCount === null ? '—' : inboxCount} <em>{inboxCount === null ? '' : '项'}</em>
             </strong>
           </span>
-          <span className="metric-card__meta">2 项新内容</span>
+          <span className="metric-card__meta">
+            {inboxCount === null || uncategorizedCount === null
+              ? inboxStatus === 'error'
+                ? '暂时不可用'
+                : '正在同步…'
+              : uncategorizedCount > 0
+                ? `${uncategorizedCount} 项未分类`
+                : '已全部分类'}
+          </span>
           <ChevronRight size={16} aria-hidden="true" />
         </button>
         <button type="button" className="metric-card" onClick={onOpenNotes}>
@@ -272,11 +299,7 @@ export function TodayDashboard({
               </label>
             ))}
           </div>
-          <button
-            type="button"
-            className="add-row"
-            onClick={() => quickCaptureRef.current?.focus()}
-          >
+          <button type="button" className="add-row" onClick={onOpenTasks}>
             <Plus size={15} /> 添加任务
           </button>
         </section>

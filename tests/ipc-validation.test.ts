@@ -3,6 +3,10 @@ import {
   assertNoArguments,
   parseBoolean,
   parseBrowserBounds,
+  parseInboxCategorizeInput,
+  parseInboxCreateInput,
+  parseInboxTargetInput,
+  parseInboxUndoInput,
   parseSessionId,
   parseTerminalCreateOptions,
   parseTerminalSize,
@@ -14,6 +18,8 @@ import {
 import { WORKSPACE_COLORS } from '../src/shared/contracts';
 
 const WORKSPACE_ID = '123e4567-e89b-42d3-a456-426614174000';
+const ENTRY_ID = '223e4567-e89b-42d3-a456-426614174000';
+const UNDO_TOKEN = '323e4567-e89b-42d3-a456-426614174000';
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -140,6 +146,72 @@ describe('IPC validation', () => {
       parseWorkspacePreferencesInput({
         workspaceId: WORKSPACE_ID,
         patch: { theme: 'light', databasePath: '/tmp/escape' },
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts exact inbox capture and categorization inputs without rewriting content', () => {
+    expect(
+      parseInboxCreateInput({
+        workspaceId: WORKSPACE_ID,
+        content: '  ＡPI e\u0301 👩‍💻  ',
+        category: 'uncategorized',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      content: 'ＡPI e\u0301 👩‍💻',
+      category: 'uncategorized',
+    });
+    expect(
+      parseInboxCategorizeInput({
+        workspaceId: WORKSPACE_ID,
+        entryId: ENTRY_ID,
+        category: 'task',
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID, category: 'task' });
+  });
+
+  it('requires lowercase UUIDs and exact keys for inbox targets and undo tokens', () => {
+    expect(parseInboxTargetInput({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      entryId: ENTRY_ID,
+    });
+    expect(parseInboxUndoInput({ workspaceId: WORKSPACE_ID, undoToken: UNDO_TOKEN })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      undoToken: UNDO_TOKEN,
+    });
+    expect(() =>
+      parseInboxTargetInput({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID, archived: true }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseInboxUndoInput({ workspaceId: WORKSPACE_ID, undoToken: UNDO_TOKEN.toUpperCase() }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseInboxCategorizeInput({
+        workspaceId: WORKSPACE_ID,
+        entryId: ENTRY_ID,
+        category: 'idea',
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('rejects unsafe inbox content and renderer-owned persistence fields', () => {
+    for (const content of ['', '  ', 'line one\nline two', '\u0000', 'x'.repeat(501)]) {
+      expect(() =>
+        parseInboxCreateInput({
+          workspaceId: WORKSPACE_ID,
+          content,
+          category: 'note',
+        }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      parseInboxCreateInput({
+        workspaceId: WORKSPACE_ID,
+        content: '不能伪造字段',
+        category: 'note',
+        id: ENTRY_ID,
+        archivedAt: new Date().toISOString(),
       }),
     ).toThrow(TypeError);
   });

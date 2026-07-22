@@ -5,6 +5,12 @@ import {
   type BrowserState,
   type DatabaseBackupInfo,
   type DatabaseStatus,
+  type InboxArchiveResult,
+  type InboxCategorizeInput,
+  type InboxCreateInput,
+  type InboxSnapshot,
+  type InboxTargetInput,
+  type InboxUndoInput,
   type TerminalCreateOptions,
   type TerminalDataEvent,
   type TerminalExitEvent,
@@ -55,6 +61,19 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.archive, input),
     updatePreferences: (input: WorkspacePreferencesInput) =>
       invoke<WorkspacePreferences>(IPC_CHANNELS.workspace.updatePreferences, input),
+  }),
+  inbox: Object.freeze({
+    getSnapshot: (input: WorkspaceTargetInput) =>
+      invoke<InboxSnapshot>(IPC_CHANNELS.inbox.getSnapshot, input),
+    create: (input: InboxCreateInput) => invoke<InboxSnapshot>(IPC_CHANNELS.inbox.create, input),
+    categorize: (input: InboxCategorizeInput) =>
+      invoke<InboxSnapshot>(IPC_CHANNELS.inbox.categorize, input),
+    archive: (input: InboxTargetInput) =>
+      invoke<InboxArchiveResult>(IPC_CHANNELS.inbox.archive, input),
+    undoArchive: (input: InboxUndoInput) =>
+      invoke<InboxSnapshot>(IPC_CHANNELS.inbox.undoArchive, input),
+    onCaptureRequest: (listener: () => void) =>
+      subscribe(IPC_CHANNELS.inbox.captureRequested, listener),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),

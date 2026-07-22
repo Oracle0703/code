@@ -3,6 +3,12 @@ import {
   IPC_CHANNELS,
   type DatabaseBackupInfo,
   type DatabaseStatus,
+  type InboxArchiveResult,
+  type InboxCategorizeInput,
+  type InboxCreateInput,
+  type InboxSnapshot,
+  type InboxTargetInput,
+  type InboxUndoInput,
   type WorkspaceCreateInput,
   type WorkspacePreferences,
   type WorkspacePreferencesInput,
@@ -18,6 +24,10 @@ import {
   parseBoolean,
   parseBrowserBounds,
   parseBrowserUrl,
+  parseInboxCategorizeInput,
+  parseInboxCreateInput,
+  parseInboxTargetInput,
+  parseInboxUndoInput,
   parseSessionId,
   parseTerminalCreateOptions,
   parseTerminalData,
@@ -44,6 +54,13 @@ interface IpcDependencies {
     archiveWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
     updateWorkspacePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
   };
+  inbox: {
+    getInboxSnapshot(input: WorkspaceTargetInput): Promise<InboxSnapshot>;
+    createInboxEntry(input: InboxCreateInput): Promise<InboxSnapshot>;
+    categorizeInboxEntry(input: InboxCategorizeInput): Promise<InboxSnapshot>;
+    archiveInboxEntry(input: InboxTargetInput): Promise<InboxArchiveResult>;
+    undoInboxArchive(input: InboxUndoInput): Promise<InboxSnapshot>;
+  };
   terminal: TerminalManager;
   trustedRendererLocation: TrustedRendererLocation;
 }
@@ -55,6 +72,7 @@ export function registerIpcHandlers({
   browser,
   database,
   workspace,
+  inbox,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -115,6 +133,27 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.workspace.updatePreferences, (_event, input, ...args) => {
     assertNoArguments(args, 'Updating workspace preferences');
     return workspace.updateWorkspacePreferences(parseWorkspacePreferencesInput(input));
+  });
+
+  register(IPC_CHANNELS.inbox.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the inbox snapshot');
+    return inbox.getInboxSnapshot(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.inbox.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating an inbox entry');
+    return inbox.createInboxEntry(parseInboxCreateInput(input));
+  });
+  register(IPC_CHANNELS.inbox.categorize, (_event, input, ...args) => {
+    assertNoArguments(args, 'Categorizing an inbox entry');
+    return inbox.categorizeInboxEntry(parseInboxCategorizeInput(input));
+  });
+  register(IPC_CHANNELS.inbox.archive, (_event, input, ...args) => {
+    assertNoArguments(args, 'Archiving an inbox entry');
+    return inbox.archiveInboxEntry(parseInboxTargetInput(input));
+  });
+  register(IPC_CHANNELS.inbox.undoArchive, (_event, input, ...args) => {
+    assertNoArguments(args, 'Undoing an inbox archive');
+    return inbox.undoInboxArchive(parseInboxUndoInput(input));
   });
 
   register(IPC_CHANNELS.window.minimize, () => {

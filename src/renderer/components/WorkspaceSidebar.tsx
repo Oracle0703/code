@@ -26,6 +26,7 @@ interface WorkspaceSidebarProps {
   pendingWorkspaceId: string | null;
   saveError: string | null;
   saveStatus: WorkspaceSaveStatus;
+  inboxCount: number | null;
   onRetrySave: () => void;
   onSelectView: (view: ViewId) => void;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -41,7 +42,7 @@ const sidebarLinks: Array<{
   count?: number;
 }> = [
   { id: 'today', label: '今天', icon: Clock3 },
-  { id: 'inbox', label: '稍后处理', icon: Star, count: 3 },
+  { id: 'inbox', label: '稍后处理', icon: Star },
   { id: 'notes', label: '所有笔记', icon: FileText },
 ];
 
@@ -60,6 +61,7 @@ export function WorkspaceSidebar({
   pendingWorkspaceId,
   saveError,
   saveStatus,
+  inboxCount,
   onRetrySave,
   onSelectView,
   onSelectWorkspace,
@@ -194,19 +196,24 @@ export function WorkspaceSidebar({
 
       <div className="sidebar-scroll">
         <div className="sidebar-section sidebar-section--compact">
-          {sidebarLinks.map(({ id, label, icon: Icon, count }) => (
-            <button
-              type="button"
-              className={`sidebar-link ${activeView === id ? 'is-active' : ''}`}
-              key={label}
-              onClick={() => onSelectView(id)}
-              aria-current={activeView === id ? 'page' : undefined}
-            >
-              <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
-              <span>{label}</span>
-              {count ? <small>{count}</small> : null}
-            </button>
-          ))}
+          {sidebarLinks.map(({ id, label, icon: Icon, count }) => {
+            const effectiveCount = id === 'inbox' ? inboxCount : count;
+            return (
+              <button
+                type="button"
+                className={`sidebar-link ${activeView === id ? 'is-active' : ''}`}
+                key={label}
+                onClick={() => onSelectView(id)}
+                aria-current={activeView === id ? 'page' : undefined}
+              >
+                <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+                <span>{label}</span>
+                {effectiveCount ? (
+                  <small>{effectiveCount > 999 ? '999+' : effectiveCount}</small>
+                ) : null}
+              </button>
+            );
+          })}
         </div>
 
         <div className="sidebar-section">

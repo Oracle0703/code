@@ -1,6 +1,10 @@
 import {
   TERMINAL_SHELLS,
   type BrowserBounds,
+  type InboxCategorizeInput,
+  type InboxCreateInput,
+  type InboxTargetInput,
+  type InboxUndoInput,
   type TerminalCreateOptions,
   type TerminalShell,
   type WorkspaceCreateInput,
@@ -8,6 +12,12 @@ import {
   type WorkspaceRenameInput,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  normalizeInboxCategory,
+  normalizeInboxContent,
+  normalizeInboxId,
+  normalizeInboxUndoToken,
+} from '../../shared/inbox-domain';
 import {
   normalizeWorkspaceColor,
   normalizeWorkspaceId,
@@ -131,6 +141,52 @@ export function parseWorkspacePreferencesInput(value: unknown): WorkspacePrefere
   return {
     workspaceId: normalizeWorkspaceId(value.workspaceId),
     patch: normalizeWorkspacePreferencesPatch(value.patch),
+  };
+}
+
+export function parseInboxCreateInput(value: unknown): InboxCreateInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Inbox creation input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'content', 'category']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    content: normalizeInboxContent(value.content),
+    category: normalizeInboxCategory(value.category),
+  };
+}
+
+export function parseInboxTargetInput(value: unknown): InboxTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Inbox target input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'entryId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    entryId: normalizeInboxId(value.entryId),
+  };
+}
+
+export function parseInboxCategorizeInput(value: unknown): InboxCategorizeInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Inbox categorization input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'entryId', 'category']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    entryId: normalizeInboxId(value.entryId),
+    category: normalizeInboxCategory(value.category),
+  };
+}
+
+export function parseInboxUndoInput(value: unknown): InboxUndoInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Inbox undo input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'undoToken']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    undoToken: normalizeInboxUndoToken(value.undoToken),
   };
 }
 
