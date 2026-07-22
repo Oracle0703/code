@@ -44,7 +44,9 @@ jobs:
 
   windows-package:
     name: Windows package smoke test
-    runs-on: windows-latest
+    # node-gyp bundled by Electron Forge does not yet recognize Visual Studio 2026.
+    # Pin VS 2022 instead of inheriting the moving windows-latest image.
+    runs-on: windows-2022
     timeout-minutes: 30
 
     steps:
