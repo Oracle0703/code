@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Audit production dependencies
+        run: npm run audit:prod
+
+      - name: Package Electron app
+        run: npm run package
+
+  windows-package:
+    name: Windows package smoke test
+    # node-gyp bundled by Electron Forge does not yet recognize Visual Studio 2026.
+    # Pin VS 2022 instead of inheriting the moving windows-latest image.
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Use Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows installer
+        run: npm run make
+
+      - name: Verify unpacked node-pty binaries
+        shell: pwsh
+        run: |
+          $nativeFiles = Get-ChildItem -Path out -Recurse -File |
+            Where-Object { $_.FullName -match 'node-pty' -and $_.Extension -in '.node', '.dll', '.exe' }
+          if (-not $nativeFiles) {
+            throw 'Packaged output does not contain unpacked node-pty native files.'
+          }
+          $nativeFiles | Select-Object -ExpandProperty FullName
+
+      - name: Smoke-test packaged terminal
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -Path out -Recurse -File -Filter daily-workbench.exe |
+            Where-Object { $_.FullName -match 'win32-x64' } |
+            Select-Object -First 1
+          if (-not $executable) {
+            throw 'Could not find the packaged Daily Workbench executable.'
+          }
+          $asarPath = Join-Path $executable.Directory.FullName 'resources\app.asar'
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          $process = Start-Process `
+            -FilePath $executable.FullName `
+            -ArgumentList @('scripts/smoke-packaged-terminal.cjs', "`"$asarPath`"") `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."
+          }
