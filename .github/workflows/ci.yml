@@ -86,7 +86,12 @@ jobs:
           }
           $asarPath = Join-Path $executable.Directory.FullName 'resources\app.asar'
           $env:ELECTRON_RUN_AS_NODE = '1'
-          & $executable.FullName scripts/smoke-packaged-terminal.cjs $asarPath
-          if ($LASTEXITCODE -ne 0) {
-            throw "Packaged terminal smoke test failed with exit code $LASTEXITCODE."
+          $process = Start-Process `
+            -FilePath $executable.FullName `
+            -ArgumentList @('scripts/smoke-packaged-terminal.cjs', "`"$asarPath`"") `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."
           }
