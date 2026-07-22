@@ -4,7 +4,14 @@ import { getCurrentFuseWire } from '@electron/fuses';
 
 const executableArgument = process.argv[2];
 if (!executableArgument) {
-  throw new Error('Usage: node scripts/verify-packaged-app.mjs <packaged-executable>');
+  throw new Error(
+    'Usage: node scripts/verify-packaged-app.mjs <packaged-executable> [max-asar-mib]',
+  );
+}
+
+const maxAsarMiB = Number(process.argv[3] ?? '70');
+if (!Number.isFinite(maxAsarMiB) || maxAsarMiB <= 0) {
+  throw new Error(`Invalid app.asar size limit: ${String(process.argv[3])}`);
 }
 
 const executablePath = path.resolve(executableArgument);
@@ -52,15 +59,15 @@ for (const [index, [name, expectedState]] of expectedFuses.entries()) {
   }
 }
 
-const maxAsarBytes = 70 * 1024 * 1024;
+const maxAsarBytes = maxAsarMiB * 1024 * 1024;
 if (asarStats.size > maxAsarBytes) {
   throw new Error(
-    `app.asar is ${(asarStats.size / 1024 / 1024).toFixed(1)} MiB, above the 70 MiB baseline limit.`,
+    `app.asar is ${(asarStats.size / 1024 / 1024).toFixed(1)} MiB, above the ${maxAsarMiB} MiB baseline limit.`,
   );
 }
 
 console.log(
-  `Packaged app verified: ${expectedFuses.length} explicit fuse states, app.asar ${(asarStats.size / 1024 / 1024).toFixed(1)} MiB.`,
+  `Packaged app verified: ${expectedFuses.length} explicit fuse states, app.asar ${(asarStats.size / 1024 / 1024).toFixed(1)} MiB (limit ${maxAsarMiB} MiB).`,
 );
 
 function getResourcesPath(executable) {

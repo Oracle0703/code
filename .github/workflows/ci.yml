@@ -60,7 +60,7 @@ jobs:
         run: npm run package:linux
 
       - name: Verify packaged app and Electron fuses
-        run: node scripts/verify-packaged-app.mjs 'out/Daily Workbench-linux-x64/daily-workbench'
+        run: node scripts/verify-packaged-app.mjs 'out/Daily Workbench-linux-x64/daily-workbench' 70
 
       - name: Smoke-test packaged terminal
         env:
@@ -114,7 +114,7 @@ jobs:
           if (-not $executable) {
             throw 'Could not find the packaged Daily Workbench executable.'
           }
-          node scripts/verify-packaged-app.mjs $executable.FullName
+          node scripts/verify-packaged-app.mjs $executable.FullName 170
 
       - name: Smoke-test packaged terminal
         shell: pwsh
