@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, type WebContents } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { IPC_CHANNELS } from '../shared/contracts';
+import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { BrowserController } from './browser/browser-controller';
 import { DatabaseError, DatabaseService } from './database';
 import { registerIpcHandlers } from './ipc/register-handlers';
@@ -66,9 +67,33 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   });
   mainWindow = window;
 
-  const browser = new BrowserController(window, (state) => {
-    sendToRenderer(IPC_CHANNELS.browser.stateChanged, state);
+  window.webContents.on('before-input-event', (event, input) => {
+    if (
+      isQuickCaptureShortcut({
+        type: input.type,
+        key: input.key,
+        control: input.control,
+        meta: input.meta,
+        alt: input.alt,
+        shift: input.shift,
+        repeat: input.isAutoRepeat,
+        composing: input.isComposing,
+      })
+    ) {
+      event.preventDefault();
+      sendToRenderer(IPC_CHANNELS.inbox.captureRequested, undefined);
+    }
   });
+
+  const browser = new BrowserController(
+    window,
+    (state) => {
+      sendToRenderer(IPC_CHANNELS.browser.stateChanged, state);
+    },
+    () => {
+      sendToRenderer(IPC_CHANNELS.inbox.captureRequested, undefined);
+    },
+  );
   const terminal = new TerminalManager({
     data: (event) => sendToRenderer(IPC_CHANNELS.terminal.data, event),
     exit: (event) => sendToRenderer(IPC_CHANNELS.terminal.exit, event),
@@ -78,6 +103,7 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     browser,
     database,
     workspace: database,
+    inbox: database,
     terminal,
     trustedRendererLocation,
   });

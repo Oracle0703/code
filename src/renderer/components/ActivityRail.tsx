@@ -13,6 +13,7 @@ import { IconButton } from './IconButton';
 
 interface ActivityRailProps {
   activeView: ViewId;
+  inboxCount: number | null;
   onSelect: (view: ViewId) => void;
 }
 
@@ -25,13 +26,13 @@ interface RailItem {
 
 const primaryItems: RailItem[] = [
   { id: 'today', label: '今日', icon: LayoutDashboard },
-  { id: 'inbox', label: '收件箱', icon: Inbox, badge: 7 },
+  { id: 'inbox', label: '收件箱', icon: Inbox },
   { id: 'tasks', label: '任务', icon: CheckSquare2 },
   { id: 'notes', label: '笔记', icon: NotebookPen },
   { id: 'automations', label: '自动化', icon: Bot },
 ];
 
-export function ActivityRail({ activeView, onSelect }: ActivityRailProps) {
+export function ActivityRail({ activeView, inboxCount, onSelect }: ActivityRailProps) {
   return (
     <nav className="activity-rail" aria-label="主导航">
       <div className="activity-rail__brand" aria-label="Daily Workbench">
@@ -39,20 +40,27 @@ export function ActivityRail({ activeView, onSelect }: ActivityRailProps) {
       </div>
 
       <div className="activity-rail__items">
-        {primaryItems.map(({ id, label, icon: Icon, badge }) => (
-          <div className="activity-rail__item" key={id}>
-            <IconButton
-              label={label}
-              active={activeView === id}
-              tooltipSide="right"
-              onClick={() => onSelect(id)}
-              aria-current={activeView === id ? 'page' : undefined}
-            >
-              <Icon size={19} strokeWidth={1.8} aria-hidden="true" />
-            </IconButton>
-            {badge ? <span className="activity-rail__badge">{badge}</span> : null}
-          </div>
-        ))}
+        {primaryItems.map(({ id, label, icon: Icon, badge }) => {
+          const effectiveBadge = id === 'inbox' ? inboxCount : badge;
+          return (
+            <div className="activity-rail__item" key={id}>
+              <IconButton
+                label={label}
+                active={activeView === id}
+                tooltipSide="right"
+                onClick={() => onSelect(id)}
+                aria-current={activeView === id ? 'page' : undefined}
+              >
+                <Icon size={19} strokeWidth={1.8} aria-hidden="true" />
+              </IconButton>
+              {effectiveBadge ? (
+                <span className="activity-rail__badge">
+                  {effectiveBadge > 99 ? '99+' : effectiveBadge}
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
 
       <div className="activity-rail__footer">

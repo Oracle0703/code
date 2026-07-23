@@ -1,12 +1,10 @@
 import {
   Bot,
-  CheckCircle2,
   CheckSquare2,
   ChevronRight,
   Clock3,
   FileText,
   Globe2,
-  Inbox,
   MoreHorizontal,
   NotebookPen,
   Plus,
@@ -21,43 +19,20 @@ import type { ViewId } from '../model';
 import { IconButton } from './IconButton';
 
 interface SectionPageProps {
-  view: Exclude<ViewId, 'today'>;
+  view: Exclude<ViewId, 'today' | 'inbox'>;
   onOpenBrowser: () => void;
   onOpenTerminal: () => void;
 }
 
 const pageMeta: Record<
-  Exclude<ViewId, 'today'>,
+  Exclude<ViewId, 'today' | 'inbox'>,
   { title: string; description: string; icon: LucideIcon }
 > = {
-  inbox: { title: '收件箱', description: '集中处理随手记录、链接和待分类事项。', icon: Inbox },
   tasks: { title: '任务', description: '按状态推进你的所有项目。', icon: CheckSquare2 },
   notes: { title: '笔记', description: '把想法、资料与项目上下文放在一起。', icon: NotebookPen },
   automations: { title: '自动化', description: '让重复事务在后台按计划完成。', icon: Bot },
   settings: { title: '设置', description: '调整工作台、数据与工具偏好。', icon: Settings2 },
 };
-
-const inboxEntries = [
-  {
-    title: '比较三种 Wiki 试点方案',
-    meta: '任务 · 12 分钟前',
-    icon: CheckSquare2,
-    color: '#8b7cf6',
-  },
-  {
-    title: 'Electron WebContentsView 安全清单',
-    meta: '链接 · 今天 14:08',
-    icon: Globe2,
-    color: '#4ca5ff',
-  },
-  {
-    title: '下个版本可以加入全局快捷记录',
-    meta: '笔记 · 今天 11:34',
-    icon: FileText,
-    color: '#38c79a',
-  },
-  { title: '周五前检查服务器磁盘空间', meta: '任务 · 昨天', icon: CheckSquare2, color: '#f3a956' },
-];
 
 const taskColumns = [
   {
@@ -136,41 +111,6 @@ export function SectionPage({ view, onOpenBrowser, onOpenTerminal }: SectionPage
           </button>
         ) : null}
       </header>
-
-      {view === 'inbox' ? (
-        <section className="inbox-view">
-          <div className="page-toolbar">
-            <label className="page-search">
-              <Search size={15} />
-              <span className="sr-only">搜索收件箱</span>
-              <input placeholder="搜索收件箱" />
-            </label>
-            <button type="button" className="secondary-button">
-              <SlidersHorizontal size={14} /> 筛选
-            </button>
-          </div>
-          <div className="inbox-list">
-            {inboxEntries.map(({ title, meta: itemMeta, icon: Icon, color }) => (
-              <button type="button" className="inbox-entry" key={title}>
-                <span
-                  className="inbox-entry__icon"
-                  style={{ color, backgroundColor: `${color}18` }}
-                >
-                  <Icon size={16} />
-                </span>
-                <span>
-                  <strong>{title}</strong>
-                  <small>{itemMeta}</small>
-                </span>
-                <ChevronRight size={15} />
-              </button>
-            ))}
-          </div>
-          <div className="inbox-zero">
-            <CheckCircle2 size={15} /> 处理完这些内容，就可以清空收件箱。
-          </div>
-        </section>
-      ) : null}
 
       {view === 'tasks' ? (
         <section className="board-view">

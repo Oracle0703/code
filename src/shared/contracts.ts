@@ -21,6 +21,14 @@ export const IPC_CHANNELS = {
     archive: 'workspace:archive',
     updatePreferences: 'workspace:update-preferences',
   },
+  inbox: {
+    getSnapshot: 'inbox:get-snapshot',
+    create: 'inbox:create',
+    categorize: 'inbox:categorize',
+    archive: 'inbox:archive',
+    undoArchive: 'inbox:undo-archive',
+    captureRequested: 'inbox:capture-requested',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -163,6 +171,49 @@ export interface WorkspacePreferencesInput {
   readonly patch: WorkspacePreferencesPatch;
 }
 
+export const INBOX_CATEGORIES = ['uncategorized', 'task', 'note', 'link'] as const;
+
+export type InboxCategory = (typeof INBOX_CATEGORIES)[number];
+
+export interface InboxEntry {
+  readonly id: string;
+  readonly content: string;
+  readonly category: InboxCategory;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface InboxSnapshot {
+  readonly workspaceId: string;
+  readonly entries: readonly InboxEntry[];
+}
+
+export interface InboxCreateInput {
+  readonly workspaceId: string;
+  readonly content: string;
+  readonly category: InboxCategory;
+}
+
+export interface InboxTargetInput {
+  readonly workspaceId: string;
+  readonly entryId: string;
+}
+
+export interface InboxCategorizeInput extends InboxTargetInput {
+  readonly category: InboxCategory;
+}
+
+export interface InboxArchiveResult {
+  readonly snapshot: InboxSnapshot;
+  readonly undoToken: string;
+  readonly undoExpiresAt: string;
+}
+
+export interface InboxUndoInput {
+  readonly workspaceId: string;
+  readonly undoToken: string;
+}
+
 export const TERMINAL_SHELLS = ['default', 'powershell', 'cmd', 'wsl', 'bash', 'zsh'] as const;
 
 export type TerminalShell = (typeof TERMINAL_SHELLS)[number];
@@ -207,6 +258,14 @@ export interface WorkbenchApi {
     activate(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
     archive(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
     updatePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
+  };
+  inbox: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<InboxSnapshot>;
+    create(input: InboxCreateInput): Promise<InboxSnapshot>;
+    categorize(input: InboxCategorizeInput): Promise<InboxSnapshot>;
+    archive(input: InboxTargetInput): Promise<InboxArchiveResult>;
+    undoArchive(input: InboxUndoInput): Promise<InboxSnapshot>;
+    onCaptureRequest(listener: () => void): Unsubscribe;
   };
   window: {
     minimize(): Promise<void>;

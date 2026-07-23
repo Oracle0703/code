@@ -234,28 +234,59 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'SQLITE_DETACH',
     'database_foundation',
     'workspaces',
+    'inbox',
     'schema_migrations',
     'CREATE TABLE app_metadata',
     'CREATE TABLE workspaces',
     'CREATE TABLE workspace_preferences',
     'CREATE TABLE workspace_app_state',
+    'CREATE TABLE inbox_entries',
     'workspace:get-snapshot',
     'workspace:update-preferences',
+    'inbox:get-snapshot',
+    'inbox:create',
+    'inbox:categorize',
+    'inbox:archive',
+    'inbox:undo-archive',
+    'inbox:capture-requested',
+    'before-input-event',
+    'isComposing',
     'current workspace must be switched before archive',
+    'inbox entry requires an active workspace',
+    'archived workspace inbox is immutable',
   ]) {
     assert.ok(
       mainBundle.includes(requiredToken),
       `Packaged main bundle does not contain the database runtime token ${requiredToken}.`,
     );
   }
+  for (const shortcutToken of ['before-input-event', 'isComposing']) {
+    assert.ok(
+      countOccurrences(mainBundle, shortcutToken) >= 2,
+      `Packaged main bundle does not contain both quick-capture interception paths for ${shortcutToken}.`,
+    );
+  }
 
   const preloadBundle = await readFile(path.join(asarPath, '.vite', 'build', 'preload.js'), 'utf8');
-  for (const requiredToken of ['workspace:get-snapshot', 'workspace:update-preferences']) {
+  for (const requiredToken of [
+    'workspace:get-snapshot',
+    'workspace:update-preferences',
+    'inbox:get-snapshot',
+    'inbox:create',
+    'inbox:categorize',
+    'inbox:archive',
+    'inbox:undo-archive',
+    'inbox:capture-requested',
+  ]) {
     assert.ok(
       preloadBundle.includes(requiredToken),
       `Packaged preload bundle does not contain the workspace IPC token ${requiredToken}.`,
     );
   }
+}
+
+function countOccurrences(value, token) {
+  return value.split(token).length - 1;
 }
 
 async function removeSmokeDirectory(smokeDirectory) {

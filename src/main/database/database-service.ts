@@ -4,6 +4,12 @@ import { resolve } from 'node:path';
 import type {
   DatabaseBackupInfo,
   DatabaseStatus,
+  InboxArchiveResult,
+  InboxCategorizeInput,
+  InboxCreateInput,
+  InboxSnapshot,
+  InboxTargetInput,
+  InboxUndoInput,
   WorkspaceCreateInput,
   WorkspacePreferences,
   WorkspacePreferencesInput,
@@ -11,6 +17,7 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTargetInput,
 } from '../../shared/contracts';
+import { InboxService } from '../inbox';
 import { WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
 import { DEFAULT_MIGRATIONS } from './default-migrations';
@@ -72,6 +79,9 @@ export interface DatabaseServiceOptions {
   readonly now?: () => Date;
   readonly idFactory?: () => string;
   readonly workspaceIdFactory?: () => string;
+  readonly inboxIdFactory?: () => string;
+  readonly inboxUndoTokenFactory?: () => string;
+  readonly inboxMonotonicNowMs?: () => number;
 }
 
 type ServiceState = 'closed' | 'opening' | 'open' | 'closing' | 'poisoned';
@@ -83,6 +93,7 @@ export class DatabaseService {
   readonly #now: () => Date;
   readonly #idFactory: () => string;
   readonly #workspaceService: WorkspaceService;
+  readonly #inboxService: InboxService;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
   #backupManager: BackupManager | undefined;
@@ -100,6 +111,9 @@ export class DatabaseService {
     now = () => new Date(),
     idFactory = randomUUID,
     workspaceIdFactory = randomUUID,
+    inboxIdFactory = randomUUID,
+    inboxUndoTokenFactory = randomUUID,
+    inboxMonotonicNowMs,
   }: DatabaseServiceOptions) {
     this.#paths = resolveDatabasePaths(dataDirectory, databaseFileName);
     this.#adapterFactory = adapterFactory;
@@ -110,6 +124,14 @@ export class DatabaseService {
       execute: (operation) => this.#enqueue((database) => operation(database)),
       now,
       idFactory: workspaceIdFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#inboxService = new InboxService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      idFactory: inboxIdFactory,
+      undoTokenFactory: inboxUndoTokenFactory,
+      monotonicNowMs: inboxMonotonicNowMs,
       onFatalTransaction: (error) => this.#markPoisoned(error),
     });
   }
@@ -131,6 +153,7 @@ export class DatabaseService {
       );
     }
 
+    this.#inboxService.clearUndoTokens();
     this.#fatalOperationError = undefined;
     this.#state = 'opening';
     this.#openPromise = this.#initialize();
@@ -145,6 +168,7 @@ export class DatabaseService {
       this.#backupManager = undefined;
       this.#initialization = undefined;
       this.#fatalOperationError = undefined;
+      this.#inboxService.clearUndoTokens();
       this.#state = 'closed';
       if (error instanceof DatabaseError) {
         throw error;
@@ -174,6 +198,7 @@ export class DatabaseService {
     this.#state = 'closing';
     this.#closePromise = (async () => {
       await this.#operationTail;
+      this.#inboxService.clearUndoTokens();
       const database = this.#database;
       let closeError: unknown;
       if (database?.isOpen) {
@@ -264,6 +289,26 @@ export class DatabaseService {
     return this.#workspaceService.updatePreferences(input);
   }
 
+  getInboxSnapshot(input: WorkspaceTargetInput): Promise<InboxSnapshot> {
+    return this.#inboxService.getSnapshot(input);
+  }
+
+  createInboxEntry(input: InboxCreateInput): Promise<InboxSnapshot> {
+    return this.#inboxService.create(input);
+  }
+
+  categorizeInboxEntry(input: InboxCategorizeInput): Promise<InboxSnapshot> {
+    return this.#inboxService.categorize(input);
+  }
+
+  archiveInboxEntry(input: InboxTargetInput): Promise<InboxArchiveResult> {
+    return this.#inboxService.archive(input);
+  }
+
+  undoInboxArchive(input: InboxUndoInput): Promise<InboxSnapshot> {
+    return this.#inboxService.undoArchive(input);
+  }
+
   async #initialize(): Promise<DatabaseInitializationResult> {
     await prepareDatabaseDirectories(this.#paths);
     const existed = await databaseFileExists(this.#paths.databasePath);
@@ -300,6 +345,7 @@ export class DatabaseService {
       try {
         new MetadataRepository(database).initializeWithinTransaction(openedAt, this.#idFactory());
         this.#workspaceService.initializeWithinTransaction(database, openedAt);
+        this.#inboxService.validateSnapshot(database);
         health = this.#readHealth(database);
         database.exec('COMMIT');
       } catch (error) {
@@ -373,6 +419,9 @@ export class DatabaseService {
     }
     if (expectedVersion >= 2) {
       this.#workspaceService.validateSnapshot(database);
+    }
+    if (expectedVersion >= 3) {
+      this.#inboxService.validateSnapshot(database);
     }
   }
 

@@ -6,9 +6,11 @@ import {
   WebContentsView,
 } from 'electron';
 import type { BrowserBounds, BrowserState } from '../../shared/contracts';
+import { isQuickCaptureShortcut } from '../../shared/quick-capture-shortcut';
 import { isAllowedBrowserUrl, normalizeBrowserUrl } from '../security/browser-url';
 
 type StateListener = (state: BrowserState) => void;
+type QuickCaptureListener = () => void;
 
 const EMPTY_STATE: BrowserState = {
   url: 'https://www.google.com/',
@@ -48,6 +50,7 @@ export class BrowserController {
   public constructor(
     private readonly parentWindow: BrowserWindow,
     private readonly onStateChange: StateListener,
+    private readonly onQuickCapture: QuickCaptureListener = () => undefined,
   ) {
     this.view = new WebContentsView({
       webPreferences: {
@@ -187,6 +190,24 @@ export class BrowserController {
     contents.on('will-redirect', (event, url) => {
       if (!isAllowedBrowserUrl(url)) {
         event.preventDefault();
+      }
+    });
+
+    contents.on('before-input-event', (event, input) => {
+      if (
+        isQuickCaptureShortcut({
+          type: input.type,
+          key: input.key,
+          control: input.control,
+          meta: input.meta,
+          alt: input.alt,
+          shift: input.shift,
+          repeat: input.isAutoRepeat,
+          composing: input.isComposing,
+        })
+      ) {
+        event.preventDefault();
+        this.onQuickCapture();
       }
     });
   }
