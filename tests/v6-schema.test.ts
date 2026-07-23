@@ -18,6 +18,7 @@ const TAB_ID_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const BOOKMARK_ID = '33333333-3333-4333-8333-333333333333';
 const CREATED_AT = '2026-07-22T08:00:00.000Z';
 const UPDATED_AT = '2026-07-22T08:01:00.000Z';
+const V6_MIGRATIONS = DEFAULT_MIGRATIONS.slice(0, 6);
 
 afterEach(async () => {
   await Promise.all(
@@ -32,11 +33,11 @@ afterEach(async () => {
 describe('v6 browser persistence schema', () => {
   it('registers v6 as the contiguous browser tabs and bookmarks migration', async () => {
     const database = await createDatabase();
-    expect(new MigrationRunner(DEFAULT_MIGRATIONS).apply(database)).toMatchObject({
+    expect(new MigrationRunner(V6_MIGRATIONS).apply(database)).toMatchObject({
       fromVersion: 0,
       toVersion: 6,
     });
-    expect(DEFAULT_MIGRATIONS.at(-1)).toMatchObject({
+    expect(V6_MIGRATIONS.at(-1)).toMatchObject({
       version: 6,
       name: 'browser_tabs_bookmarks',
     });
@@ -267,7 +268,7 @@ async function createDatabase(): Promise<SqliteAdapter> {
 
 async function createV6Database(): Promise<SqliteAdapter> {
   const database = await createDatabase();
-  new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+  new MigrationRunner(V6_MIGRATIONS).apply(database);
   return database;
 }
 

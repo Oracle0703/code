@@ -1,5 +1,8 @@
 import {
+  BACKUP_CADENCES,
   TERMINAL_PROFILE_IDS,
+  type BackupCadence,
+  type BackupPolicyUpdateInput,
   type BrowserBounds,
   type BrowserBoundsInput,
   type BrowserBookmarkTargetInput,
@@ -10,6 +13,8 @@ import {
   type BrowserTabTargetInput,
   type BrowserVisibilityInput,
   type BrowserWorkspaceInput,
+  type DataImportCommitInput,
+  type DataImportTargetInput,
   type InboxCategorizeInput,
   type InboxCreateInput,
   type InboxTargetInput,
@@ -21,6 +26,7 @@ import {
   type ScheduleCreateInput,
   type ScheduleTargetInput,
   type ScheduleUpdateInput,
+  type SearchQueryInput,
   type TaskConvertInboxInput,
   type TaskCreateInput,
   type TaskPlanningInput,
@@ -70,10 +76,12 @@ import {
   normalizeWorkspaceName,
   normalizeWorkspacePreferencesPatch,
 } from '../../shared/workspace-domain';
+import { normalizeSearchQuery, normalizeSearchScope } from '../../shared/search-domain';
 
 const MAX_URL_LENGTH = 4_096;
 const MAX_TERMINAL_WRITE_LENGTH = 1_048_576;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -230,6 +238,84 @@ export function parseBrowserVisibilityInput(value: unknown): BrowserVisibilityIn
     workspaceId: normalizeWorkspaceId(value.workspaceId),
     visible: parseBoolean(value.visible, 'visible'),
   };
+}
+
+export function parseSearchQueryInput(value: unknown): SearchQueryInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Search input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'query', 'scope']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    query: normalizeSearchQuery(value.query),
+    scope: normalizeSearchScope(value.scope),
+  };
+}
+
+export function parseBackupPolicyUpdateInput(value: unknown): BackupPolicyUpdateInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Backup policy input must be an object');
+  }
+  assertOnlyKeys(value, [
+    'enabled',
+    'cadence',
+    'localTimeMinute',
+    'weekday',
+    'retentionCount',
+    'expectedRevision',
+  ]);
+  const cadence = parseBackupCadence(value.cadence);
+  const weekday =
+    value.weekday === null ? null : assertIntegerInRange(value.weekday, 'weekday', 0, 6);
+  if ((cadence === 'daily' && weekday !== null) || (cadence === 'weekly' && weekday === null)) {
+    throw new TypeError('Backup weekday must be null for daily and set for weekly schedules');
+  }
+  return {
+    enabled: parseBoolean(value.enabled, 'enabled'),
+    cadence,
+    localTimeMinute: assertIntegerInRange(value.localTimeMinute, 'localTimeMinute', 0, 1_439),
+    weekday,
+    retentionCount: assertIntegerInRange(value.retentionCount, 'retentionCount', 1, 90),
+    expectedRevision: assertIntegerInRange(
+      value.expectedRevision,
+      'expectedRevision',
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  };
+}
+
+export function parseDataImportTargetInput(value: unknown): DataImportTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Data import target must be an object');
+  }
+  assertOnlyKeys(value, ['importId']);
+  return { importId: parseUuidV4(value.importId, 'Data import id') };
+}
+
+export function parseDataImportCommitInput(value: unknown): DataImportCommitInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Data import commit input must be an object');
+  }
+  assertOnlyKeys(value, ['importId', 'previewDigest']);
+  if (
+    typeof value.previewDigest !== 'string' ||
+    value.previewDigest !== value.previewDigest.toLowerCase() ||
+    !SHA256_PATTERN.test(value.previewDigest)
+  ) {
+    throw new TypeError('Data import preview digest must be a lowercase SHA-256 digest');
+  }
+  return {
+    importId: parseUuidV4(value.importId, 'Data import id'),
+    previewDigest: value.previewDigest,
+  };
+}
+
+function parseBackupCadence(value: unknown): BackupCadence {
+  if (typeof value !== 'string' || !BACKUP_CADENCES.includes(value as BackupCadence)) {
+    throw new TypeError('Unsupported backup cadence');
+  }
+  return value as BackupCadence;
 }
 
 export function parseBoolean(value: unknown, name: string): boolean {

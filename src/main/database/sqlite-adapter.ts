@@ -79,11 +79,15 @@ export class NodeSqliteAdapter implements SqliteAdapter {
 
   execMigration(sql: string): void {
     this.assertOpen();
-    this.#database.setAuthorizer((actionCode) => {
+    this.#database.setAuthorizer((actionCode, pragmaName, pragmaValue) => {
+      const isFtsReadOnlyDataVersion =
+        actionCode === constants.SQLITE_PRAGMA &&
+        pragmaName === 'data_version' &&
+        pragmaValue === null;
       if (
         actionCode === constants.SQLITE_TRANSACTION ||
         actionCode === constants.SQLITE_SAVEPOINT ||
-        actionCode === constants.SQLITE_PRAGMA ||
+        (actionCode === constants.SQLITE_PRAGMA && !isFtsReadOnlyDataVersion) ||
         actionCode === constants.SQLITE_ATTACH ||
         actionCode === constants.SQLITE_DETACH
       ) {

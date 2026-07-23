@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   countInboxEntries,
+  filterInboxEntries,
   isInboxRequestLatest,
   isInboxSequenceCurrent,
   isInboxWorkspaceCurrent,
@@ -60,5 +61,27 @@ describe('inbox renderer state', () => {
         },
       ]),
     ).toEqual({ total: 3, uncategorized: 1, task: 1, note: 0, link: 1 });
+  });
+
+  it('reveals an exact search target even when the internal query and filter hide it', () => {
+    const entries = [
+      {
+        id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        content: '发布检查',
+        category: 'task',
+        createdAt: '2026-07-22T12:00:00.000Z',
+        updatedAt: '2026-07-22T12:00:00.000Z',
+      },
+      {
+        id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        content: '目标链接',
+        category: 'link',
+        createdAt: '2026-07-22T12:00:00.000Z',
+        updatedAt: '2026-07-22T12:00:00.000Z',
+      },
+    ] as const;
+
+    expect(filterInboxEntries(entries, '发布', 'task', entries[1].id)).toEqual(entries);
+    expect(filterInboxEntries(entries, '发布', 'task', null)).toEqual([entries[0]]);
   });
 });

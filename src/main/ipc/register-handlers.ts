@@ -1,6 +1,13 @@
 import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import {
   IPC_CHANNELS,
+  type BackupPolicyUpdateInput,
+  type DataExportResult,
+  type DataImportCommitInput,
+  type DataImportCommitResult,
+  type DataImportSelection,
+  type DataImportTargetInput,
+  type DataManagementSnapshot,
   type DatabaseBackupInfo,
   type DatabaseStatus,
   type InboxArchiveResult,
@@ -19,6 +26,8 @@ import {
   type ScheduleSnapshot,
   type ScheduleTargetInput,
   type ScheduleUpdateInput,
+  type SearchQueryInput,
+  type SearchSnapshot,
   type TaskConversionResult,
   type TaskConvertInboxInput,
   type TaskCreateInput,
@@ -44,6 +53,7 @@ import type { BrowserController } from '../browser/browser-controller';
 import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/trusted-renderer';
 import {
   assertNoArguments,
+  parseBackupPolicyUpdateInput,
   parseBrowserBookmarkTargetInput,
   parseBrowserBoundsInput,
   parseBrowserCreateTabInput,
@@ -53,6 +63,8 @@ import {
   parseBrowserTabTargetInput,
   parseBrowserVisibilityInput,
   parseBrowserWorkspaceInput,
+  parseDataImportCommitInput,
+  parseDataImportTargetInput,
   parseInboxCategorizeInput,
   parseInboxCreateInput,
   parseInboxTargetInput,
@@ -64,6 +76,7 @@ import {
   parseScheduleCreateInput,
   parseScheduleTargetInput,
   parseScheduleUpdateInput,
+  parseSearchQueryInput,
   parseTaskConvertInboxInput,
   parseTaskCreateInput,
   parseTaskPlanningInput,
@@ -92,6 +105,17 @@ interface IpcDependencies {
     getStatus(): Promise<DatabaseStatus>;
     createBackup(): Promise<DatabaseBackupInfo>;
     listBackups(): Promise<DatabaseBackupInfo[]>;
+  };
+  data: {
+    getManagementSnapshot(): Promise<DataManagementSnapshot>;
+    updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<DataManagementSnapshot>;
+    exportData(): Promise<DataExportResult>;
+    chooseImport(): Promise<DataImportSelection>;
+    commitImport(input: DataImportCommitInput): Promise<DataImportCommitResult>;
+    cancelImport(input: DataImportTargetInput): Promise<void>;
+  };
+  search: {
+    query(input: SearchQueryInput): Promise<SearchSnapshot>;
   };
   workspace: {
     getWorkspaceSnapshot(): Promise<WorkspaceSnapshot>;
@@ -149,6 +173,8 @@ export function registerIpcHandlers({
   windowLifecycle,
   browser,
   database,
+  data,
+  search,
   workspace,
   inbox,
   task,
@@ -189,6 +215,35 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.database.listBackups, (_event, ...args) => {
     assertNoArguments(args, 'Listing database backups');
     return database.listBackups();
+  });
+  register(IPC_CHANNELS.database.getManagementSnapshot, (_event, ...args) => {
+    assertNoArguments(args, 'Getting data management state');
+    return data.getManagementSnapshot();
+  });
+  register(IPC_CHANNELS.database.updateBackupPolicy, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating the backup policy');
+    return data.updateBackupPolicy(parseBackupPolicyUpdateInput(input));
+  });
+  register(IPC_CHANNELS.database.exportData, (_event, ...args) => {
+    assertNoArguments(args, 'Exporting application data');
+    return data.exportData();
+  });
+  register(IPC_CHANNELS.database.chooseImport, (_event, ...args) => {
+    assertNoArguments(args, 'Choosing application data to import');
+    return data.chooseImport();
+  });
+  register(IPC_CHANNELS.database.commitImport, (_event, input, ...args) => {
+    assertNoArguments(args, 'Committing an application data import');
+    return data.commitImport(parseDataImportCommitInput(input));
+  });
+  register(IPC_CHANNELS.database.cancelImport, (_event, input, ...args) => {
+    assertNoArguments(args, 'Cancelling an application data import');
+    return data.cancelImport(parseDataImportTargetInput(input));
+  });
+
+  register(IPC_CHANNELS.search.query, (_event, input, ...args) => {
+    assertNoArguments(args, 'Searching workspace data');
+    return search.query(parseSearchQueryInput(input));
   });
 
   register(IPC_CHANNELS.workspace.getSnapshot, (_event, ...args) => {

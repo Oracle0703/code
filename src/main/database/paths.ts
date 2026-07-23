@@ -61,11 +61,23 @@ async function restrictDirectory(path: string): Promise<void> {
   }
 }
 
-export async function prepareDatabaseDirectories(paths: DatabasePaths): Promise<void> {
+export async function prepareDatabaseDataDirectory(paths: DatabasePaths): Promise<void> {
   try {
     await mkdir(paths.dataDirectory, { recursive: true, mode: 0o700 });
     await assertDirectory(paths.dataDirectory, 'The application data path');
     await restrictDirectory(paths.dataDirectory);
+  } catch (error) {
+    if (error instanceof DatabasePathError) {
+      throw error;
+    }
+    throw new DatabasePathError('The database data directory could not be prepared.', {
+      cause: error,
+    });
+  }
+}
+
+export async function prepareDatabaseBackupDirectory(paths: DatabasePaths): Promise<void> {
+  try {
     const backupEntry = await lstat(paths.backupDirectory).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return undefined;
@@ -88,10 +100,15 @@ export async function prepareDatabaseDirectories(paths: DatabasePaths): Promise<
     if (error instanceof DatabasePathError) {
       throw error;
     }
-    throw new DatabasePathError('The database directories could not be prepared.', {
+    throw new DatabasePathError('The database backup directory could not be prepared.', {
       cause: error,
     });
   }
+}
+
+export async function prepareDatabaseDirectories(paths: DatabasePaths): Promise<void> {
+  await prepareDatabaseDataDirectory(paths);
+  await prepareDatabaseBackupDirectory(paths);
 }
 
 export async function databaseFileExists(databasePath: string): Promise<boolean> {

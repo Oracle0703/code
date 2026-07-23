@@ -12,6 +12,7 @@ import {
   Bot,
   CheckSquare2,
   Command,
+  Download,
   FolderPlus,
   Globe2,
   Inbox,
@@ -32,11 +33,13 @@ import {
   Square,
   SquareTerminal,
   Sun,
+  Upload,
   X,
 } from 'lucide-react';
 import {
   DEFAULT_WORKSPACE_PREFERENCES,
   WORKSPACE_COLORS,
+  type SearchResult,
   type WorkspaceViewId,
 } from '../shared/contracts';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
@@ -44,6 +47,7 @@ import { findCurrentWorkspace } from '../shared/workspace-domain';
 import { ActivityRail } from './components/ActivityRail';
 import { BrowserPanel } from './components/BrowserPanel';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
+import { DataImportDialog } from './components/DataImportDialog';
 import { IconButton } from './components/IconButton';
 import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
@@ -51,6 +55,7 @@ import { NotePage } from './components/NotePage';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
 import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
 import { SectionPage } from './components/SectionPage';
+import { SettingsPage } from './components/SettingsPage';
 import { TaskDialog, type TaskDialogState } from './components/TaskDialog';
 import { TaskPage } from './components/TaskPage';
 import { TerminalPanel } from './components/TerminalPanel';
@@ -58,6 +63,8 @@ import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { useInboxController } from './hooks/useInboxController';
+import { useDataManagementController } from './hooks/useDataManagementController';
+import { useGlobalSearchController } from './hooks/useGlobalSearchController';
 import { useNoteController } from './hooks/useNoteController';
 import { useScheduleController } from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
@@ -66,7 +73,12 @@ import { openBrowserUrlInWorkspace } from './browser-state';
 import type { ViewId } from './model';
 import { defaultScheduleRange } from './schedule-state';
 import {
-  approveWindowClose,
+  SearchNavigationCoordinator,
+  assertSearchTargetExists,
+  searchNavigationError,
+} from './search-navigation';
+import {
+  evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
   synchronizeDirtyDraft,
 } from './window-close';
@@ -97,6 +109,18 @@ function isTerminalTarget(target: EventTarget | null): boolean {
 
 export function App() {
   const workspaceController = useWorkspaceController();
+  const {
+    state: dataState,
+    load: loadData,
+    createBackup,
+    updateBackupPolicy,
+    exportData,
+    chooseImport,
+    commitImport,
+    cancelImport,
+    currentImportPreview,
+    isImportCommitInFlight,
+  } = useDataManagementController();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [workspaceDialog, setWorkspaceDialog] = useState<WorkspaceDialogState | null>(null);
   const [quickCaptureTarget, setQuickCaptureTarget] = useState<QuickCaptureTarget | null>(null);
@@ -104,17 +128,31 @@ export function App() {
   const [scheduleDialog, setScheduleDialog] = useState<ScheduleDialogState | null>(null);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [requestedNoteId, setRequestedNoteId] = useState<string | null>(null);
+  const [notePageGeneration, setNotePageGeneration] = useState(0);
+  const [inboxReveal, setInboxReveal] = useState<{
+    readonly workspaceId: string;
+    readonly entryId: string;
+    readonly generation: number;
+    readonly handled: boolean;
+  } | null>(null);
+  const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
   const activeResizeFinishRef = useRef<(() => void) | null>(null);
   const currentWorkspaceIdRef = useRef<string | null>(null);
   const noteDraftDirtyRef = useRef(false);
+  const dataReplacementApprovedRef = useRef(false);
+  const dataReplacementNoteDiscardApprovedRef = useRef(false);
   const snapshot = workspaceController.snapshot;
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
+  const searchController = useGlobalSearchController({
+    open: paletteOpen,
+    workspaceId: snapshot?.currentWorkspaceId ?? null,
+  });
   const activeWorkspace = snapshot ? findCurrentWorkspace(snapshot) : null;
   const visibleUndoNotices = useMemo(
     () =>
@@ -140,7 +178,8 @@ export function App() {
     workspaceDialog !== null ||
     quickCaptureTarget !== null ||
     taskDialog !== null ||
-    scheduleDialog !== null;
+    scheduleDialog !== null ||
+    dataState.importPreview !== null;
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
@@ -152,6 +191,15 @@ export function App() {
     (dirty: boolean) => synchronizeDirtyDraft(noteDraftDirtyRef, setNoteDraftDirty, dirty),
     [],
   );
+  const handleRequestedInboxEntry = useCallback(() => {
+    const expectedGeneration = inboxReveal?.generation;
+    if (expectedGeneration === undefined) return;
+    setInboxReveal((current) =>
+      current?.generation === expectedGeneration && !current.handled
+        ? { ...current, handled: true }
+        : current,
+    );
+  }, [inboxReveal?.generation]);
 
   const updatePreferences = workspaceController.updatePreferences;
   const openUrlInWorkspace = useCallback(
@@ -168,8 +216,10 @@ export function App() {
     [updatePreferences],
   );
   const confirmLeaveNoteDraft = useCallback(
-    () => !noteDraftDirty || window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
-    [noteDraftDirty],
+    () =>
+      !noteDraftDirtyRef.current ||
+      window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
+    [],
   );
   const requestActiveView = useCallback(
     (view: WorkspaceViewId) => {
@@ -181,9 +231,10 @@ export function App() {
   const requestWorkspaceActivation = useCallback(
     (workspaceId: string) => {
       if (!confirmLeaveNoteDraft()) return;
+      searchNavigation.invalidate();
       void workspaceController.activate(workspaceId).catch(() => undefined);
     },
-    [confirmLeaveNoteDraft, workspaceController],
+    [confirmLeaveNoteDraft, searchNavigation, workspaceController],
   );
   const openQuickCapture = useCallback(() => {
     if (
@@ -191,6 +242,7 @@ export function App() {
       workspaceDialog !== null ||
       taskDialog !== null ||
       scheduleDialog !== null ||
+      dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
       return;
@@ -203,6 +255,7 @@ export function App() {
   }, [
     activeWorkspace,
     scheduleDialog,
+    dataState.importPreview,
     taskDialog,
     workspaceController.pendingOperation,
     workspaceDialog,
@@ -215,6 +268,7 @@ export function App() {
         workspaceDialog !== null ||
         quickCaptureTarget !== null ||
         scheduleDialog !== null ||
+        dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
         return;
@@ -231,6 +285,7 @@ export function App() {
       activeWorkspace,
       quickCaptureTarget,
       scheduleDialog,
+      dataState.importPreview,
       workspaceController.pendingOperation,
       workspaceDialog,
     ],
@@ -244,6 +299,7 @@ export function App() {
       quickCaptureTarget !== null ||
       taskDialog !== null ||
       scheduleDialog !== null ||
+      dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
       return;
@@ -263,6 +319,7 @@ export function App() {
     quickCaptureTarget,
     scheduleController.snapshot,
     scheduleDialog,
+    dataState.importPreview,
     taskDialog,
     workspaceController.pendingOperation,
     workspaceDialog,
@@ -280,6 +337,10 @@ export function App() {
       .catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    if (activeView === 'settings') void loadData();
+  }, [activeView, loadData]);
+
   useEffect(() => window.workbench.inbox.onCaptureRequest(openQuickCapture), [openQuickCapture]);
 
   useEffect(
@@ -290,23 +351,50 @@ export function App() {
     [openUrlInWorkspace],
   );
 
-  useEffect(() => {
-    return window.workbench.window.onCloseRequest(() => {
-      return approveWindowClose(noteDraftDirtyRef.current, () =>
-        window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
-      );
-    });
-  }, []);
+  useEffect(
+    () =>
+      window.workbench.window.onCloseRequest(async (request) => {
+        const importPreview = currentImportPreview();
+        const decision = evaluateWindowCloseProtection(
+          {
+            reason: request.reason,
+            hasUnsavedDraft: noteDraftDirtyRef.current,
+            noteDiscardPreviouslyApproved: dataReplacementNoteDiscardApprovedRef.current,
+            dataReplacementApproved: dataReplacementApprovedRef.current,
+            importPreviewOpen: importPreview !== null,
+            importCommitInFlight: isImportCommitInFlight(),
+          },
+          () => window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
+          () =>
+            window.confirm(
+              '导入预览尚未关闭。退出会安全取消本次导入，且不会修改本地数据。要继续吗？',
+            ),
+        );
+        if (decision === 'reject') return false;
+        if (decision === 'approve') return true;
+        try {
+          await cancelImport();
+          return currentImportPreview() === null;
+        } catch {
+          return false;
+        }
+      }),
+    [cancelImport, currentImportPreview, isImportCommitInFlight],
+  );
 
   useEffect(() => {
     const protectDraft = (event: BeforeUnloadEvent) => {
-      if (!shouldProtectWindowUnload(noteDraftDirtyRef.current)) return;
+      if (
+        !shouldProtectWindowUnload(noteDraftDirtyRef.current || currentImportPreview() !== null)
+      ) {
+        return;
+      }
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', protectDraft);
     return () => window.removeEventListener('beforeunload', protectDraft);
-  }, []);
+  }, [currentImportPreview]);
 
   useEffect(() => {
     const updateViewport = () => setViewportHeight(window.innerHeight);
@@ -328,6 +416,7 @@ export function App() {
         workspaceDialog !== null ||
         taskDialog !== null ||
         scheduleDialog !== null ||
+        dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
         return;
@@ -383,6 +472,7 @@ export function App() {
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [
     browserOpen,
+    dataState.importPreview,
     paletteOpen,
     quickCaptureTarget,
     sidebarCollapsed,
@@ -397,8 +487,167 @@ export function App() {
     requestActiveView,
   ]);
 
+  const selectSearchResult = useCallback(
+    async (selectedResult: SearchResult): Promise<void> => {
+      if (!confirmLeaveNoteDraft()) {
+        throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
+      }
+      const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
+      const intent = searchNavigation.begin(selectedResult);
+      if (workspaceController.pendingOperation !== null) {
+        throw new Error('工作区操作正在进行，请稍候再打开搜索结果。');
+      }
+
+      const { result } = intent;
+      const assertCurrent = () => searchNavigation.assertCurrent(intent);
+      const finishNavigation = () => {
+        if (discardConfirmedNoteDraft) {
+          setNotePageGeneration((generation) => generation + 1);
+        }
+      };
+      try {
+        if (currentWorkspaceIdRef.current !== result.workspaceId) {
+          await workspaceController.activate(result.workspaceId);
+          assertCurrent();
+        }
+
+        switch (result.kind) {
+          case 'inbox': {
+            const inboxSnapshot = await window.workbench.inbox.getSnapshot({
+              workspaceId: result.workspaceId,
+            });
+            assertCurrent();
+            assertSearchTargetExists(
+              intent,
+              inboxSnapshot.entries.some(({ id }) => id === result.entityId),
+            );
+            finishNavigation();
+            updatePreferences({ activeView: 'inbox' }, true, result.workspaceId);
+            setRequestedNoteId(null);
+            setInboxReveal({
+              workspaceId: result.workspaceId,
+              entryId: result.entityId,
+              generation: intent.generation,
+              handled: false,
+            });
+            return;
+          }
+          case 'task': {
+            const taskSnapshot = await window.workbench.task.getSnapshot({
+              workspaceId: result.workspaceId,
+            });
+            assertCurrent();
+            const task = taskSnapshot.tasks.find(({ id }) => id === result.entityId);
+            assertSearchTargetExists(intent, task !== undefined);
+            finishNavigation();
+            updatePreferences({ activeView: 'tasks' }, true, result.workspaceId);
+            setInboxReveal(null);
+            setRequestedNoteId(null);
+            setTaskDialog({
+              mode: 'rename',
+              workspaceId: result.workspaceId,
+              workspaceName: result.workspaceName,
+              task,
+            });
+            return;
+          }
+          case 'note': {
+            const noteSnapshot = await window.workbench.note.getSnapshot({
+              workspaceId: result.workspaceId,
+            });
+            assertCurrent();
+            assertSearchTargetExists(
+              intent,
+              noteSnapshot.notes.some(({ id }) => id === result.entityId),
+            );
+            finishNavigation();
+            updatePreferences({ activeView: 'notes' }, true, result.workspaceId);
+            setInboxReveal(null);
+            setRequestedNoteId(result.entityId);
+            return;
+          }
+          case 'schedule': {
+            const scheduleSnapshot = await window.workbench.schedule.getSnapshot({
+              workspaceId: result.workspaceId,
+            });
+            assertCurrent();
+            const item = scheduleSnapshot.items.find(({ id }) => id === result.entityId);
+            assertSearchTargetExists(intent, item !== undefined);
+            finishNavigation();
+            updatePreferences({ activeView: 'today' }, true, result.workspaceId);
+            setInboxReveal(null);
+            setRequestedNoteId(null);
+            setScheduleDialog({
+              mode: 'edit',
+              workspaceId: result.workspaceId,
+              workspaceName: result.workspaceName,
+              expectedDate: scheduleSnapshot.todayDate,
+              item,
+            });
+            return;
+          }
+          case 'browser-tab': {
+            const browserSnapshot = await window.workbench.browser.getSnapshot({
+              workspaceId: result.workspaceId,
+            });
+            assertCurrent();
+            assertSearchTargetExists(
+              intent,
+              browserSnapshot.tabs.some(({ id }) => id === result.entityId),
+            );
+            const activated = await window.workbench.browser.activateTab({
+              workspaceId: result.workspaceId,
+              tabId: result.entityId,
+            });
+            assertCurrent();
+            assertSearchTargetExists(
+              intent,
+              activated.activeTabId === result.entityId &&
+                activated.tabs.some(({ id }) => id === result.entityId),
+            );
+            finishNavigation();
+            updatePreferences({ browserOpen: true }, true, result.workspaceId);
+            setInboxReveal(null);
+            setRequestedNoteId(null);
+            return;
+          }
+          case 'browser-bookmark': {
+            const browserSnapshot = await window.workbench.browser.getSnapshot({
+              workspaceId: result.workspaceId,
+            });
+            assertCurrent();
+            assertSearchTargetExists(
+              intent,
+              browserSnapshot.bookmarks.some(({ id }) => id === result.entityId),
+            );
+            await window.workbench.browser.openBookmark({
+              workspaceId: result.workspaceId,
+              bookmarkId: result.entityId,
+              newTab: false,
+            });
+            assertCurrent();
+            finishNavigation();
+            updatePreferences({ browserOpen: true }, true, result.workspaceId);
+            setInboxReveal(null);
+            setRequestedNoteId(null);
+          }
+        }
+      } catch (error) {
+        throw searchNavigationError(error);
+      }
+    },
+    [confirmLeaveNoteDraft, searchNavigation, updatePreferences, workspaceController],
+  );
+
   const commands = useMemo<PaletteCommand[]>(() => {
     if (!snapshot || !activeWorkspace) return [];
+    const dataBusy = dataState.activeOperation !== null;
+    const dataDisabled = dataBusy || dataState.importPreview !== null;
+    const dataDisabledReason = dataBusy
+      ? '另一项数据操作正在进行'
+      : dataState.importPreview
+        ? '请先处理当前导入预览'
+        : undefined;
     const workspaceCommands: PaletteCommand[] = snapshot.workspaces
       .filter(({ id }) => id !== activeWorkspace.id)
       .map((workspace) => ({
@@ -434,6 +683,40 @@ export function App() {
         icon: CheckSquare2,
         keywords: '任务 新建 创建 todo',
         action: () => openTaskCreate('none'),
+      },
+      {
+        id: 'data:backup',
+        label: '立即备份数据',
+        description: '创建一份一致性的本地 SQLite 备份',
+        group: '数据',
+        icon: Archive,
+        keywords: '数据 备份 backup sqlite',
+        disabled: dataDisabled,
+        disabledReason: dataDisabledReason,
+        action: createBackup,
+      },
+      {
+        id: 'data:export',
+        label: '导出数据',
+        description: '保存经过校验的可移植数据文件',
+        group: '数据',
+        icon: Download,
+        keywords: '数据 导出 export portable',
+        disabled: dataDisabled,
+        disabledReason: dataDisabledReason,
+        action: exportData,
+      },
+      {
+        id: 'data:import',
+        label: '导入数据',
+        description: '选择文件并在替换前查看完整预览',
+        group: '数据',
+        icon: Upload,
+        keywords: '数据 导入 import restore',
+        disabled: dataDisabled,
+        disabledReason: dataDisabledReason,
+        restoreFocus: false,
+        action: chooseImport,
       },
       {
         id: 'workspace:create',
@@ -553,6 +836,11 @@ export function App() {
   }, [
     activeWorkspace,
     browserOpen,
+    chooseImport,
+    createBackup,
+    dataState.activeOperation,
+    dataState.importPreview,
+    exportData,
     openQuickCapture,
     openTaskCreate,
     confirmLeaveNoteDraft,
@@ -854,6 +1142,11 @@ export function App() {
                   />
                 ) : activeView === 'inbox' ? (
                   <InboxPage
+                    key={
+                      inboxReveal?.workspaceId === snapshot.currentWorkspaceId
+                        ? `${snapshot.currentWorkspaceId}:${inboxReveal.generation}`
+                        : snapshot.currentWorkspaceId
+                    }
                     entries={inboxController.entries}
                     status={inboxController.status}
                     loadError={inboxController.loadError}
@@ -861,6 +1154,13 @@ export function App() {
                     pendingEntryIds={inboxController.pendingEntryIds}
                     pendingConversionEntryIds={taskController.pendingConversionEntryIds}
                     pendingNoteConversionEntryIds={noteController.pendingConversionEntryIds}
+                    requestedEntryId={
+                      inboxReveal?.workspaceId === snapshot.currentWorkspaceId &&
+                      !inboxReveal.handled
+                        ? inboxReveal.entryId
+                        : null
+                    }
+                    onRequestedEntryHandled={handleRequestedInboxEntry}
                     onRetry={inboxController.retry}
                     onOpenCapture={openQuickCapture}
                     onCategorize={inboxController.categorize}
@@ -909,7 +1209,7 @@ export function App() {
                   />
                 ) : activeView === 'notes' ? (
                   <NotePage
-                    key={snapshot.currentWorkspaceId}
+                    key={`${snapshot.currentWorkspaceId}:${notePageGeneration}`}
                     workspaceName={activeWorkspace.name}
                     notes={noteController.notes}
                     status={noteController.status}
@@ -928,9 +1228,23 @@ export function App() {
                       openUrlInWorkspace(snapshot.currentWorkspaceId, url);
                     }}
                   />
+                ) : activeView === 'settings' ? (
+                  <SettingsPage
+                    onOpenBrowser={() => updatePreferences({ browserOpen: true })}
+                    onOpenTerminal={() => updatePreferences({ terminalOpen: true })}
+                    dataSnapshot={dataState.snapshot}
+                    dataStatus={dataState.loadStatus}
+                    dataOperation={dataState.activeOperation?.kind ?? null}
+                    dataFeedback={dataState.feedback}
+                    onRetryData={() => void loadData()}
+                    onCreateBackup={createBackup}
+                    onUpdateBackupPolicy={updateBackupPolicy}
+                    onExportData={exportData}
+                    onChooseImport={chooseImport}
+                  />
                 ) : (
                   <SectionPage
-                    view={activeView}
+                    view="automations"
                     onOpenBrowser={() => updatePreferences({ browserOpen: true })}
                     onOpenTerminal={() => updatePreferences({ terminalOpen: true })}
                   />
@@ -1032,7 +1346,8 @@ export function App() {
                   inboxController.operationError ||
                   taskController.operationError ||
                   noteController.operationError ||
-                  scheduleController.operationError
+                  scheduleController.operationError ||
+                  dataState.feedback?.tone === 'error'
                     ? 'alert'
                     : undefined
                 }
@@ -1042,6 +1357,7 @@ export function App() {
                   taskController.operationError ??
                   noteController.operationError ??
                   scheduleController.operationError ??
+                  (dataState.feedback?.tone === 'error' ? dataState.feedback.message : null) ??
                   (noteDraftDirty ? '笔记有未保存的更改' : null) ??
                   '已就绪'}
               </span>
@@ -1072,6 +1388,9 @@ export function App() {
       <CommandPalette
         open={paletteOpen}
         commands={commands}
+        searchController={searchController}
+        currentWorkspaceId={snapshot.currentWorkspaceId}
+        onSelectSearchResult={selectSearchResult}
         onClose={() => setPaletteOpen(false)}
       />
       {workspaceDialog ? (
@@ -1150,6 +1469,27 @@ export function App() {
               throw new Error('工作区已经切换，请重新打开日程窗口。');
             }
             await scheduleController.archive(item, scheduleDialog.expectedDate);
+          }}
+        />
+      ) : null}
+      {dataState.importPreview ? (
+        <DataImportDialog
+          key={dataState.importPreview.importId}
+          preview={dataState.importPreview}
+          busy={dataState.activeOperation !== null}
+          error={dataState.feedback?.tone === 'error' ? dataState.feedback.message : null}
+          onCancel={cancelImport}
+          onConfirm={async () => {
+            if (!confirmLeaveNoteDraft()) return;
+            dataReplacementApprovedRef.current = true;
+            dataReplacementNoteDiscardApprovedRef.current = true;
+            try {
+              await commitImport();
+            } catch (error) {
+              dataReplacementApprovedRef.current = false;
+              dataReplacementNoteDiscardApprovedRef.current = false;
+              throw error;
+            }
           }}
         />
       ) : null}

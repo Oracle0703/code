@@ -5,6 +5,19 @@ import squirrelStartup from 'electron-squirrel-startup';
 import { IPC_CHANNELS, type WindowCloseReason } from '../shared/contracts';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { BrowserController } from './browser/browser-controller';
+import {
+  AtomicImportStager,
+  DatabaseImportStagingDriver,
+  ImportQuarantine,
+  ReplacementMarkerStore,
+} from './data-portability';
+import {
+  cleanupAbandonedImportArtifacts,
+  DatabaseReplacementRecovery,
+  DataManagementController,
+  DataPortabilityController,
+  FileReplacementMarkerPersistence,
+} from './data-management';
 import { DatabaseError, DatabaseService } from './database';
 import { registerIpcHandlers } from './ipc/register-handlers';
 import { isAllowedBrowserUrl } from './security/browser-url';
@@ -21,10 +34,14 @@ import { createWorkspaceIpcAdapter } from './workspace-ipc-adapter';
 
 let mainWindow: BrowserWindow | null = null;
 let databaseService: DatabaseService | null = null;
+let dataManagementController: DataManagementController | null = null;
 let databaseShutdownPromise: Promise<void> | null = null;
+let replacementPreparationPromise: Promise<void> | null = null;
+let replacementRestartPromise: Promise<void> | null = null;
 let allowQuit = false;
 let startupFailureShown = false;
 const runtimeShutdowns = new Set<() => Promise<void>>();
+const replacementRuntimePreparations = new Set<() => Promise<void>>();
 const closeApprovalRequests = new Set<(reason: WindowCloseReason) => Promise<boolean>>();
 const approvedCloseSurfaces = new Set<BrowserWindow>();
 let quitApprovalPromise: Promise<void> | null = null;
@@ -45,7 +62,10 @@ function denyWebviewAttachment(contents: WebContents): void {
   });
 }
 
-async function createMainWindow(database: DatabaseService): Promise<void> {
+async function createMainWindow(
+  database: DatabaseService,
+  data: DataManagementController,
+): Promise<void> {
   const initialWorkspaceSnapshot = await database.getWorkspaceSnapshot();
   let rendererWorkspaceId = initialWorkspaceSnapshot.currentWorkspaceId;
   const rendererHtmlPath = join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`);
@@ -141,6 +161,8 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     },
     browser,
     database,
+    data,
+    search: { query: (input) => database.search(input) },
     workspace: workspaceForIpc,
     inbox: database,
     task: database,
@@ -149,6 +171,12 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     terminal,
     trustedRendererLocation,
   });
+  let ipcHandlersRegistered = true;
+  const unregisterIpcOnce = (): void => {
+    if (!ipcHandlersRegistered) return;
+    ipcHandlersRegistered = false;
+    unregisterIpc();
+  };
 
   const rendererSession = window.webContents.session;
   rendererSession.setPermissionCheckHandler(() => false);
@@ -197,6 +225,11 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   };
   runtimeShutdowns.add(shutdownBrowser);
   runtimeShutdowns.add(shutdownTerminal);
+  const prepareReplacementRuntime = async (): Promise<void> => {
+    unregisterIpcOnce();
+    await Promise.all([shutdownBrowser(), shutdownTerminal()]);
+  };
+  replacementRuntimePreparations.add(prepareReplacementRuntime);
   const cleanUp = (): void => {
     if (cleanedUp) {
       return;
@@ -205,7 +238,8 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     closeCoordinator.dispose();
     closeApprovalRequests.delete(requestCloseApproval);
     approvedCloseSurfaces.delete(window);
-    unregisterIpc();
+    replacementRuntimePreparations.delete(prepareReplacementRuntime);
+    unregisterIpcOnce();
     void shutdownTerminal();
     browser.destroy();
     rendererSession.setPermissionCheckHandler(null);
@@ -251,6 +285,7 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   window.once('closed', () => {
     runtimeShutdowns.delete(shutdownBrowser);
     runtimeShutdowns.delete(shutdownTerminal);
+    replacementRuntimePreparations.delete(prepareReplacementRuntime);
     closeApprovalRequests.delete(requestCloseApproval);
     approvedCloseSurfaces.delete(window);
     cleanUp();
@@ -264,6 +299,227 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   } else {
     await window.loadFile(rendererHtmlPath);
   }
+}
+
+function currentWindowForDialog(): BrowserWindow {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) {
+    throw new Error('The application window is unavailable for data management.');
+  }
+  return window;
+}
+
+async function requestDataReplacementApproval(): Promise<boolean> {
+  if (
+    databaseShutdownPromise ||
+    replacementPreparationPromise ||
+    replacementRestartPromise ||
+    quitApprovalPromise
+  ) {
+    return false;
+  }
+  return runAfterCloseApproval(
+    [...closeApprovalRequests].map((requestApproval) => () => requestApproval('data-replacement')),
+    async () => undefined,
+  );
+}
+
+function prepareForDataReplacement(): Promise<void> {
+  if (replacementPreparationPromise) return replacementPreparationPromise;
+  const activeData = dataManagementController;
+  prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
+    console.error('Daily Workbench failed to hide a window before data replacement.', error);
+  });
+
+  const preparations = [
+    ...replacementRuntimePreparations,
+    ...(activeData ? [() => activeData.stop()] : []),
+  ];
+  replacementPreparationPromise = (async () => {
+    const results = await Promise.allSettled(
+      preparations.map((prepare) => Promise.resolve().then(prepare)),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        'One or more runtime sources could not be frozen for data replacement.',
+      );
+    }
+  })();
+  return replacementPreparationPromise;
+}
+
+function restartForDataReplacement(): Promise<void> {
+  if (replacementRestartPromise) return replacementRestartPromise;
+  const activeDatabase = databaseService;
+  const activeData = dataManagementController;
+  prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
+    console.error('Daily Workbench failed to hide a window before data replacement.', error);
+  });
+
+  replacementRestartPromise = (async () => {
+    if (activeDatabase) {
+      databaseShutdownPromise = settleShutdownsBefore(
+        [...runtimeShutdowns, ...(activeData ? [() => activeData.stop()] : [])],
+        () => activeDatabase.close(),
+        (error) => {
+          console.error('Daily Workbench failed to stop a runtime before data replacement.', error);
+        },
+      ).catch((error: unknown) => {
+        console.error(
+          'Daily Workbench failed to checkpoint its database before replacement.',
+          error,
+        );
+      });
+      await databaseShutdownPromise;
+    }
+
+    databaseService = null;
+    dataManagementController = null;
+    allowQuit = true;
+    finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
+      console.error('Daily Workbench failed to destroy a window before restarting.', error);
+    });
+    try {
+      app.relaunch();
+    } finally {
+      app.quit();
+    }
+  })();
+  return replacementRestartPromise;
+}
+
+async function openAndCloseDatabase(dataDirectory: string): Promise<void> {
+  const database = new DatabaseService({ dataDirectory });
+  try {
+    await database.open();
+  } finally {
+    await database.close();
+  }
+}
+
+async function validateExistingDatabase(dataDirectory: string): Promise<void> {
+  await new DatabaseService({ dataDirectory }).validateExistingFile();
+}
+
+async function validatePreImportBackup(dataDirectory: string, backupId: string): Promise<void> {
+  await new DatabaseService({ dataDirectory }).validateExistingBackup(backupId, 'pre-import');
+}
+
+async function validateRecoveryDatabase(dataDirectory: string, fileName: string): Promise<void> {
+  await new DatabaseService({
+    dataDirectory,
+    databaseFileName: fileName,
+  }).validateExistingFile();
+}
+
+async function recoverDatabaseReplacement(
+  dataDirectory: string,
+): Promise<'none' | 'committed' | 'rolled-back'> {
+  const markerStore = new ReplacementMarkerStore(
+    new FileReplacementMarkerPersistence({ dataDirectory }),
+  );
+  const recovery = new DatabaseReplacementRecovery({
+    dataDirectory,
+    markerStore,
+    checkpointCurrentDatabase: () => openAndCloseDatabase(dataDirectory),
+    validateInstalledDatabase: () => validateExistingDatabase(dataDirectory),
+    validatePreImportBackup: (backupId) => validatePreImportBackup(dataDirectory, backupId),
+    validateRecoveryDatabase: (fileName) => validateRecoveryDatabase(dataDirectory, fileName),
+  });
+  const result = await recovery.recover();
+  await cleanupAbandonedImportArtifacts(dataDirectory);
+  return result.outcome;
+}
+
+async function createDataManagementController(
+  database: DatabaseService,
+  dataDirectory: string,
+): Promise<DataManagementController> {
+  const importDirectory = join(dataDirectory, 'imports');
+  const markerStore = new ReplacementMarkerStore(
+    new FileReplacementMarkerPersistence({ dataDirectory }),
+  );
+  const quarantine = new ImportQuarantine({
+    directory: importDirectory,
+    stager: {
+      stage: async (context) => {
+        const localBackupPolicy = (await database.getBackupSchedulerState()).policy;
+        const stager = new AtomicImportStager({
+          directory: importDirectory,
+          driver: new DatabaseImportStagingDriver({ localBackupPolicy }),
+        });
+        await stager.stage(context);
+      },
+      validate: async (context) => {
+        const localBackupPolicy = (await database.getBackupSchedulerState()).policy;
+        const stager = new AtomicImportStager({
+          directory: importDirectory,
+          driver: new DatabaseImportStagingDriver({ localBackupPolicy }),
+        });
+        await stager.validate(context);
+      },
+    },
+  });
+  const portability = new DataPortabilityController({
+    database,
+    quarantine,
+    markerStore,
+    appVersion: app.getVersion(),
+    dialogs: {
+      chooseExportPath: async (defaultFileName) => {
+        const result = await dialog.showSaveDialog(currentWindowForDialog(), {
+          title: '导出 Daily Workbench 数据',
+          defaultPath: join(app.getPath('documents'), defaultFileName),
+          buttonLabel: '导出',
+          filters: [{ name: 'Daily Workbench 数据包', extensions: ['dwbx'] }],
+          properties: ['createDirectory', 'showOverwriteConfirmation', 'dontAddToRecent'],
+        });
+        return result.canceled ? undefined : result.filePath;
+      },
+      chooseImportPath: async () => {
+        const result = await dialog.showOpenDialog(currentWindowForDialog(), {
+          title: '导入 Daily Workbench 数据',
+          buttonLabel: '验证并预览',
+          filters: [{ name: 'Daily Workbench 数据包', extensions: ['dwbx'] }],
+          properties: ['openFile', 'dontAddToRecent'],
+        });
+        return result.canceled ? undefined : result.filePaths[0];
+      },
+    },
+    requestDestructiveConfirmation: async ({ importId, previewDigest }) => {
+      const result = await dialog.showMessageBox(currentWindowForDialog(), {
+        type: 'warning',
+        title: '确认替换本地数据',
+        message: '这会用导入文件完整替换当前本地数据。',
+        detail: `Daily Workbench 会先创建导入前备份，然后关闭当前工作区、替换数据库并重启。此操作不会合并两份数据。\n\n导入标识：${importId.slice(0, 8)} · ${previewDigest.slice(0, 12)}`,
+        buttons: ['取消', '备份、替换并重启'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return result.response === 1;
+    },
+    requestReplacementApproval: requestDataReplacementApproval,
+    prepareReplacement: prepareForDataReplacement,
+    scheduleRestart: restartForDataReplacement,
+    onError: (error) => {
+      console.error('Daily Workbench data portability failed.', error);
+    },
+  });
+  return new DataManagementController({
+    database,
+    portability,
+    onStateChange: (snapshot) => {
+      sendToRenderer(IPC_CHANNELS.database.backupStateChanged, snapshot);
+    },
+    onError: (error) => {
+      console.error('Daily Workbench automatic backup failed.', error);
+    },
+  });
 }
 
 function quitAfterStartupFailure(error: unknown): void {
@@ -309,6 +565,7 @@ if (!hasSingleInstanceLock) {
     event.preventDefault();
     if (!databaseShutdownPromise && !quitApprovalPromise) {
       const activeDatabase = databaseService;
+      const activeData = dataManagementController;
       quitApprovalPromise = runAfterCloseApproval(
         [...closeApprovalRequests].map((requestApproval) => () => requestApproval('application')),
         async () => {
@@ -316,7 +573,7 @@ if (!hasSingleInstanceLock) {
             console.error('Daily Workbench failed to disable a window before quitting.', error);
           });
           databaseShutdownPromise = settleShutdownsBefore(
-            runtimeShutdowns,
+            [...runtimeShutdowns, ...(activeData ? [() => activeData.stop()] : [])],
             () => activeDatabase.close(),
             (error) => {
               console.error(
@@ -330,6 +587,7 @@ if (!hasSingleInstanceLock) {
             })
             .finally(() => {
               databaseService = null;
+              dataManagementController = null;
               allowQuit = true;
               finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
                 console.error('Daily Workbench failed to destroy an approved window.', error);
@@ -356,8 +614,16 @@ if (!hasSingleInstanceLock) {
         app.setAppUserModelId('com.squirrel.DailyWorkbench.daily-workbench');
       }
 
+      const dataDirectory = join(app.getPath('userData'), 'data');
+      const replacementOutcome = await recoverDatabaseReplacement(dataDirectory);
+      if (replacementOutcome === 'rolled-back') {
+        dialog.showErrorBox(
+          'Daily Workbench restored your previous data',
+          'The imported data could not be opened safely, so the original database was restored. The pre-import backup is still available in Settings.',
+        );
+      }
       const database = new DatabaseService({
-        dataDirectory: join(app.getPath('userData'), 'data'),
+        dataDirectory,
       });
       databaseService = database;
       await database.open();
@@ -365,7 +631,10 @@ if (!hasSingleInstanceLock) {
         return;
       }
 
-      await createMainWindow(database);
+      const data = await createDataManagementController(database, dataDirectory);
+      dataManagementController = data;
+      await createMainWindow(database, data);
+      await data.start();
 
       app.on('activate', () => {
         const activeDatabase = databaseService;
@@ -374,7 +643,10 @@ if (!hasSingleInstanceLock) {
           !databaseShutdownPromise &&
           BrowserWindow.getAllWindows().length === 0
         ) {
-          void createMainWindow(activeDatabase).catch(quitAfterStartupFailure);
+          const activeData = dataManagementController;
+          if (activeData) {
+            void createMainWindow(activeDatabase, activeData).catch(quitAfterStartupFailure);
+          }
         }
       });
     })
