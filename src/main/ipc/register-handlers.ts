@@ -26,6 +26,12 @@ import {
   type TaskRenameInput,
   type TaskSnapshot,
   type TaskStatusInput,
+  type TerminalCreateInput,
+  type TerminalResizeInput,
+  type TerminalSessionTargetInput,
+  type TerminalSnapshot,
+  type TerminalWorkspaceInput,
+  type TerminalWriteInput,
   type WindowCloseResponse,
   type WorkspaceCreateInput,
   type WorkspacePreferences,
@@ -36,7 +42,6 @@ import {
 } from '../../shared/contracts';
 import type { BrowserController } from '../browser/browser-controller';
 import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/trusted-renderer';
-import type { TerminalManager } from '../terminal/terminal-manager';
 import {
   assertNoArguments,
   parseBrowserBookmarkTargetInput,
@@ -64,10 +69,11 @@ import {
   parseTaskPlanningInput,
   parseTaskRenameInput,
   parseTaskStatusInput,
-  parseSessionId,
-  parseTerminalCreateOptions,
-  parseTerminalData,
-  parseTerminalSize,
+  parseTerminalCreateInput,
+  parseTerminalResizeInput,
+  parseTerminalSessionTargetInput,
+  parseTerminalWorkspaceInput,
+  parseTerminalWriteInput,
   parseWindowCloseResponse,
   parseWorkspaceCreateInput,
   parseWorkspacePreferencesInput,
@@ -123,7 +129,16 @@ interface IpcDependencies {
     updateScheduleItem(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archiveScheduleItem(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
   };
-  terminal: TerminalManager;
+  terminal: {
+    getSnapshot(input: TerminalWorkspaceInput): TerminalSnapshot | Promise<TerminalSnapshot>;
+    create(input: TerminalCreateInput): TerminalSnapshot | Promise<TerminalSnapshot>;
+    activate(input: TerminalSessionTargetInput): TerminalSnapshot | Promise<TerminalSnapshot>;
+    restart(input: TerminalSessionTargetInput): TerminalSnapshot | Promise<TerminalSnapshot>;
+    write(input: TerminalWriteInput): void | Promise<void>;
+    resize(input: TerminalResizeInput): void | Promise<void>;
+    clear(input: TerminalSessionTargetInput): void | Promise<void>;
+    close(input: TerminalSessionTargetInput): TerminalSnapshot | Promise<TerminalSnapshot>;
+  };
   trustedRendererLocation: TrustedRendererLocation;
 }
 
@@ -390,18 +405,37 @@ export function registerIpcHandlers({
     return browser.setVisible(parseBrowserVisibilityInput(input));
   });
 
-  register(IPC_CHANNELS.terminal.create, (_event, options) => {
-    return terminal.create(parseTerminalCreateOptions(options));
+  register(IPC_CHANNELS.terminal.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the terminal snapshot');
+    return terminal.getSnapshot(parseTerminalWorkspaceInput(input));
   });
-  register(IPC_CHANNELS.terminal.write, (_event, id, data) => {
-    terminal.write(parseSessionId(id), parseTerminalData(data));
+  register(IPC_CHANNELS.terminal.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating a terminal session');
+    return terminal.create(parseTerminalCreateInput(input));
   });
-  register(IPC_CHANNELS.terminal.resize, (_event, id, columns, rows) => {
-    const size = parseTerminalSize(columns, rows);
-    terminal.resize(parseSessionId(id), size.columns, size.rows);
+  register(IPC_CHANNELS.terminal.activate, (_event, input, ...args) => {
+    assertNoArguments(args, 'Activating a terminal session');
+    return terminal.activate(parseTerminalSessionTargetInput(input));
   });
-  register(IPC_CHANNELS.terminal.close, (_event, id) => {
-    terminal.close(parseSessionId(id));
+  register(IPC_CHANNELS.terminal.restart, (_event, input, ...args) => {
+    assertNoArguments(args, 'Restarting a terminal session');
+    return terminal.restart(parseTerminalSessionTargetInput(input));
+  });
+  register(IPC_CHANNELS.terminal.write, (_event, input, ...args) => {
+    assertNoArguments(args, 'Writing to a terminal session');
+    return terminal.write(parseTerminalWriteInput(input));
+  });
+  register(IPC_CHANNELS.terminal.resize, (_event, input, ...args) => {
+    assertNoArguments(args, 'Resizing a terminal session');
+    return terminal.resize(parseTerminalResizeInput(input));
+  });
+  register(IPC_CHANNELS.terminal.clear, (_event, input, ...args) => {
+    assertNoArguments(args, 'Clearing a terminal session');
+    return terminal.clear(parseTerminalSessionTargetInput(input));
+  });
+  register(IPC_CHANNELS.terminal.close, (_event, input, ...args) => {
+    assertNoArguments(args, 'Closing a terminal session');
+    return terminal.close(parseTerminalSessionTargetInput(input));
   });
 
   return () => {

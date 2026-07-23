@@ -51,6 +51,9 @@ jobs:
       - name: Build real Electron download smoke bundle
         run: npm run build:electron-download-smoke
 
+      - name: Build production TerminalManager smoke bundle
+        run: npm run build:terminal-manager-smoke
+
       - name: Smoke-test Electron downloads
         run: |
           node -e "require('electron')"
@@ -88,12 +91,19 @@ jobs:
         run: node scripts/verify-packaged-app.mjs 'out/Daily Workbench-linux-x64/daily-workbench' 70
 
       - name: Smoke-test packaged terminal
+        timeout-minutes: 2
         env:
           ELECTRON_RUN_AS_NODE: '1'
-        run: >-
-          'out/Daily Workbench-linux-x64/daily-workbench'
-          scripts/smoke-packaged-terminal.cjs
-          'out/Daily Workbench-linux-x64/resources/app.asar'
+        run: |
+          asar_path="$PWD/out/Daily Workbench-linux-x64/resources/app.asar"
+          smoke_root="$(mktemp -d "$RUNNER_TEMP/daily-workbench-terminal-smoke.XXXXXX")"
+          trap 'rm -rf -- "$smoke_root"' EXIT
+          cp reports/terminal-smoke/terminal-manager-smoke.cjs "$smoke_root/terminal-manager-smoke.cjs"
+          DAILY_WORKBENCH_PACKAGED_ASAR="$asar_path" \
+            NODE_PATH="$asar_path/node_modules" \
+            timeout --kill-after=5s 60s \
+            'out/Daily Workbench-linux-x64/daily-workbench' \
+            "$smoke_root/terminal-manager-smoke.cjs"
 
       - name: Smoke-test packaged database
         env:
@@ -127,8 +137,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test terminal ownership and protocol
+        run: npm run test:terminal
+
       - name: Build real Electron download smoke bundle
         run: npm run build:electron-download-smoke
+
+      - name: Build production TerminalManager smoke bundle
+        run: npm run build:terminal-manager-smoke
 
       - name: Smoke-test Electron downloads
         shell: pwsh
@@ -177,6 +193,7 @@ jobs:
           node scripts/verify-packaged-app.mjs $executable.FullName 170
 
       - name: Smoke-test packaged terminal
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $executable = Get-ChildItem -Path out -Recurse -File -Filter daily-workbench.exe |
@@ -187,14 +204,29 @@ jobs:
           }
           $asarPath = Join-Path $executable.Directory.FullName 'resources\app.asar'
           $env:ELECTRON_RUN_AS_NODE = '1'
-          $process = Start-Process `
-            -FilePath $executable.FullName `
-            -ArgumentList @('scripts/smoke-packaged-terminal.cjs', "`"$asarPath`"") `
-            -NoNewWindow `
-            -Wait `
-            -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."
+          $env:NODE_PATH = Join-Path $asarPath 'node_modules'
+          $env:DAILY_WORKBENCH_PACKAGED_ASAR = $asarPath
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP "daily-workbench-terminal-smoke-$([guid]::NewGuid())"
+          New-Item -ItemType Directory -Path $smokeDirectory | Out-Null
+          $managerSmoke = Join-Path $smokeDirectory 'terminal-manager-smoke.cjs'
+          try {
+            Copy-Item `
+              -LiteralPath (Join-Path $PWD 'reports\terminal-smoke\terminal-manager-smoke.cjs') `
+              -Destination $managerSmoke
+            $process = Start-Process `
+              -FilePath $executable.FullName `
+              -ArgumentList @("`"$managerSmoke`"") `
+              -NoNewWindow `
+              -PassThru
+            if (-not $process.WaitForExit(60000)) {
+              taskkill /PID $process.Id /T /F | Out-Null
+              throw 'Packaged TerminalManager smoke test timed out after 60 seconds.'
+            }
+            if ($process.ExitCode -ne 0) {
+              throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."
+            }
+          } finally {
+            Remove-Item -LiteralPath $smokeDirectory -Recurse -Force
           }
 
       - name: Smoke-test packaged database

@@ -1,5 +1,5 @@
 import {
-  TERMINAL_SHELLS,
+  TERMINAL_PROFILE_IDS,
   type BrowserBounds,
   type BrowserBoundsInput,
   type BrowserBookmarkTargetInput,
@@ -26,8 +26,12 @@ import {
   type TaskPlanningInput,
   type TaskRenameInput,
   type TaskStatusInput,
-  type TerminalCreateOptions,
-  type TerminalShell,
+  type TerminalCreateInput,
+  type TerminalProfileId,
+  type TerminalResizeInput,
+  type TerminalSessionTargetInput,
+  type TerminalWorkspaceInput,
+  type TerminalWriteInput,
   type WindowCloseResponse,
   type WorkspaceCreateInput,
   type WorkspacePreferencesInput,
@@ -68,9 +72,8 @@ import {
 } from '../../shared/workspace-domain';
 
 const MAX_URL_LENGTH = 4_096;
-const MAX_PATH_LENGTH = 4_096;
 const MAX_TERMINAL_WRITE_LENGTH = 1_048_576;
-const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -498,42 +501,42 @@ export function parseScheduleUpdateInput(value: unknown): ScheduleUpdateInput {
   };
 }
 
-export function parseTerminalCreateOptions(value: unknown): TerminalCreateOptions {
-  if (value === undefined) {
-    return {};
-  }
-
+export function parseTerminalWorkspaceInput(value: unknown): TerminalWorkspaceInput {
   if (!isRecord(value)) {
-    throw new TypeError('Terminal options must be an object');
+    throw new TypeError('Terminal workspace input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId']);
+  return { workspaceId: normalizeWorkspaceId(value.workspaceId) };
+}
+
+function parseTerminalProfileId(value: unknown): TerminalProfileId {
+  if (typeof value !== 'string' || !TERMINAL_PROFILE_IDS.includes(value as TerminalProfileId)) {
+    throw new TypeError('Unsupported terminal profile');
   }
 
-  assertOnlyKeys(value, ['cwd', 'shell']);
+  return value as TerminalProfileId;
+}
 
-  let cwd: string | undefined;
-  if (value.cwd !== undefined) {
-    if (
-      typeof value.cwd !== 'string' ||
-      value.cwd.length === 0 ||
-      value.cwd.length > MAX_PATH_LENGTH ||
-      value.cwd.includes('\0')
-    ) {
-      throw new TypeError('cwd must be a non-empty local path');
-    }
-    cwd = value.cwd;
+export function parseTerminalCreateInput(value: unknown): TerminalCreateInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal creation input must be an object');
   }
+  assertOnlyKeys(value, ['workspaceId', 'profileId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    profileId: parseTerminalProfileId(value.profileId),
+  };
+}
 
-  let shell: TerminalShell | undefined;
-  if (value.shell !== undefined) {
-    if (
-      typeof value.shell !== 'string' ||
-      !TERMINAL_SHELLS.includes(value.shell as TerminalShell)
-    ) {
-      throw new TypeError('Unsupported terminal shell profile');
-    }
-    shell = value.shell as TerminalShell;
+export function parseTerminalSessionTargetInput(value: unknown): TerminalSessionTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal session target input must be an object');
   }
-
-  return { cwd, shell };
+  assertOnlyKeys(value, ['workspaceId', 'sessionId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    sessionId: parseSessionId(value.sessionId),
+  };
 }
 
 export function parseSessionId(value: unknown): string {
@@ -544,7 +547,7 @@ export function parseSessionId(value: unknown): string {
   return value;
 }
 
-export function parseTerminalData(value: unknown): string {
+function parseTerminalData(value: unknown): string {
   if (typeof value !== 'string' || value.length > MAX_TERMINAL_WRITE_LENGTH) {
     throw new TypeError('Terminal input must be a string no larger than 1 MiB');
   }
@@ -552,12 +555,27 @@ export function parseTerminalData(value: unknown): string {
   return value;
 }
 
-export function parseTerminalSize(
-  columnsValue: unknown,
-  rowsValue: unknown,
-): { columns: number; rows: number } {
+export function parseTerminalWriteInput(value: unknown): TerminalWriteInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal write input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'sessionId', 'data']);
   return {
-    columns: assertIntegerInRange(columnsValue, 'columns', 1, 1_000),
-    rows: assertIntegerInRange(rowsValue, 'rows', 1, 1_000),
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    sessionId: parseSessionId(value.sessionId),
+    data: parseTerminalData(value.data),
+  };
+}
+
+export function parseTerminalResizeInput(value: unknown): TerminalResizeInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal resize input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'sessionId', 'columns', 'rows']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    sessionId: parseSessionId(value.sessionId),
+    columns: assertIntegerInRange(value.columns, 'columns', 1, 1_000),
+    rows: assertIntegerInRange(value.rows, 'rows', 1, 1_000),
   };
 }

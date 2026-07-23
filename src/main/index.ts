@@ -24,7 +24,7 @@ let databaseService: DatabaseService | null = null;
 let databaseShutdownPromise: Promise<void> | null = null;
 let allowQuit = false;
 let startupFailureShown = false;
-const browserShutdowns = new Set<() => Promise<void>>();
+const runtimeShutdowns = new Set<() => Promise<void>>();
 const closeApprovalRequests = new Set<(reason: WindowCloseReason) => Promise<boolean>>();
 const approvedCloseSurfaces = new Set<BrowserWindow>();
 let quitApprovalPromise: Promise<void> | null = null;
@@ -122,12 +122,16 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   const requestCloseApproval = (reason: WindowCloseReason): Promise<boolean> =>
     closeCoordinator.requestApproval(reason);
   closeApprovalRequests.add(requestCloseApproval);
-  const workspaceForIpc = createWorkspaceIpcAdapter(database, browser, (snapshot) => {
-    rendererWorkspaceId = snapshot.currentWorkspaceId;
-  });
   const terminal = new TerminalManager({
-    data: (event) => sendToRenderer(IPC_CHANNELS.terminal.data, event),
-    exit: (event) => sendToRenderer(IPC_CHANNELS.terminal.exit, event),
+    initialWorkspaceId: initialWorkspaceSnapshot.currentWorkspaceId,
+    eventSink: {
+      data: (event) => sendToRenderer(IPC_CHANNELS.terminal.data, event),
+      exit: (event) => sendToRenderer(IPC_CHANNELS.terminal.exit, event),
+      stateChanged: (snapshot) => sendToRenderer(IPC_CHANNELS.terminal.stateChanged, snapshot),
+    },
+  });
+  const workspaceForIpc = createWorkspaceIpcAdapter(database, browser, terminal, (snapshot) => {
+    rendererWorkspaceId = snapshot.currentWorkspaceId;
   });
   const unregisterIpc = registerIpcHandlers({
     window,
@@ -170,6 +174,9 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   });
   window.webContents.on('render-process-gone', () => {
     closeCoordinator.markUnavailable();
+    void shutdownTerminal().catch((error: unknown) => {
+      console.error('Daily Workbench failed to stop terminals after Renderer loss.', error);
+    });
   });
 
   window.once('ready-to-show', () => {
@@ -179,11 +186,17 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   let cleanedUp = false;
   let closeFlowPromise: Promise<void> | null = null;
   let browserShutdownPromise: Promise<void> | null = null;
+  let terminalShutdownPromise: Promise<void> | null = null;
   const shutdownBrowser = (): Promise<void> => {
     browserShutdownPromise ??= browser.shutdown();
     return browserShutdownPromise;
   };
-  browserShutdowns.add(shutdownBrowser);
+  const shutdownTerminal = (): Promise<void> => {
+    terminalShutdownPromise ??= terminal.shutdown();
+    return terminalShutdownPromise;
+  };
+  runtimeShutdowns.add(shutdownBrowser);
+  runtimeShutdowns.add(shutdownTerminal);
   const cleanUp = (): void => {
     if (cleanedUp) {
       return;
@@ -193,7 +206,7 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     closeApprovalRequests.delete(requestCloseApproval);
     approvedCloseSurfaces.delete(window);
     unregisterIpc();
-    terminal.closeAll();
+    void shutdownTerminal();
     browser.destroy();
     rendererSession.setPermissionCheckHandler(null);
     rendererSession.setPermissionRequestHandler(null);
@@ -208,9 +221,16 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
         console.error('Daily Workbench failed to disable its window before closing.', error);
       });
       try {
-        await shutdownBrowser();
-      } catch (error) {
-        console.error('Daily Workbench failed to flush browser state before closing.', error);
+        await settleShutdownsBefore(
+          [shutdownBrowser, shutdownTerminal],
+          async () => undefined,
+          (error) => {
+            console.error(
+              'Daily Workbench failed to stop a native workspace runtime before closing.',
+              error,
+            );
+          },
+        );
       } finally {
         // The approved window is already disabled and hidden, so force-close it without
         // reopening a second Renderer beforeunload decision after the asynchronous flush.
@@ -229,7 +249,8 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   });
 
   window.once('closed', () => {
-    browserShutdowns.delete(shutdownBrowser);
+    runtimeShutdowns.delete(shutdownBrowser);
+    runtimeShutdowns.delete(shutdownTerminal);
     closeApprovalRequests.delete(requestCloseApproval);
     approvedCloseSurfaces.delete(window);
     cleanUp();
@@ -295,11 +316,11 @@ if (!hasSingleInstanceLock) {
             console.error('Daily Workbench failed to disable a window before quitting.', error);
           });
           databaseShutdownPromise = settleShutdownsBefore(
-            browserShutdowns,
+            runtimeShutdowns,
             () => activeDatabase.close(),
             (error) => {
               console.error(
-                'Daily Workbench failed to flush browser state before quitting.',
+                'Daily Workbench failed to stop a native workspace runtime before quitting.',
                 error,
               );
             },

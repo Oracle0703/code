@@ -20,13 +20,20 @@ export interface WorkspaceBrowserLifecycle {
   discardWorkspace(workspaceId: string): void;
 }
 
+export interface WorkspaceTerminalLifecycle {
+  setActiveWorkspace(workspaceId: string): void;
+  discardWorkspace(workspaceId: string): void;
+}
+
 export function createWorkspaceIpcAdapter(
   persistence: WorkspaceIpcPersistence,
   browser: WorkspaceBrowserLifecycle,
+  terminal: WorkspaceTerminalLifecycle,
   onSnapshot: (snapshot: WorkspaceSnapshot) => void,
 ) {
   const track = async (operation: Promise<WorkspaceSnapshot>): Promise<WorkspaceSnapshot> => {
     const snapshot = await operation;
+    terminal.setActiveWorkspace(snapshot.currentWorkspaceId);
     onSnapshot(snapshot);
     return snapshot;
   };
@@ -38,8 +45,14 @@ export function createWorkspaceIpcAdapter(
     activateWorkspace: (input: WorkspaceTargetInput) => track(persistence.activateWorkspace(input)),
     archiveWorkspace: async (input: WorkspaceTargetInput) => {
       const snapshot = await persistence.archiveWorkspace(input);
+      terminal.setActiveWorkspace(snapshot.currentWorkspaceId);
       try {
         browser.discardWorkspace(input.workspaceId);
+      } catch {
+        // The database commit is authoritative; native cleanup cannot turn it into a false failure.
+      }
+      try {
+        terminal.discardWorkspace(input.workspaceId);
       } catch {
         // The database commit is authoritative; native cleanup cannot turn it into a false failure.
       }

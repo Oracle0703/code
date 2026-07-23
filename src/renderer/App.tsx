@@ -983,6 +983,8 @@ export function App() {
           <div
             className={`terminal-region ${terminalOpen ? '' : 'is-collapsed'}`}
             style={{ height: terminalOpen ? effectiveTerminalHeight : 0 }}
+            aria-hidden={!terminalOpen}
+            inert={!terminalOpen}
           >
             <div
               className="panel-resizer panel-resizer--vertical"
@@ -1010,6 +1012,7 @@ export function App() {
             <TerminalPanel
               theme={theme}
               visible={terminalOpen}
+              workspaceId={snapshot.currentWorkspaceId}
               onClose={() => updatePreferences({ terminalOpen: false })}
               onMaximize={() =>
                 updatePreferences({

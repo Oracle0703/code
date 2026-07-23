@@ -37,10 +37,14 @@ import {
   type TaskRenameInput,
   type TaskSnapshot,
   type TaskStatusInput,
-  type TerminalCreateOptions,
+  type TerminalCreateInput,
   type TerminalDataEvent,
   type TerminalExitEvent,
-  type TerminalSessionInfo,
+  type TerminalResizeInput,
+  type TerminalSessionTargetInput,
+  type TerminalSnapshot,
+  type TerminalWorkspaceInput,
+  type TerminalWriteInput,
   type Unsubscribe,
   type WindowCloseRequest,
   type WindowCloseResponse,
@@ -256,16 +260,25 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       subscribe(IPC_CHANNELS.browser.openUrlRequested, listener),
   }),
   terminal: Object.freeze({
-    create: (options?: TerminalCreateOptions) =>
-      invoke<TerminalSessionInfo>(IPC_CHANNELS.terminal.create, options),
-    write: (id: string, data: string) => invoke<void>(IPC_CHANNELS.terminal.write, id, data),
-    resize: (id: string, columns: number, rows: number) =>
-      invoke<void>(IPC_CHANNELS.terminal.resize, id, columns, rows),
-    close: (id: string) => invoke<void>(IPC_CHANNELS.terminal.close, id),
+    getSnapshot: (input: TerminalWorkspaceInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.getSnapshot, input),
+    create: (input: TerminalCreateInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.create, input),
+    activate: (input: TerminalSessionTargetInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.activate, input),
+    restart: (input: TerminalSessionTargetInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.restart, input),
+    write: (input: TerminalWriteInput) => invoke<void>(IPC_CHANNELS.terminal.write, input),
+    resize: (input: TerminalResizeInput) => invoke<void>(IPC_CHANNELS.terminal.resize, input),
+    clear: (input: TerminalSessionTargetInput) => invoke<void>(IPC_CHANNELS.terminal.clear, input),
+    close: (input: TerminalSessionTargetInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.close, input),
     onData: (listener: (event: TerminalDataEvent) => void) =>
       subscribe(IPC_CHANNELS.terminal.data, listener),
     onExit: (listener: (event: TerminalExitEvent) => void) =>
       subscribe(IPC_CHANNELS.terminal.exit, listener),
+    onStateChange: (listener: (snapshot: TerminalSnapshot) => void) =>
+      subscribe(IPC_CHANNELS.terminal.stateChanged, listener),
   }),
 });
 
