@@ -2,7 +2,7 @@
 
 ## 设计目标
 
-Daily Workbench 把“工作区”作为核心上下文。当前工作区身份、界面偏好、收件箱和任务已经进入 SQLite；笔记、浏览器标签和终端目录会继续沿同一边界接入，业务模块不需要绕过进程隔离。
+Daily Workbench 把“工作区”作为核心上下文。当前工作区身份、界面偏好、收件箱、任务、Markdown 笔记和今日日程已经进入 SQLite；浏览器标签和终端目录会继续沿同一边界接入，业务模块不需要绕过进程隔离。
 
 ## 进程与信任边界
 
@@ -45,13 +45,13 @@ Windows 默认优先使用可用的 PowerShell，后续可把 `pwsh.exe`、Windo
 - URL 协议、会话 ID 和边界坐标；
 - 目标对象是否仍然存活。
 
-工作区、收件箱与任务请求必须显式带目标 `workspaceId`，Main 不能在执行时重新读取“当前工作区”猜测归属。Main 主动触发快速记录只使用固定事件通道，不暴露通用事件订阅能力。
+工作区、收件箱、任务、笔记与日程请求必须显式带目标 `workspaceId`，Main 不能在执行时重新读取“当前工作区”猜测归属。Main 主动触发快速记录只使用固定事件通道，不暴露通用事件订阅能力。
 
 新增功能时，应先在共享层定义输入与输出，再实现 Main handler 和 Preload 映射，最后接入 Renderer。
 
 ## 数据库
 
-SQLite 连接、迁移、Repository 和备份都只存在于 Main。应用从 `userData` 推导固定的数据与备份目录，Renderer 不能提供路径、SQL、迁移版本或备份原因。数据库管理只暴露健康状态、受控手动备份和备份列表；工作区、收件箱与任务通过各自的窄业务接口访问。
+SQLite 连接、迁移、Repository 和备份都只存在于 Main。应用从 `userData` 推导固定的数据与备份目录，Renderer 不能提供路径、SQL、迁移版本或备份原因。数据库管理只暴露健康状态、受控手动备份和备份列表；工作区、收件箱、任务、笔记与日程通过各自的窄业务接口访问。
 
 数据库服务是应用级单例：首个窗口创建前打开，窗口关闭时保持，正常受控退出前排空操作队列并关闭。Windows 注销/关机和强制终止依靠 SQLite 事务与 WAL 做崩溃恢复，未完成的临时备份不会被列为可用备份。连接启用 foreign keys、WAL、busy timeout、defensive mode 与 `trusted_schema=OFF`，禁止加载扩展。
 
@@ -93,7 +93,29 @@ SQLite 连接、迁移、Repository 和备份都只存在于 Main。应用从 `u
 - 标题可重命名，任务可加入或移出今日计划。所有 mutation 返回新的完整快照，Renderer 仍按工作区和请求序号处理迟到响应。
 - `sourceInboxEntryId` 为可空且唯一的来源关系。显式转换会原子创建任务并归档来源收件箱条目；迁移到 v4 时不会把旧 `task` 分类自动转换为任务。
 - 归档工作区保留任务和来源关系以进入一致性备份，但 Service 与数据库触发器都拒绝继续修改。
-- Today 中的任务列表和进度是真实数据；笔记模块仍为界面原型，日程尚未接入真实数据或界面。
+- Today 中的任务列表和进度与今日日程都使用真实 SQLite 数据。
+
+## Markdown 笔记
+
+笔记与既有业务模块共用数据库单例和 FIFO 操作队列。列表快照显式携带 `workspaceId`，所有创建、编辑、归档和收件箱转换都绑定请求发起时的目标工作区。
+
+- 笔记 ID、时间戳、revision 和收件箱来源只由 Main 生成或推进。
+- 标题最多 200 个 Unicode code point；Markdown 正文最多 100,000 个 code point。Main 会把 CRLF/CR 统一为 LF，保留 Markdown、代码和普通换行，同时拒绝 NUL、畸形 Unicode 和不支持的控制字符。
+- 编辑与归档必须提交 `expectedRevision`。数据库中的 revision 已变化时拒绝旧写入，Renderer 需要基于最新快照重新处理，不能让迟到自动保存覆盖新内容。
+- 归档是软归档。归档工作区中的笔记继续进入备份，但 Service 与 Trigger 都拒绝修改或删除。
+- “笔记”分类仍只是收件箱处理意图。显式转换会在一个事务中归档来源、创建真实笔记并建立唯一来源关系；同一来源不能同时转换为任务和笔记。
+- Markdown 内容始终按不可信文本处理。预览只通过受控 React 节点生成，不执行原始 HTML，也不把 `javascript:`、`data:` 或本地文件链接带入可信 Renderer。
+
+## 今日日程
+
+日程快照包含目标工作区、Main 计算的本地 `todayDate` 和当天活动项。当前阶段只处理“今天”，不包含重复规则、提醒、系统通知或外部日历同步。
+
+- 日程 ID、持久化日期、时间戳和 revision 由 Main 控制；Renderer 只能提交 `expectedDate`、标题、固定类型以及分钟范围。
+- 类型固定为 `focus`、`meeting`、`review`、`personal`。时间使用本地民用日期和 `0..1440` 分钟边界，结束分钟必须晚于开始分钟，不依赖 locale 字符串或 UTC 日期切片。
+- 创建、编辑和归档都会验证 `expectedDate` 与 Main 当前日期一致；跨午夜后旧页面不能把昨天的请求写入今天。
+- 编辑与归档使用 `expectedRevision` 防止迟到响应覆盖新状态。持久化日期不可修改，跨日移动留给未来独立功能。
+- Renderer 在本地午夜、窗口重新聚焦和页面重新可见时丢弃旧日快照并重新读取，覆盖系统睡眠和时区调整后的日期变化。
+- 归档工作区保留日程历史以进入一致性备份，但不再允许修改或删除。
 
 ## 打包
 
@@ -101,7 +123,7 @@ Electron Forge 负责启动、原生模块 rebuild 与平台打包；Vite 分别
 
 应用启用 Electron fuses，关闭 Node CLI 参数、`NODE_OPTIONS` 和浏览器专用 V8 snapshot 等非必要入口。Windows ConPTY 的关闭流程依赖 `child_process.fork`，因此必须保留 RunAsNode。可信 Renderer 当前通过 `file://` 加载，所以暂时显式保留该协议的额外权限；迁移到自定义 `app://` 协议后再关闭。
 
-Electron 43 有 9 项 V1 fuse，而 Forge 7 当前兼容的 `@electron/fuses` 1.x 只能命名前 8 项。打包验证会直接断言 wire 长度和全部 9 项状态（包括 `WasmTrapHandlers`）；Electron 新增 fuse 或任一状态漂移都会使 CI 失败。Windows CI 还会对 Squirrel 构建同时产生的未打包应用负载执行原生文件检查与终端创建、写入、关闭及业务数据冒烟，成功后才生成校验和并上传安装制品。最终 NUPKG 负载复验仍由独立的 Issue #9 跟踪。
+Electron 43 有 9 项 V1 fuse，而 Forge 7 当前兼容的 `@electron/fuses` 1.x 只能命名前 8 项。打包验证会直接断言 wire 长度和全部 9 项状态（包括 `WasmTrapHandlers`）；Electron 新增 fuse 或任一状态漂移都会使 CI 失败。Windows CI 还会对 Squirrel 构建同时产生的未打包应用负载执行原生文件检查与终端创建、写入、关闭，以及工作区、收件箱、任务、笔记、日程、迁移和备份冒烟，成功后才生成校验和并上传安装制品。最终 NUPKG 负载复验仍由独立的 Issue #9 跟踪。
 
 原生模块不能跨系统复用。Windows 安装包必须在 Windows x64 环境执行 `npm ci` 与 `npm run make`，并在升级 Electron 或 `node-pty` 后验证打包产物中的真实终端。
 
@@ -115,7 +137,8 @@ Electron 43 有 9 项 V1 fuse，而 Forge 7 当前兼容的 `@electron/fuses` 1.
 Workspace
 ├─ Inbox ✓
 ├─ Tasks ✓
-├─ Notes
+├─ Notes ✓
+├─ Schedule ✓
 ├─ Focus sessions
 ├─ Browser tabs
 ├─ Terminal profiles

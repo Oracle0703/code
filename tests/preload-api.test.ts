@@ -113,3 +113,115 @@ describe('preload task API', () => {
     ]);
   });
 });
+
+describe('preload note API', () => {
+  it('exposes only the declared frozen note methods', () => {
+    expect(Object.keys(api.note).sort()).toEqual([
+      'archive',
+      'convertInbox',
+      'create',
+      'getSnapshot',
+      'update',
+    ]);
+    expect(Object.isFrozen(api.note)).toBe(true);
+  });
+
+  it('forwards exact note inputs through the allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const noteId = '523e4567-e89b-42d3-a456-426614174000';
+    const entryId = '223e4567-e89b-42d3-a456-426614174000';
+
+    await api.note.getSnapshot({ workspaceId });
+    await api.note.create({ workspaceId, title: '笔记', body: '# Markdown' });
+    await api.note.update({
+      workspaceId,
+      noteId,
+      title: '更新',
+      body: '正文',
+      expectedRevision: 1,
+    });
+    await api.note.archive({ workspaceId, noteId, expectedRevision: 2 });
+    await api.note.convertInbox({ workspaceId, entryId });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['note:get-snapshot', { workspaceId }],
+      ['note:create', { workspaceId, title: '笔记', body: '# Markdown' }],
+      ['note:update', { workspaceId, noteId, title: '更新', body: '正文', expectedRevision: 1 }],
+      ['note:archive', { workspaceId, noteId, expectedRevision: 2 }],
+      ['note:convert-inbox', { workspaceId, entryId }],
+    ]);
+  });
+});
+
+describe('preload schedule API', () => {
+  it('exposes only the declared frozen schedule methods', () => {
+    expect(Object.keys(api.schedule).sort()).toEqual([
+      'archive',
+      'create',
+      'getSnapshot',
+      'update',
+    ]);
+    expect(Object.isFrozen(api.schedule)).toBe(true);
+  });
+
+  it('forwards exact schedule inputs through the allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const scheduleId = '623e4567-e89b-42d3-a456-426614174000';
+    const expectedDate = '2026-07-22';
+
+    await api.schedule.getSnapshot({ workspaceId });
+    await api.schedule.create({
+      workspaceId,
+      expectedDate,
+      title: '专注',
+      kind: 'focus',
+      startMinute: 540,
+      endMinute: 600,
+    });
+    await api.schedule.update({
+      workspaceId,
+      scheduleId,
+      expectedDate,
+      expectedRevision: 1,
+      title: '评审',
+      kind: 'review',
+      startMinute: 600,
+      endMinute: 660,
+    });
+    await api.schedule.archive({
+      workspaceId,
+      scheduleId,
+      expectedDate,
+      expectedRevision: 2,
+    });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['schedule:get-snapshot', { workspaceId }],
+      [
+        'schedule:create',
+        {
+          workspaceId,
+          expectedDate,
+          title: '专注',
+          kind: 'focus',
+          startMinute: 540,
+          endMinute: 600,
+        },
+      ],
+      [
+        'schedule:update',
+        {
+          workspaceId,
+          scheduleId,
+          expectedDate,
+          expectedRevision: 1,
+          title: '评审',
+          kind: 'review',
+          startMinute: 600,
+          endMinute: 660,
+        },
+      ],
+      ['schedule:archive', { workspaceId, scheduleId, expectedDate, expectedRevision: 2 }],
+    ]);
+  });
+});

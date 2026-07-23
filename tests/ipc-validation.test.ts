@@ -7,6 +7,13 @@ import {
   parseInboxCreateInput,
   parseInboxTargetInput,
   parseInboxUndoInput,
+  parseNoteArchiveInput,
+  parseNoteConvertInboxInput,
+  parseNoteCreateInput,
+  parseNoteUpdateInput,
+  parseScheduleCreateInput,
+  parseScheduleTargetInput,
+  parseScheduleUpdateInput,
   parseTaskConvertInboxInput,
   parseTaskCreateInput,
   parseTaskPlanningInput,
@@ -26,6 +33,8 @@ const WORKSPACE_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ENTRY_ID = '223e4567-e89b-42d3-a456-426614174000';
 const UNDO_TOKEN = '323e4567-e89b-42d3-a456-426614174000';
 const TASK_ID = '423e4567-e89b-42d3-a456-426614174000';
+const NOTE_ID = '523e4567-e89b-42d3-a456-426614174000';
+const SCHEDULE_ID = '623e4567-e89b-42d3-a456-426614174000';
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -295,6 +304,181 @@ describe('IPC validation', () => {
         entryId: ENTRY_ID,
         planning: 'today',
         title: '不能覆盖来源正文',
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts exact note inputs while preserving Markdown and revision CAS', () => {
+    expect(
+      parseNoteCreateInput({
+        workspaceId: WORKSPACE_ID,
+        title: '  技术笔记 👩‍💻  ',
+        body: '# 标题\r\n\r\n```ts\r\nconst n = 1;\r\n```',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      title: '技术笔记 👩‍💻',
+      body: '# 标题\n\n```ts\nconst n = 1;\n```',
+    });
+    expect(
+      parseNoteUpdateInput({
+        workspaceId: WORKSPACE_ID,
+        noteId: NOTE_ID,
+        title: '更新',
+        body: '',
+        expectedRevision: 2,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      noteId: NOTE_ID,
+      title: '更新',
+      body: '',
+      expectedRevision: 2,
+    });
+    expect(
+      parseNoteArchiveInput({
+        workspaceId: WORKSPACE_ID,
+        noteId: NOTE_ID,
+        expectedRevision: 3,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      noteId: NOTE_ID,
+      expectedRevision: 3,
+    });
+    expect(parseNoteConvertInboxInput({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      entryId: ENTRY_ID,
+    });
+  });
+
+  it('rejects malformed notes and renderer-owned note persistence fields', () => {
+    for (const revision of [0, -1, 1.5, '1']) {
+      expect(() =>
+        parseNoteArchiveInput({
+          workspaceId: WORKSPACE_ID,
+          noteId: NOTE_ID,
+          expectedRevision: revision,
+        }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      parseNoteCreateInput({
+        workspaceId: WORKSPACE_ID,
+        title: '伪造字段',
+        body: '',
+        id: NOTE_ID,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseNoteUpdateInput({
+        workspaceId: WORKSPACE_ID,
+        noteId: NOTE_ID,
+        title: '控制字符',
+        body: 'bad\u0000body',
+        expectedRevision: 1,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts exact schedule inputs with bounded minutes and stale-date tokens', () => {
+    expect(
+      parseScheduleCreateInput({
+        workspaceId: WORKSPACE_ID,
+        expectedDate: '2026-07-22',
+        title: '  评审  ',
+        kind: 'review',
+        startMinute: 0,
+        endMinute: 1,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      expectedDate: '2026-07-22',
+      title: '评审',
+      kind: 'review',
+      startMinute: 0,
+      endMinute: 1,
+    });
+    expect(
+      parseScheduleUpdateInput({
+        workspaceId: WORKSPACE_ID,
+        scheduleId: SCHEDULE_ID,
+        expectedDate: '2026-07-22',
+        expectedRevision: 2,
+        title: '会议',
+        kind: 'meeting',
+        startMinute: 1439,
+        endMinute: 1440,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      scheduleId: SCHEDULE_ID,
+      expectedDate: '2026-07-22',
+      expectedRevision: 2,
+      title: '会议',
+      kind: 'meeting',
+      startMinute: 1439,
+      endMinute: 1440,
+    });
+    expect(
+      parseScheduleTargetInput({
+        workspaceId: WORKSPACE_ID,
+        scheduleId: SCHEDULE_ID,
+        expectedDate: '2026-07-22',
+        expectedRevision: 3,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      scheduleId: SCHEDULE_ID,
+      expectedDate: '2026-07-22',
+      expectedRevision: 3,
+    });
+  });
+
+  it('rejects invalid schedule ranges, dates, enums, revisions, and surplus fields', () => {
+    for (const input of [
+      { startMinute: -1, endMinute: 1 },
+      { startMinute: 60, endMinute: 60 },
+      { startMinute: 1439, endMinute: 1441 },
+      { startMinute: 1.5, endMinute: 2 },
+    ]) {
+      expect(() =>
+        parseScheduleCreateInput({
+          workspaceId: WORKSPACE_ID,
+          expectedDate: '2026-07-22',
+          title: '非法范围',
+          kind: 'focus',
+          ...input,
+        }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      parseScheduleCreateInput({
+        workspaceId: WORKSPACE_ID,
+        expectedDate: '2026-02-30',
+        title: '非法日期',
+        kind: 'focus',
+        startMinute: 1,
+        endMinute: 2,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseScheduleTargetInput({
+        workspaceId: WORKSPACE_ID,
+        scheduleId: SCHEDULE_ID,
+        expectedDate: '2026-07-22',
+        expectedRevision: 0,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseScheduleCreateInput({
+        workspaceId: WORKSPACE_ID,
+        expectedDate: '2026-07-22',
+        title: '伪造字段',
+        kind: 'external',
+        startMinute: 1,
+        endMinute: 2,
+        scheduledFor: '2026-07-22',
       }),
     ).toThrow(TypeError);
   });

@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  CalendarClock,
   CalendarDays,
   Check,
   CheckCircle2,
@@ -15,8 +16,15 @@ import {
   Target,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import type { Task, TaskSnapshot, TaskStatus } from '../../shared/contracts';
+import type {
+  ScheduleItem,
+  ScheduleSnapshot,
+  Task,
+  TaskSnapshot,
+  TaskStatus,
+} from '../../shared/contracts';
 import { INBOX_CONTENT_MAX_LENGTH } from '../../shared/inbox-domain';
+import { formatScheduleInputMinute } from '../schedule-state';
 import { toLocalDateKey } from '../task-state';
 
 interface TodayDashboardProps {
@@ -30,12 +38,22 @@ interface TodayDashboardProps {
   taskOperationError: string | null;
   pendingTaskIds: ReadonlySet<string>;
   taskCreatePending: boolean;
+  scheduleSnapshot: ScheduleSnapshot | null;
+  scheduleItems: readonly ScheduleItem[];
+  scheduleStatus: 'loading' | 'ready' | 'error';
+  scheduleLoadError: string | null;
+  scheduleOperationError: string | null;
+  pendingScheduleItemIds: ReadonlySet<string>;
+  scheduleCreatePending: boolean;
   onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
   onOpenTasks: () => void;
   onCreateToday: () => void;
   onOpenTask: (task: Task) => void;
   onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<void>;
+  onRetrySchedule: () => void;
+  onCreateSchedule: () => void;
+  onOpenSchedule: (item: ScheduleItem) => void;
 }
 
 function formatTimer(seconds: number) {
@@ -57,12 +75,22 @@ export function TodayDashboard({
   taskOperationError,
   pendingTaskIds,
   taskCreatePending,
+  scheduleSnapshot,
+  scheduleItems,
+  scheduleStatus,
+  scheduleLoadError,
+  scheduleOperationError,
+  pendingScheduleItemIds,
+  scheduleCreatePending,
   onCapture,
   onOpenInbox,
   onOpenTasks,
   onCreateToday,
   onOpenTask,
   onUpdateTaskStatus,
+  onRetrySchedule,
+  onCreateSchedule,
+  onOpenSchedule,
 }: TodayDashboardProps) {
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
@@ -71,7 +99,8 @@ export function TodayDashboard({
   const [focusSeconds, setFocusSeconds] = useState(25 * 60);
   const captureLength = Array.from(capture.trim()).length;
   const captureTooLong = captureLength > INBOX_CONTENT_MAX_LENGTH;
-  const todayDate = taskSnapshot?.todayDate ?? toLocalDateKey(new Date());
+  const todayDate =
+    taskSnapshot?.todayDate ?? scheduleSnapshot?.todayDate ?? toLocalDateKey(new Date());
   const todayTasks = useMemo(
     () => taskSnapshot?.tasks.filter((task) => task.plannedFor === taskSnapshot.todayDate) ?? [],
     [taskSnapshot],
@@ -374,32 +403,83 @@ export function TodayDashboard({
             <div className="focus-card__glow" aria-hidden="true" />
           </section>
 
-          <section className="panel-card today-plan-card" aria-labelledby="today-plan-heading">
+          <section className="panel-card agenda-card" aria-labelledby="agenda-heading">
             <div className="panel-card__header">
               <div>
-                <h2 id="today-plan-heading">今日进度</h2>
+                <h2 id="agenda-heading">今日日程</h2>
               </div>
+              <button
+                type="button"
+                className="agenda-card__add"
+                onClick={onCreateSchedule}
+                disabled={scheduleCreatePending || !scheduleSnapshot}
+                aria-label="添加今日日程"
+              >
+                {scheduleCreatePending ? (
+                  <LoaderCircle className="is-spinning" size={14} />
+                ) : (
+                  <Plus size={14} />
+                )}
+              </button>
             </div>
-            <div className="today-plan-card__progress" aria-hidden="true">
-              <i style={{ width: `${progress}%` }} />
-            </div>
-            <dl>
-              <div>
-                <dt>待完成</dt>
-                <dd>{taskReady ? remainingTasks : '—'}</dd>
+            {scheduleOperationError ? (
+              <p className="agenda-card__error" role="alert">
+                {scheduleOperationError}
+              </p>
+            ) : null}
+            {scheduleStatus === 'loading' && !scheduleSnapshot ? (
+              <div className="agenda-card__state" aria-live="polite">
+                <LoaderCircle className="is-spinning" size={16} /> 正在同步日程…
               </div>
-              <div>
-                <dt>已完成</dt>
-                <dd>{taskReady ? completedTasks : '—'}</dd>
+            ) : scheduleStatus === 'error' && !scheduleSnapshot ? (
+              <div className="agenda-card__state is-error" role="alert">
+                <span>{scheduleLoadError ?? '今日日程暂时无法读取。'}</span>
+                <button type="button" onClick={onRetrySchedule}>
+                  重试
+                </button>
               </div>
-              <div>
-                <dt>总计</dt>
-                <dd>{taskReady ? todayTasks.length : '—'}</dd>
+            ) : scheduleSnapshot && scheduleItems.length > 0 ? (
+              <div className="agenda-list">
+                {scheduleItems.map((item) => {
+                  const pending = pendingScheduleItemIds.has(item.id);
+                  return (
+                    <button
+                      type="button"
+                      className="agenda-row"
+                      key={item.id}
+                      disabled={pending}
+                      onClick={() => onOpenSchedule(item)}
+                      aria-label={`编辑日程：${item.title}，${formatScheduleInputMinute(item.startMinute)} 到 ${formatScheduleInputMinute(item.endMinute)}`}
+                    >
+                      <span className="agenda-row__time">
+                        <strong>{formatScheduleInputMinute(item.startMinute)}</strong>
+                        <small>{formatScheduleInputMinute(item.endMinute)}</small>
+                      </span>
+                      <span className={`agenda-row__line agenda-row__line--${item.kind}`} />
+                      <span className="agenda-row__copy">
+                        <strong>{item.title}</strong>
+                        <small>{scheduleKindLabel(item.kind)}</small>
+                      </span>
+                      {pending ? <LoaderCircle className="is-spinning" size={13} /> : null}
+                    </button>
+                  );
+                })}
               </div>
-            </dl>
-            <button type="button" className="secondary-button" onClick={onCreateToday}>
-              <CalendarDays size={14} /> 安排任务到今天
-            </button>
+            ) : (
+              <div className="agenda-card__empty">
+                <CalendarClock size={19} />
+                <strong>今天还没有日程</strong>
+                <span>安排一段明确的开始与结束时间。</span>
+                <button type="button" onClick={onCreateSchedule} disabled={!scheduleSnapshot}>
+                  <Plus size={13} /> 添加日程
+                </button>
+              </div>
+            )}
+            {scheduleSnapshot && scheduleItems.length > 0 ? (
+              <div className="agenda-footer">
+                <CalendarClock size={13} /> {scheduleItems.length} 段本地日程
+              </div>
+            ) : null}
           </section>
         </div>
       </div>
@@ -422,4 +502,11 @@ function taskStatusLabel(status: TaskStatus): string {
   if (status === 'completed') return '已完成';
   if (status === 'in_progress') return '进行中';
   return '待办';
+}
+
+function scheduleKindLabel(kind: ScheduleItem['kind']): string {
+  if (kind === 'meeting') return '会议';
+  if (kind === 'review') return '回顾';
+  if (kind === 'personal') return '个人';
+  return '专注';
 }

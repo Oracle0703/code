@@ -47,7 +47,9 @@ import { CommandPalette, type PaletteCommand } from './components/CommandPalette
 import { IconButton } from './components/IconButton';
 import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
+import { NotePage } from './components/NotePage';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
+import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
 import { SectionPage } from './components/SectionPage';
 import { TaskDialog, type TaskDialogState } from './components/TaskDialog';
 import { TaskPage } from './components/TaskPage';
@@ -56,9 +58,12 @@ import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { useInboxController } from './hooks/useInboxController';
+import { useNoteController } from './hooks/useNoteController';
+import { useScheduleController } from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import type { ViewId } from './model';
+import { defaultScheduleRange } from './schedule-state';
 
 const viewLabels: Record<ViewId, string> = {
   today: '今日',
@@ -90,6 +95,9 @@ export function App() {
   const [workspaceDialog, setWorkspaceDialog] = useState<WorkspaceDialogState | null>(null);
   const [quickCaptureTarget, setQuickCaptureTarget] = useState<QuickCaptureTarget | null>(null);
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
+  const [scheduleDialog, setScheduleDialog] = useState<ScheduleDialogState | null>(null);
+  const [noteDraftDirty, setNoteDraftDirty] = useState(false);
+  const [requestedNoteId, setRequestedNoteId] = useState<string | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
@@ -97,6 +105,8 @@ export function App() {
   const snapshot = workspaceController.snapshot;
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
+  const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
+  const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
   const activeWorkspace = snapshot ? findCurrentWorkspace(snapshot) : null;
   const visibleUndoNotices = useMemo(
     () =>
@@ -118,16 +128,39 @@ export function App() {
     theme,
   } = preferences;
   const overlayOpen =
-    paletteOpen || workspaceDialog !== null || quickCaptureTarget !== null || taskDialog !== null;
+    paletteOpen ||
+    workspaceDialog !== null ||
+    quickCaptureTarget !== null ||
+    taskDialog !== null ||
+    scheduleDialog !== null;
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
   const updatePreferences = workspaceController.updatePreferences;
+  const confirmLeaveNoteDraft = useCallback(
+    () => !noteDraftDirty || window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
+    [noteDraftDirty],
+  );
+  const requestActiveView = useCallback(
+    (view: WorkspaceViewId) => {
+      if (view === activeView || !confirmLeaveNoteDraft()) return;
+      updatePreferences({ activeView: view });
+    },
+    [activeView, confirmLeaveNoteDraft, updatePreferences],
+  );
+  const requestWorkspaceActivation = useCallback(
+    (workspaceId: string) => {
+      if (!confirmLeaveNoteDraft()) return;
+      void workspaceController.activate(workspaceId).catch(() => undefined);
+    },
+    [confirmLeaveNoteDraft, workspaceController],
+  );
   const openQuickCapture = useCallback(() => {
     if (
       !activeWorkspace ||
       workspaceDialog !== null ||
       taskDialog !== null ||
+      scheduleDialog !== null ||
       workspaceController.pendingOperation !== null
     ) {
       return;
@@ -137,7 +170,13 @@ export function App() {
       (current) =>
         current ?? { workspaceId: activeWorkspace.id, workspaceName: activeWorkspace.name },
     );
-  }, [activeWorkspace, taskDialog, workspaceController.pendingOperation, workspaceDialog]);
+  }, [
+    activeWorkspace,
+    scheduleDialog,
+    taskDialog,
+    workspaceController.pendingOperation,
+    workspaceDialog,
+  ]);
 
   const openTaskCreate = useCallback(
     (planning: 'today' | 'none') => {
@@ -145,6 +184,7 @@ export function App() {
         !activeWorkspace ||
         workspaceDialog !== null ||
         quickCaptureTarget !== null ||
+        scheduleDialog !== null ||
         workspaceController.pendingOperation !== null
       ) {
         return;
@@ -157,8 +197,46 @@ export function App() {
         planning,
       });
     },
-    [activeWorkspace, quickCaptureTarget, workspaceController.pendingOperation, workspaceDialog],
+    [
+      activeWorkspace,
+      quickCaptureTarget,
+      scheduleDialog,
+      workspaceController.pendingOperation,
+      workspaceDialog,
+    ],
   );
+
+  const openScheduleCreate = useCallback(() => {
+    if (
+      !activeWorkspace ||
+      !scheduleController.snapshot ||
+      workspaceDialog !== null ||
+      quickCaptureTarget !== null ||
+      taskDialog !== null ||
+      scheduleDialog !== null ||
+      workspaceController.pendingOperation !== null
+    ) {
+      return;
+    }
+    const defaults = defaultScheduleRange(new Date());
+    setPaletteOpen(false);
+    setScheduleDialog({
+      mode: 'create',
+      workspaceId: activeWorkspace.id,
+      workspaceName: activeWorkspace.name,
+      expectedDate: scheduleController.snapshot.todayDate,
+      startMinute: defaults.startMinute,
+      endMinute: defaults.endMinute,
+    });
+  }, [
+    activeWorkspace,
+    quickCaptureTarget,
+    scheduleController.snapshot,
+    scheduleDialog,
+    taskDialog,
+    workspaceController.pendingOperation,
+    workspaceDialog,
+  ]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -173,6 +251,16 @@ export function App() {
   }, []);
 
   useEffect(() => window.workbench.inbox.onCaptureRequest(openQuickCapture), [openQuickCapture]);
+
+  useEffect(() => {
+    if (!noteDraftDirty) return;
+    const protectDraft = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', protectDraft);
+    return () => window.removeEventListener('beforeunload', protectDraft);
+  }, [noteDraftDirty]);
 
   useEffect(() => {
     const updateViewport = () => setViewportHeight(window.innerHeight);
@@ -193,6 +281,7 @@ export function App() {
       if (
         workspaceDialog !== null ||
         taskDialog !== null ||
+        scheduleDialog !== null ||
         workspaceController.pendingOperation !== null
       ) {
         return;
@@ -240,7 +329,7 @@ export function App() {
         updatePreferences({ terminalOpen: !terminalOpen });
       } else if (event.key === ',') {
         event.preventDefault();
-        updatePreferences({ activeView: 'settings' });
+        requestActiveView('settings');
       }
     };
 
@@ -258,6 +347,8 @@ export function App() {
     workspaceController.pendingOperation,
     workspaceDialog,
     taskDialog,
+    scheduleDialog,
+    requestActiveView,
   ]);
 
   const commands = useMemo<PaletteCommand[]>(() => {
@@ -272,7 +363,7 @@ export function App() {
         icon: Layers3,
         keywords: `工作区 切换 ${workspace.name}`,
         action: () => {
-          void workspaceController.activate(workspace.id).catch(() => undefined);
+          requestWorkspaceActivation(workspace.id);
         },
       }));
 
@@ -305,11 +396,13 @@ export function App() {
         group: '工作区',
         icon: FolderPlus,
         keywords: '工作区 新建 创建',
-        action: () =>
+        action: () => {
+          if (!confirmLeaveNoteDraft()) return;
           setWorkspaceDialog({
             mode: 'create',
             suggestedColor: WORKSPACE_COLORS[snapshot.workspaces.length % WORKSPACE_COLORS.length],
-          }),
+          });
+        },
       },
       {
         id: 'workspace:rename',
@@ -328,12 +421,14 @@ export function App() {
               description: '保留数据并从活动列表隐藏',
               group: '工作区',
               icon: Archive,
-              action: () =>
+              action: () => {
+                if (!confirmLeaveNoteDraft()) return;
                 setWorkspaceDialog({
                   mode: 'archive',
                   workspace: activeWorkspace,
                   switchesWorkspace: true,
-                }),
+                });
+              },
             } satisfies PaletteCommand,
           ]
         : []),
@@ -362,35 +457,35 @@ export function App() {
         label: '前往今日',
         group: '页面',
         icon: LayoutDashboard,
-        action: () => updatePreferences({ activeView: 'today' }),
+        action: () => requestActiveView('today'),
       },
       {
         id: 'go-inbox',
         label: '前往收件箱',
         group: '页面',
         icon: Inbox,
-        action: () => updatePreferences({ activeView: 'inbox' }),
+        action: () => requestActiveView('inbox'),
       },
       {
         id: 'go-tasks',
         label: '前往任务',
         group: '页面',
         icon: CheckSquare2,
-        action: () => updatePreferences({ activeView: 'tasks' }),
+        action: () => requestActiveView('tasks'),
       },
       {
         id: 'go-notes',
         label: '前往笔记',
         group: '页面',
         icon: NotebookPen,
-        action: () => updatePreferences({ activeView: 'notes' }),
+        action: () => requestActiveView('notes'),
       },
       {
         id: 'go-automations',
         label: '前往自动化',
         group: '页面',
         icon: Bot,
-        action: () => updatePreferences({ activeView: 'automations' }),
+        action: () => requestActiveView('automations'),
       },
       {
         id: 'toggle-theme',
@@ -406,7 +501,7 @@ export function App() {
         group: '设置',
         icon: Settings2,
         shortcut: 'Ctrl ,',
-        action: () => updatePreferences({ activeView: 'settings' }),
+        action: () => requestActiveView('settings'),
       },
     ];
   }, [
@@ -414,11 +509,13 @@ export function App() {
     browserOpen,
     openQuickCapture,
     openTaskCreate,
+    confirmLeaveNoteDraft,
+    requestActiveView,
+    requestWorkspaceActivation,
     snapshot,
     terminalOpen,
     theme,
     updatePreferences,
-    workspaceController,
   ]);
 
   const beginBrowserResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -527,8 +624,6 @@ export function App() {
     );
   }
 
-  const setActiveView = (view: WorkspaceViewId) => updatePreferences({ activeView: view });
-
   return (
     <div className="app-shell">
       <header
@@ -582,7 +677,13 @@ export function App() {
           </IconButton>
         </div>
 
-        <WindowControls maximized={maximized} onToggleMaximize={toggleWindowMaximize} />
+        <WindowControls
+          maximized={maximized}
+          onToggleMaximize={toggleWindowMaximize}
+          onClose={() => {
+            if (confirmLeaveNoteDraft()) void window.workbench?.window.close();
+          }}
+        />
       </header>
 
       <div className="workbench-shell">
@@ -591,7 +692,7 @@ export function App() {
           inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
           taskCount={taskController.counts?.active ?? null}
           todayCount={taskController.counts?.today ?? null}
-          onSelect={setActiveView}
+          onSelect={requestActiveView}
         />
         <div
           className={`sidebar-slot ${sidebarCollapsed ? 'is-collapsed' : ''}`}
@@ -610,25 +711,25 @@ export function App() {
             taskCount={taskController.counts?.active ?? null}
             todayCount={taskController.counts?.today ?? null}
             onRetrySave={workspaceController.retryPreferences}
-            onSelectView={setActiveView}
-            onSelectWorkspace={(workspaceId) => {
-              void workspaceController.activate(workspaceId).catch(() => undefined);
-            }}
-            onCreateWorkspace={() =>
+            onSelectView={requestActiveView}
+            onSelectWorkspace={requestWorkspaceActivation}
+            onCreateWorkspace={() => {
+              if (!confirmLeaveNoteDraft()) return;
               setWorkspaceDialog({
                 mode: 'create',
                 suggestedColor:
                   WORKSPACE_COLORS[snapshot.workspaces.length % WORKSPACE_COLORS.length],
-              })
-            }
+              });
+            }}
             onRenameWorkspace={(workspace) => setWorkspaceDialog({ mode: 'rename', workspace })}
-            onArchiveWorkspace={(workspace) =>
+            onArchiveWorkspace={(workspace) => {
+              if (!confirmLeaveNoteDraft()) return;
               setWorkspaceDialog({
                 mode: 'archive',
                 workspace,
                 switchesWorkspace: workspace.id === snapshot.currentWorkspaceId,
-              })
-            }
+              });
+            }}
           />
         </div>
 
@@ -676,8 +777,15 @@ export function App() {
                     onCapture={(content) =>
                       inboxController.create(snapshot.currentWorkspaceId, content, 'uncategorized')
                     }
-                    onOpenInbox={() => setActiveView('inbox')}
-                    onOpenTasks={() => setActiveView('tasks')}
+                    scheduleSnapshot={scheduleController.snapshot}
+                    scheduleItems={scheduleController.items}
+                    scheduleStatus={scheduleController.status}
+                    scheduleLoadError={scheduleController.loadError}
+                    scheduleOperationError={scheduleController.operationError}
+                    pendingScheduleItemIds={scheduleController.pendingItemIds}
+                    scheduleCreatePending={scheduleController.pendingCreate}
+                    onOpenInbox={() => requestActiveView('inbox')}
+                    onOpenTasks={() => requestActiveView('tasks')}
                     onCreateToday={() => openTaskCreate('today')}
                     onOpenTask={(task) =>
                       setTaskDialog({
@@ -688,6 +796,17 @@ export function App() {
                       })
                     }
                     onUpdateTaskStatus={taskController.updateStatus}
+                    onRetrySchedule={scheduleController.retry}
+                    onCreateSchedule={openScheduleCreate}
+                    onOpenSchedule={(item) =>
+                      setScheduleDialog({
+                        mode: 'edit',
+                        workspaceId: snapshot.currentWorkspaceId,
+                        workspaceName: activeWorkspace.name,
+                        expectedDate: scheduleController.snapshot?.todayDate ?? item.scheduledFor,
+                        item,
+                      })
+                    }
                   />
                 ) : activeView === 'inbox' ? (
                   <InboxPage
@@ -697,6 +816,7 @@ export function App() {
                     operationError={inboxController.operationError}
                     pendingEntryIds={inboxController.pendingEntryIds}
                     pendingConversionEntryIds={taskController.pendingConversionEntryIds}
+                    pendingNoteConversionEntryIds={noteController.pendingConversionEntryIds}
                     onRetry={inboxController.retry}
                     onOpenCapture={openQuickCapture}
                     onCategorize={inboxController.categorize}
@@ -710,6 +830,17 @@ export function App() {
                         planning: 'today',
                       })
                     }
+                    onConvertNote={async (entry) => {
+                      const targetWorkspaceId = snapshot.currentWorkspaceId;
+                      const sequence = inboxController.reserveSnapshotRequest(targetWorkspaceId);
+                      const result = await noteController.convertInbox(entry.id);
+                      inboxController.applyReservedSnapshot(result.inboxSnapshot, sequence);
+                      const converted = result.noteSnapshot.notes.find(
+                        ({ sourceInboxEntryId }) => sourceInboxEntryId === entry.id,
+                      );
+                      if (converted) setRequestedNoteId(converted.id);
+                      requestActiveView('notes');
+                    }}
                   />
                 ) : activeView === 'tasks' ? (
                   <TaskPage
@@ -731,6 +862,28 @@ export function App() {
                     }
                     onUpdateStatus={taskController.updateStatus}
                     onUpdatePlanning={taskController.updatePlanning}
+                  />
+                ) : activeView === 'notes' ? (
+                  <NotePage
+                    key={snapshot.currentWorkspaceId}
+                    workspaceName={activeWorkspace.name}
+                    notes={noteController.notes}
+                    status={noteController.status}
+                    loadError={noteController.loadError}
+                    operationError={noteController.operationError}
+                    pendingNoteIds={noteController.pendingNoteIds}
+                    pendingCreate={noteController.pendingCreate}
+                    requestedNoteId={requestedNoteId}
+                    onRequestedNoteHandled={() => setRequestedNoteId(null)}
+                    onDirtyChange={setNoteDraftDirty}
+                    onRetry={noteController.retry}
+                    onCreate={noteController.create}
+                    onUpdate={noteController.update}
+                    onArchive={noteController.archive}
+                    onOpenLink={(url) => {
+                      updatePreferences({ browserOpen: true });
+                      void window.workbench.browser.navigate(url).catch(() => undefined);
+                    }}
                   />
                 ) : (
                   <SectionPage
@@ -830,7 +983,9 @@ export function App() {
                 role={
                   workspaceController.operationError ||
                   inboxController.operationError ||
-                  taskController.operationError
+                  taskController.operationError ||
+                  noteController.operationError ||
+                  scheduleController.operationError
                     ? 'alert'
                     : undefined
                 }
@@ -838,6 +993,9 @@ export function App() {
                 {workspaceController.operationError ??
                   inboxController.operationError ??
                   taskController.operationError ??
+                  noteController.operationError ??
+                  scheduleController.operationError ??
+                  (noteDraftDirty ? '笔记有未保存的更改' : null) ??
                   '已就绪'}
               </span>
             </div>
@@ -911,6 +1069,43 @@ export function App() {
           }}
         />
       ) : null}
+      {scheduleDialog ? (
+        <ScheduleDialog
+          state={scheduleDialog}
+          onClose={() => setScheduleDialog(null)}
+          onCreate={async (title, kind, startMinute, endMinute) => {
+            if (scheduleDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开日程窗口。');
+            }
+            await scheduleController.create(
+              scheduleDialog.expectedDate,
+              title,
+              kind,
+              startMinute,
+              endMinute,
+            );
+          }}
+          onUpdate={async (item, title, kind, startMinute, endMinute) => {
+            if (scheduleDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开日程窗口。');
+            }
+            await scheduleController.update(
+              item,
+              scheduleDialog.expectedDate,
+              title,
+              kind,
+              startMinute,
+              endMinute,
+            );
+          }}
+          onArchive={async (item) => {
+            if (scheduleDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开日程窗口。');
+            }
+            await scheduleController.archive(item, scheduleDialog.expectedDate);
+          }}
+        />
+      ) : null}
       <InboxUndoStack
         notices={visibleUndoNotices}
         pendingTokens={inboxController.pendingUndoTokens}
@@ -949,7 +1144,11 @@ function StartupShell({
         </div>
         <span />
         <span />
-        <WindowControls maximized={maximized} onToggleMaximize={onToggleMaximize} />
+        <WindowControls
+          maximized={maximized}
+          onToggleMaximize={onToggleMaximize}
+          onClose={() => void window.workbench?.window.close()}
+        />
       </header>
       <main className="workspace-startup">
         <span className="workspace-startup__logo">
@@ -980,9 +1179,10 @@ function StartupShell({
 interface WindowControlsProps {
   maximized: boolean;
   onToggleMaximize: () => void;
+  onClose: () => void;
 }
 
-function WindowControls({ maximized, onToggleMaximize }: WindowControlsProps) {
+function WindowControls({ maximized, onToggleMaximize, onClose }: WindowControlsProps) {
   return (
     <div className="window-controls" aria-label="窗口控制">
       <button
@@ -995,12 +1195,7 @@ function WindowControls({ maximized, onToggleMaximize }: WindowControlsProps) {
       <button type="button" aria-label={maximized ? '还原' : '最大化'} onClick={onToggleMaximize}>
         <Square size={12} />
       </button>
-      <button
-        type="button"
-        className="window-controls__close"
-        aria-label="关闭"
-        onClick={() => void window.workbench?.window.close()}
-      >
+      <button type="button" className="window-controls__close" aria-label="关闭" onClick={onClose}>
         <X size={16} />
       </button>
     </div>

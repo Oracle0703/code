@@ -37,6 +37,19 @@ export const IPC_CHANNELS = {
     updatePlanning: 'task:update-planning',
     convertInbox: 'task:convert-inbox',
   },
+  note: {
+    getSnapshot: 'note:get-snapshot',
+    create: 'note:create',
+    update: 'note:update',
+    archive: 'note:archive',
+    convertInbox: 'note:convert-inbox',
+  },
+  schedule: {
+    getSnapshot: 'schedule:get-snapshot',
+    create: 'schedule:create',
+    update: 'schedule:update',
+    archive: 'schedule:archive',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -281,6 +294,97 @@ export interface TaskConversionResult {
   readonly inboxSnapshot: InboxSnapshot;
 }
 
+export interface Note {
+  readonly id: string;
+  readonly title: string;
+  readonly body: string;
+  readonly revision: number;
+  readonly sourceInboxEntryId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface NoteSnapshot {
+  readonly workspaceId: string;
+  readonly notes: readonly Note[];
+}
+
+export interface NoteCreateInput {
+  readonly workspaceId: string;
+  readonly title: string;
+  readonly body: string;
+}
+
+export interface NoteTargetInput {
+  readonly workspaceId: string;
+  readonly noteId: string;
+}
+
+export interface NoteUpdateInput extends NoteTargetInput {
+  readonly title: string;
+  readonly body: string;
+  readonly expectedRevision: number;
+}
+
+export interface NoteArchiveInput extends NoteTargetInput {
+  readonly expectedRevision: number;
+}
+
+export interface NoteConvertInboxInput {
+  readonly workspaceId: string;
+  readonly entryId: string;
+}
+
+export interface NoteConversionResult {
+  readonly noteSnapshot: NoteSnapshot;
+  readonly inboxSnapshot: InboxSnapshot;
+}
+
+export const SCHEDULE_KINDS = ['focus', 'meeting', 'review', 'personal'] as const;
+
+export type ScheduleKind = (typeof SCHEDULE_KINDS)[number];
+
+export interface ScheduleItem {
+  readonly id: string;
+  readonly title: string;
+  readonly kind: ScheduleKind;
+  readonly scheduledFor: string;
+  readonly startMinute: number;
+  readonly endMinute: number;
+  readonly revision: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ScheduleSnapshot {
+  readonly workspaceId: string;
+  readonly todayDate: string;
+  readonly items: readonly ScheduleItem[];
+}
+
+export interface ScheduleCreateInput {
+  readonly workspaceId: string;
+  readonly expectedDate: string;
+  readonly title: string;
+  readonly kind: ScheduleKind;
+  readonly startMinute: number;
+  readonly endMinute: number;
+}
+
+export interface ScheduleTargetInput {
+  readonly workspaceId: string;
+  readonly scheduleId: string;
+  readonly expectedDate: string;
+  readonly expectedRevision: number;
+}
+
+export interface ScheduleUpdateInput extends ScheduleTargetInput {
+  readonly title: string;
+  readonly kind: ScheduleKind;
+  readonly startMinute: number;
+  readonly endMinute: number;
+}
+
 export const TERMINAL_SHELLS = ['default', 'powershell', 'cmd', 'wsl', 'bash', 'zsh'] as const;
 
 export type TerminalShell = (typeof TERMINAL_SHELLS)[number];
@@ -341,6 +445,19 @@ export interface WorkbenchApi {
     updateStatus(input: TaskStatusInput): Promise<TaskSnapshot>;
     updatePlanning(input: TaskPlanningInput): Promise<TaskSnapshot>;
     convertInbox(input: TaskConvertInboxInput): Promise<TaskConversionResult>;
+  };
+  note: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<NoteSnapshot>;
+    create(input: NoteCreateInput): Promise<NoteSnapshot>;
+    update(input: NoteUpdateInput): Promise<NoteSnapshot>;
+    archive(input: NoteArchiveInput): Promise<NoteSnapshot>;
+    convertInbox(input: NoteConvertInboxInput): Promise<NoteConversionResult>;
+  };
+  schedule: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<ScheduleSnapshot>;
+    create(input: ScheduleCreateInput): Promise<ScheduleSnapshot>;
+    update(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
+    archive(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
   };
   window: {
     minimize(): Promise<void>;
