@@ -54,7 +54,40 @@ describe('terminal IPC handlers', () => {
     expect(
       harness.invoke(IPC_CHANNELS.terminal.create, {
         workspaceId: WORKSPACE_ID,
+        configurationRevision: 1,
         profileId: 'powershell-7',
+      }),
+    ).toBe(harness.snapshot);
+    expect(
+      harness.invoke(IPC_CHANNELS.terminal.updateProfile, {
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        profileId: 'powershell-7',
+      }),
+    ).toBe(harness.snapshot);
+    expect(
+      harness.invoke(IPC_CHANNELS.terminal.updateWslDistribution, {
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        capabilityRevision: 2,
+        distributionId: null,
+      }),
+    ).toBe(harness.snapshot);
+    expect(
+      harness.invoke(IPC_CHANNELS.terminal.chooseWorkingDirectory, {
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+      }),
+    ).toEqual({ status: 'cancelled', snapshot: harness.snapshot });
+    expect(
+      harness.invoke(IPC_CHANNELS.terminal.resetWorkingDirectory, {
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+      }),
+    ).toBe(harness.snapshot);
+    expect(
+      harness.invoke(IPC_CHANNELS.terminal.refreshCapabilities, {
+        workspaceId: WORKSPACE_ID,
       }),
     ).toBe(harness.snapshot);
     expect(harness.invoke(IPC_CHANNELS.terminal.activate, target)).toBe(harness.snapshot);
@@ -73,7 +106,30 @@ describe('terminal IPC handlers', () => {
     });
     expect(harness.terminal.create).toHaveBeenCalledExactlyOnceWith({
       workspaceId: WORKSPACE_ID,
+      configurationRevision: 1,
       profileId: 'powershell-7',
+    });
+    expect(harness.terminal.updateProfile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 1,
+      profileId: 'powershell-7',
+    });
+    expect(harness.terminal.updateWslDistribution).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 1,
+      capabilityRevision: 2,
+      distributionId: null,
+    });
+    expect(harness.terminal.chooseWorkingDirectory).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 1,
+    });
+    expect(harness.terminal.resetWorkingDirectory).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 1,
+    });
+    expect(harness.terminal.refreshCapabilities).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE_ID,
     });
     expect(harness.terminal.activate).toHaveBeenCalledExactlyOnceWith(target);
     expect(harness.terminal.restart).toHaveBeenCalledExactlyOnceWith(target);
@@ -113,6 +169,7 @@ describe('terminal IPC handlers', () => {
     expect(() =>
       harness.invoke(IPC_CHANNELS.terminal.create, {
         workspaceId: WORKSPACE_ID,
+        configurationRevision: 1,
         profileId: 'custom-path',
       }),
     ).toThrow(TypeError);
@@ -128,6 +185,22 @@ describe('terminal IPC handlers', () => {
         sessionId: SESSION_ID,
         data: 'whoami\r',
         path: 'C:\\secret',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      harness.invoke(IPC_CHANNELS.terminal.chooseWorkingDirectory, {
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        path: 'C:\\secret',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      harness.invoke(IPC_CHANNELS.terminal.updateWslDistribution, {
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        capabilityRevision: 1,
+        distributionId: null,
+        distributionName: 'Ubuntu',
       }),
     ).toThrow(TypeError);
     expect(() =>
@@ -177,10 +250,32 @@ async function createHarness(terminalOverrides: Record<string, unknown> = {}) {
         available: true,
       },
     ],
+    configuration: {
+      revision: 1,
+      preferredProfileId: 'powershell-7',
+      workingDirectory: {
+        mode: 'user-home',
+        displayPath: 'C:\\Users\\test',
+        available: true,
+      },
+      wsl: {
+        status: 'no-distributions',
+        capabilityRevision: 2,
+        distributions: [],
+        selectedDistributionId: null,
+        selectedDistributionLabel: null,
+        selectedDistributionAvailable: false,
+      },
+    },
   };
   const terminal = {
     getSnapshot: vi.fn(() => snapshot),
     create: vi.fn(() => snapshot),
+    updateProfile: vi.fn(() => snapshot),
+    updateWslDistribution: vi.fn(() => snapshot),
+    chooseWorkingDirectory: vi.fn(() => ({ status: 'cancelled', snapshot })),
+    resetWorkingDirectory: vi.fn(() => snapshot),
+    refreshCapabilities: vi.fn(() => snapshot),
     activate: vi.fn(() => snapshot),
     restart: vi.fn(() => snapshot),
     write: vi.fn(),

@@ -2577,6 +2577,34 @@ select:focus-visible,
   pointer-events: none;
 }
 
+.terminal-cwd-summary {
+  display: flex;
+  min-width: 0;
+  max-width: 118px;
+  height: 25px;
+  align-items: center;
+  padding: 0 7px;
+  gap: 5px;
+  border-radius: 5px;
+  color: var(--text-tertiary);
+  background: transparent;
+  font-size: 9px;
+}
+.terminal-cwd-summary:hover:not(:disabled),
+.terminal-cwd-summary:focus-visible {
+  color: var(--text-secondary);
+  background: var(--border-subtle);
+}
+.terminal-cwd-summary:disabled {
+  opacity: 0.55;
+}
+.terminal-cwd-summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .terminal-surfaces {
   position: relative;
   min-width: 0;
@@ -2620,20 +2648,63 @@ select:focus-visible,
   height: 100%;
   align-items: center;
   justify-content: center;
+  padding: 16px;
   gap: 9px;
   color: var(--text-tertiary);
   font-size: 10px;
+  text-align: left;
+}
+.terminal-empty--error {
+  color: var(--danger);
+}
+.terminal-empty__copy {
+  display: flex;
+  min-width: 0;
+  max-width: 420px;
+  flex-direction: column;
+  gap: 2px;
+}
+.terminal-empty__copy strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+.terminal-empty__copy span {
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.terminal-empty .secondary-button {
+  flex: 0 0 auto;
+  margin-left: 4px;
 }
 
 .terminal-announcer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 4px 10px;
-  border-top: 1px solid rgba(255, 122, 138, 0.2);
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 7%, var(--bg-content));
+  gap: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--success) 20%, transparent);
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 7%, var(--bg-content));
   font-size: 9px;
 }
+.terminal-announcer button {
+  flex: 0 0 auto;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.terminal-announcer.is-error {
+  border-top-color: rgba(255, 122, 138, 0.2);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-content));
+}
 
-.terminal-announcer:empty {
+.terminal-announcer:empty,
+.terminal-announcer[hidden] {
   display: none;
 }
 
@@ -3315,6 +3386,142 @@ select:focus-visible,
   font-size: 8.5px;
 }
 
+.terminal-settings {
+  display: grid;
+  gap: 22px;
+}
+.terminal-settings-state {
+  display: grid;
+  min-height: 180px;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+.terminal-settings-state strong {
+  color: var(--text-primary);
+  font-size: 11px;
+}
+.terminal-settings-state p {
+  max-width: 420px;
+  margin: 0;
+  font-size: 9px;
+}
+.terminal-settings-state.is-error {
+  color: var(--danger);
+}
+.terminal-settings-feedback,
+.terminal-settings-operation,
+.terminal-wsl-state,
+.terminal-settings-hint {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  background: var(--border-subtle);
+  font-size: 9px;
+}
+.terminal-settings-feedback.is-success {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 8%, var(--bg-card));
+}
+.terminal-settings-feedback.is-info {
+  color: var(--text-secondary);
+}
+.terminal-settings-feedback.is-error,
+.terminal-wsl-state.is-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-card));
+}
+.terminal-settings-operation {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+}
+.terminal-settings-field {
+  display: grid;
+  grid-template-columns: minmax(125px, 0.45fr) minmax(180px, 1fr);
+  align-items: center;
+  padding: 10px 11px;
+  gap: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+.terminal-settings-field > span {
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 570;
+}
+.terminal-settings-field select {
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: var(--bg-content);
+  font-size: 9px;
+}
+.terminal-settings-hint {
+  padding: 0;
+  background: transparent;
+}
+.terminal-directory-card {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 11px;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+.terminal-directory-card.is-error {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-subtle));
+}
+.terminal-directory-card > span {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  color: #aa9eff;
+  background: var(--accent-soft);
+}
+.terminal-directory-card > div:not(.terminal-directory-actions) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.terminal-directory-card strong {
+  color: var(--text-primary);
+  font-size: 10px;
+}
+.terminal-directory-card small {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-directory-card small[role='alert'] {
+  color: var(--danger);
+}
+.terminal-directory-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.terminal-wsl-state {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+}
+
 /* Command palette */
 .command-palette::backdrop {
   background: var(--bg-overlay);
@@ -3873,10 +4080,18 @@ select:focus-visible,
 .data-import-dialog__summary {
   display: flex;
   margin: 10px 15px 0;
-  align-items: center;
+  align-items: flex-start;
   gap: 7px;
   color: var(--text-secondary);
   font-size: 8.5px;
+}
+.data-import-dialog__summary > div {
+  display: grid;
+  gap: 2px;
+}
+.data-import-dialog__summary small {
+  color: var(--text-tertiary);
+  line-height: 1.4;
 }
 .data-import-dialog__acknowledgement {
   display: flex;
@@ -5855,6 +6070,24 @@ select:focus-visible,
   }
   .settings-nav button {
     flex: 0 0 auto;
+  }
+  .terminal-settings-field,
+  .terminal-directory-card {
+    grid-template-columns: 1fr;
+  }
+  .terminal-directory-card > span {
+    display: none;
+  }
+  .terminal-directory-actions {
+    justify-content: flex-start;
+  }
+  .terminal-cwd-summary {
+    width: 27px;
+    padding: 0;
+    justify-content: center;
+  }
+  .terminal-cwd-summary span {
+    display: none;
   }
   .data-health-grid,
   .data-import-dialog__counts {

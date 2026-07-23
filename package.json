@@ -26,7 +26,7 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && tsc -p tsconfig.tools.json",
     "test": "vitest run",
-    "test:terminal": "vitest run tests/terminal-environment.test.ts tests/terminal-profile-resolver.test.ts tests/terminal-manager.test.ts tests/terminal-state.test.ts tests/terminal-ipc-handlers.test.ts tests/ipc-validation.test.ts tests/preload-api.test.ts tests/workspace-ipc-adapter.test.ts",
+    "test:terminal": "vitest run tests/terminal-environment.test.ts tests/terminal-profile-resolver.test.ts tests/wsl-discovery.test.ts tests/terminal-configuration-service.test.ts tests/terminal-preference-repository.test.ts tests/terminal-manager.test.ts tests/terminal-state.test.ts tests/terminal-ipc-handlers.test.ts tests/ipc-validation.test.ts tests/preload-api.test.ts tests/workspace-ipc-adapter.test.ts",
     "test:watch": "vitest",
     "audit:all": "node scripts/audit-dependencies.mjs",
     "audit:prod": "npm audit --omit=dev --audit-level=info",

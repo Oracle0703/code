@@ -95,6 +95,11 @@ export const IPC_CHANNELS = {
   terminal: {
     getSnapshot: 'terminal:get-snapshot',
     create: 'terminal:create',
+    updateProfile: 'terminal:update-profile',
+    updateWslDistribution: 'terminal:update-wsl-distribution',
+    chooseWorkingDirectory: 'terminal:choose-working-directory',
+    resetWorkingDirectory: 'terminal:reset-working-directory',
+    refreshCapabilities: 'terminal:refresh-capabilities',
     activate: 'terminal:activate',
     restart: 'terminal:restart',
     write: 'terminal:write',
@@ -654,6 +659,39 @@ export interface TerminalProfile {
   readonly unavailableReason?: string;
 }
 
+export type TerminalCwdMode = 'user-home' | 'selected-directory';
+
+export interface TerminalWorkingDirectory {
+  readonly mode: TerminalCwdMode;
+  readonly displayPath: string;
+  readonly available: boolean;
+  readonly unavailableReason?: string;
+}
+
+export interface TerminalWslDistribution {
+  readonly id: string;
+  readonly label: string;
+}
+
+export type TerminalWslCapabilityStatus =
+  'unsupported' | 'not-installed' | 'no-distributions' | 'ready' | 'probe-error';
+
+export interface TerminalWslConfiguration {
+  readonly status: TerminalWslCapabilityStatus;
+  readonly capabilityRevision: number;
+  readonly distributions: readonly TerminalWslDistribution[];
+  readonly selectedDistributionId: string | null;
+  readonly selectedDistributionLabel: string | null;
+  readonly selectedDistributionAvailable: boolean;
+}
+
+export interface TerminalConfigurationSnapshot {
+  readonly revision: number;
+  readonly preferredProfileId: TerminalProfileId;
+  readonly workingDirectory: TerminalWorkingDirectory;
+  readonly wsl: TerminalWslConfiguration;
+}
+
 export type TerminalSessionStatus = 'running' | 'exited';
 
 export interface TerminalSession {
@@ -672,6 +710,7 @@ export interface TerminalSnapshot {
   readonly activeSessionId: string | null;
   readonly sessions: readonly TerminalSession[];
   readonly profiles: readonly TerminalProfile[];
+  readonly configuration: TerminalConfigurationSnapshot;
 }
 
 export interface TerminalWorkspaceInput {
@@ -679,7 +718,21 @@ export interface TerminalWorkspaceInput {
 }
 
 export interface TerminalCreateInput extends TerminalWorkspaceInput {
+  readonly configurationRevision: number;
+  readonly profileId?: TerminalProfileId;
+}
+
+export interface TerminalConfigurationRevisionInput extends TerminalWorkspaceInput {
+  readonly expectedRevision: number;
+}
+
+export interface TerminalProfilePreferenceInput extends TerminalConfigurationRevisionInput {
   readonly profileId: TerminalProfileId;
+}
+
+export interface TerminalWslPreferenceInput extends TerminalConfigurationRevisionInput {
+  readonly capabilityRevision: number;
+  readonly distributionId: string | null;
 }
 
 export interface TerminalSessionTargetInput extends TerminalWorkspaceInput {
@@ -704,6 +757,10 @@ export interface TerminalExitEvent extends TerminalSessionTargetInput {
   readonly exitCode: number;
   readonly signal?: number;
 }
+
+export type TerminalWorkingDirectorySelection =
+  | { readonly status: 'cancelled'; readonly snapshot: TerminalSnapshot }
+  | { readonly status: 'updated'; readonly snapshot: TerminalSnapshot };
 
 export type Unsubscribe = () => void;
 
@@ -798,6 +855,13 @@ export interface WorkbenchApi {
   terminal: {
     getSnapshot(input: TerminalWorkspaceInput): Promise<TerminalSnapshot>;
     create(input: TerminalCreateInput): Promise<TerminalSnapshot>;
+    updateProfile(input: TerminalProfilePreferenceInput): Promise<TerminalSnapshot>;
+    updateWslDistribution(input: TerminalWslPreferenceInput): Promise<TerminalSnapshot>;
+    chooseWorkingDirectory(
+      input: TerminalConfigurationRevisionInput,
+    ): Promise<TerminalWorkingDirectorySelection>;
+    resetWorkingDirectory(input: TerminalConfigurationRevisionInput): Promise<TerminalSnapshot>;
+    refreshCapabilities(input: TerminalWorkspaceInput): Promise<TerminalSnapshot>;
     activate(input: TerminalSessionTargetInput): Promise<TerminalSnapshot>;
     restart(input: TerminalSessionTargetInput): Promise<TerminalSnapshot>;
     write(input: TerminalWriteInput): Promise<void>;

@@ -12,9 +12,11 @@ import {
 import {
   ChevronDown,
   Circle,
+  FolderOpen,
   Maximize2,
   Plus,
   RotateCcw,
+  Settings2,
   SquareTerminal,
   Trash2,
   X,
@@ -31,7 +33,9 @@ import {
   mergeTerminalSnapshot,
   moveTerminalTab,
   registerTerminalSurface,
-  resolveTerminalProfile,
+  resolvePreferredTerminalProfile,
+  terminalConfigurationIssue,
+  terminalSessionAccessibleLabel,
   type PendingTerminalOutput,
 } from '../terminal-state';
 import { IconButton } from './IconButton';
@@ -42,6 +46,7 @@ interface TerminalPanelProps {
   workspaceId: string;
   onClose: () => void;
   onMaximize: () => void;
+  onOpenSettings: () => void;
 }
 
 interface TerminalSurfaceControls {
@@ -57,7 +62,7 @@ interface TerminalOperationError {
   readonly message: string;
 }
 
-type TerminalMutationFocus = 'surface' | 'tab';
+type TerminalMutationFocus = 'surface' | 'tab' | 'none';
 
 const terminalThemes = {
   dark: {
@@ -102,15 +107,14 @@ export function TerminalPanel({
   workspaceId,
   onClose,
   onMaximize,
+  onOpenSettings,
 }: TerminalPanelProps) {
   const terminalApi = window.workbench?.terminal;
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, TerminalSnapshot>>(
     () => new Map(),
   );
-  const [selectedProfiles, setSelectedProfiles] = useState<ReadonlyMap<string, TerminalProfileId>>(
-    () => new Map(),
-  );
   const [operationError, setOperationError] = useState<TerminalOperationError | null>(null);
+  const [operationNotice, setOperationNotice] = useState<TerminalOperationError | null>(null);
   const [pendingWorkspaceIds, setPendingWorkspaceIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -153,14 +157,13 @@ export function TerminalPanel({
   const pending = pendingWorkspaceIds.has(workspaceId);
   const currentOperationError =
     operationError?.workspaceId === workspaceId ? operationError.message : null;
-  const availableProfiles = useMemo(
-    () => currentSnapshot?.profiles.filter(({ available }) => available) ?? [],
-    [currentSnapshot?.profiles],
-  );
-  const selectedProfile = resolveTerminalProfile(
-    currentSnapshot?.profiles ?? [],
-    selectedProfiles.get(workspaceId),
-  );
+  const currentOperationNotice =
+    operationNotice?.workspaceId === workspaceId ? operationNotice.message : null;
+  const preferredProfile = currentSnapshot
+    ? resolvePreferredTerminalProfile(currentSnapshot)
+    : undefined;
+  const configurationIssue = currentSnapshot ? terminalConfigurationIssue(currentSnapshot) : null;
+  const configurationReady = Boolean(currentSnapshot && !configurationIssue);
   const activeSession =
     currentSnapshot?.sessions.find(({ id }) => id === currentSnapshot.activeSessionId) ?? null;
   const knownSessions = useMemo(
@@ -218,22 +221,18 @@ export function TerminalPanel({
       ) {
         return;
       }
-      const profile = resolveTerminalProfile(snapshot.profiles);
-      if (!profile) {
-        setOperationError({
-          workspaceId: snapshot.workspaceId,
-          message: '本机没有可用的终端 Profile。',
-        });
-        return;
-      }
+      if (terminalConfigurationIssue(snapshot)) return;
       if (!beginWorkspaceOperation(snapshot.workspaceId)) return;
       const focusGeneration = advanceWorkspaceFocusGeneration(snapshot.workspaceId);
       automaticCreateAttemptsRef.current.add(snapshot.workspaceId);
+      setOperationNotice((current) =>
+        current?.workspaceId === snapshot.workspaceId ? null : current,
+      );
       let operation: Promise<TerminalSnapshot>;
       try {
         operation = terminalApi.create({
           workspaceId: snapshot.workspaceId,
-          profileId: profile.id,
+          configurationRevision: snapshot.configuration.revision,
         });
       } catch {
         finishWorkspaceOperation(snapshot.workspaceId);
@@ -249,6 +248,10 @@ export function TerminalPanel({
           setOperationError((current) =>
             current?.workspaceId === createdSnapshot.workspaceId ? null : current,
           );
+          setOperationNotice({
+            workspaceId: createdSnapshot.workspaceId,
+            message: '已使用当前工作区设置启动终端。',
+          });
           if (
             createdSnapshot.activeSessionId &&
             currentPanelStateRef.current.visible &&
@@ -344,6 +347,7 @@ export function TerminalPanel({
         }
         applySnapshot(snapshot);
         setOperationError((current) => (current?.workspaceId === workspaceId ? null : current));
+        setOperationNotice((current) => (current?.workspaceId === workspaceId ? null : current));
         createDefaultSession(snapshot);
       })
       .catch(() => {
@@ -393,10 +397,12 @@ export function TerminalPanel({
       createOperation: () => Promise<TerminalSnapshot>,
       failureMessage: string,
       focusAfter: TerminalMutationFocus = 'surface',
+      successMessage?: string,
     ): void => {
       if (!beginWorkspaceOperation(workspaceId)) return;
       const focusGeneration = advanceWorkspaceFocusGeneration(workspaceId);
-      setOperationError(null);
+      setOperationError((current) => (current?.workspaceId === workspaceId ? null : current));
+      setOperationNotice((current) => (current?.workspaceId === workspaceId ? null : current));
       let operation: Promise<TerminalSnapshot>;
       try {
         operation = createOperation();
@@ -408,8 +414,14 @@ export function TerminalPanel({
       void operation
         .then((snapshot) => {
           applySnapshot(snapshot);
+          setOperationError((current) =>
+            current?.workspaceId === snapshot.workspaceId ? null : current,
+          );
+          if (successMessage) {
+            setOperationNotice({ workspaceId: snapshot.workspaceId, message: successMessage });
+          }
           if (
-            focusAfter &&
+            focusAfter !== 'none' &&
             currentPanelStateRef.current.visible &&
             currentPanelStateRef.current.workspaceId === snapshot.workspaceId
           ) {
@@ -427,7 +439,12 @@ export function TerminalPanel({
                     .get(terminalSurfaceKey(snapshot.workspaceId, snapshot.activeSessionId))
                     ?.focus();
                 } else {
-                  profileSelectRef.current?.focus();
+                  const fallback =
+                    panelRef.current?.querySelector<HTMLButtonElement>(
+                      '[data-terminal-new]:not(:disabled)',
+                    ) ??
+                    panelRef.current?.querySelector<HTMLButtonElement>('[data-terminal-recovery]');
+                  (fallback ?? profileSelectRef.current)?.focus();
                 }
               } else if (snapshot.activeSessionId) {
                 surfaceControlsRef.current
@@ -453,7 +470,8 @@ export function TerminalPanel({
     (createOperation: () => Promise<void>, failureMessage: string, onSuccess: () => void): void => {
       if (!beginWorkspaceOperation(workspaceId)) return;
       advanceWorkspaceFocusGeneration(workspaceId);
-      setOperationError(null);
+      setOperationError((current) => (current?.workspaceId === workspaceId ? null : current));
+      setOperationNotice((current) => (current?.workspaceId === workspaceId ? null : current));
       let operation: Promise<void>;
       try {
         operation = createOperation();
@@ -501,11 +519,49 @@ export function TerminalPanel({
     ],
   );
 
+  const updatePreferredProfile = useCallback(
+    (profileId: TerminalProfileId): void => {
+      if (!terminalApi || !currentSnapshot || pending) return;
+      const profile = currentSnapshot.profiles.find((candidate) => candidate.id === profileId);
+      if (!profile?.available) return;
+      runSnapshotMutation(
+        () =>
+          terminalApi.updateProfile({
+            workspaceId,
+            profileId,
+            expectedRevision: currentSnapshot.configuration.revision,
+          }),
+        '无法保存默认终端 Profile，请重试。',
+        'none',
+        `默认终端已设为 ${profile.label}；现有会话不会改变。`,
+      );
+    },
+    [currentSnapshot, pending, runSnapshotMutation, terminalApi, workspaceId],
+  );
+
+  const closeSession = useCallback(
+    (session: TerminalSession): void => {
+      if (!terminalApi || pending) return;
+      runSnapshotMutation(
+        () => terminalApi.close({ workspaceId, sessionId: session.id }),
+        '无法关闭终端标签。',
+        'tab',
+        `已关闭 ${session.label}。`,
+      );
+    },
+    [pending, runSnapshotMutation, terminalApi, workspaceId],
+  );
+
   const handleTabKeyDown = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
-    sessionId: string,
+    session: TerminalSession,
   ): void => {
     if (!currentSnapshot) return;
+    if (event.key === 'Delete') {
+      event.preventDefault();
+      closeSession(session);
+      return;
+    }
     if (
       event.key !== 'ArrowLeft' &&
       event.key !== 'ArrowRight' &&
@@ -518,7 +574,7 @@ export function TerminalPanel({
     if (pending || pendingWorkspaceIdsRef.current.has(workspaceId)) return;
     const target = moveTerminalTab(
       currentSnapshot.sessions.map(({ id }) => id),
-      sessionId,
+      session.id,
       event.key,
     );
     if (target) {
@@ -527,7 +583,18 @@ export function TerminalPanel({
     }
   };
 
-  const selectedProfileId = selectedProfile?.id ?? availableProfiles[0]?.id;
+  const selectedProfileId = currentSnapshot?.configuration.preferredProfileId ?? '';
+  const effectiveWorkingDirectoryLabel =
+    preferredProfile?.kind === 'wsl'
+      ? 'WSL 主目录'
+      : currentSnapshot?.configuration.workingDirectory.mode === 'user-home'
+        ? '主目录'
+        : (currentSnapshot?.configuration.workingDirectory.displayPath ?? '目录');
+  const currentConfigurationWarning =
+    currentSnapshot && currentSnapshot.sessions.length > 0 ? configurationIssue : null;
+  const announcement =
+    currentOperationError ?? currentConfigurationWarning ?? currentOperationNotice;
+  const announcementIsError = Boolean(currentOperationError || currentConfigurationWarning);
 
   return (
     <section
@@ -539,8 +606,13 @@ export function TerminalPanel({
     >
       <header className="terminal-header">
         <div className="terminal-tabs" role="tablist" aria-label="当前工作区终端会话">
-          {currentSnapshot?.sessions.map((session) => {
+          {currentSnapshot?.sessions.map((session, index) => {
             const active = session.id === currentSnapshot.activeSessionId;
+            const accessibleLabel = terminalSessionAccessibleLabel(
+              session,
+              index,
+              currentSnapshot.sessions.length,
+            );
             return (
               <div className={`terminal-tab ${active ? 'is-active' : ''}`} key={session.id}>
                 <button
@@ -555,9 +627,11 @@ export function TerminalPanel({
                   id={`terminal-tab-${session.id}`}
                   aria-controls={`terminal-surface-${session.id}`}
                   aria-selected={active}
+                  aria-label={accessibleLabel}
+                  aria-keyshortcuts="Delete"
                   tabIndex={active ? 0 : -1}
                   onClick={() => activateSession(session.id)}
-                  onKeyDown={(event) => handleTabKeyDown(event, session.id)}
+                  onKeyDown={(event) => handleTabKeyDown(event, session)}
                 >
                   <SquareTerminal size={14} aria-hidden="true" />
                   <span>{session.label}</span>
@@ -571,16 +645,10 @@ export function TerminalPanel({
                 <button
                   type="button"
                   className="terminal-tab__close"
-                  aria-label={`关闭 ${session.label}`}
+                  aria-label={`关闭 ${accessibleLabel}`}
                   disabled={pending}
-                  onClick={() => {
-                    if (!terminalApi) return;
-                    runSnapshotMutation(
-                      () => terminalApi.close({ workspaceId, sessionId: session.id }),
-                      '无法关闭终端标签。',
-                      'tab',
-                    );
-                  }}
+                  tabIndex={-1}
+                  onClick={() => closeSession(session)}
                 >
                   <X size={12} aria-hidden="true" />
                 </button>
@@ -590,42 +658,63 @@ export function TerminalPanel({
         </div>
         <div className="terminal-actions">
           <label className="terminal-shell-select">
-            <span className="sr-only">选择新终端 Profile</span>
+            <span className="sr-only">当前工作区默认终端 Profile</span>
             <select
               ref={profileSelectRef}
-              value={selectedProfileId ?? ''}
-              disabled={!terminalApi || availableProfiles.length === 0 || pending}
-              onChange={(event) => {
-                const profileId = event.target.value as TerminalProfileId;
-                setSelectedProfiles((current) => {
-                  const next = new Map(current);
-                  next.set(workspaceId, profileId);
-                  return next;
-                });
-              }}
+              value={selectedProfileId}
+              disabled={!terminalApi || !currentSnapshot || pending}
+              aria-invalid={Boolean(preferredProfile && !preferredProfile.available)}
+              onChange={(event) => updatePreferredProfile(event.target.value as TerminalProfileId)}
             >
-              {availableProfiles.map(({ id, label, isDefault }) => (
-                <option key={id} value={id}>
+              {!currentSnapshot ? <option value="">正在读取 Profile…</option> : null}
+              {currentSnapshot?.profiles.map(({ id, label, available, unavailableReason }) => (
+                <option key={id} value={id} disabled={!available}>
                   {label}
-                  {isDefault ? ' · 默认' : ''}
+                  {available ? '' : ` · ${unavailableReason ?? '不可用'}`}
                 </option>
               ))}
             </select>
             <ChevronDown size={12} aria-hidden="true" />
           </label>
+          <button
+            type="button"
+            className="terminal-cwd-summary"
+            title={effectiveWorkingDirectoryLabel}
+            aria-label={
+              currentSnapshot
+                ? `终端启动目录：${effectiveWorkingDirectoryLabel}。打开终端设置`
+                : '读取终端启动目录'
+            }
+            disabled={!currentSnapshot}
+            onClick={onOpenSettings}
+          >
+            <FolderOpen size={13} aria-hidden="true" />
+            <span>{effectiveWorkingDirectoryLabel}</span>
+          </button>
           <IconButton
             label="新建终端"
             tooltipSide="bottom"
-            disabled={!terminalApi || !selectedProfileId || pending}
+            data-terminal-new
+            disabled={!terminalApi || !configurationReady || pending}
+            aria-describedby={configurationIssue ? 'terminal-configuration-issue' : undefined}
             onClick={() => {
-              if (!terminalApi || !selectedProfileId) return;
+              if (!terminalApi || !currentSnapshot || !configurationReady) return;
               runSnapshotMutation(
-                () => terminalApi.create({ workspaceId, profileId: selectedProfileId }),
+                () =>
+                  terminalApi.create({
+                    workspaceId,
+                    configurationRevision: currentSnapshot.configuration.revision,
+                  }),
                 '无法新建终端；请关闭不再使用的标签或选择其他 Profile。',
+                'surface',
+                '已使用当前工作区设置新建终端。',
               );
             }}
           >
             <Plus size={15} />
+          </IconButton>
+          <IconButton label="打开终端设置" tooltipSide="bottom" onClick={onOpenSettings}>
+            <Settings2 size={14} />
           </IconButton>
           {activeSession?.status === 'exited' ? (
             <IconButton
@@ -666,9 +755,14 @@ export function TerminalPanel({
             <X size={15} />
           </IconButton>
         </div>
+        {configurationIssue ? (
+          <span id="terminal-configuration-issue" className="sr-only">
+            {configurationIssue}
+          </span>
+        ) : null}
       </header>
 
-      <div className="terminal-surfaces">
+      <div className="terminal-surfaces" aria-busy={!currentSnapshot || pending}>
         {knownSessions.map((session) => {
           const active =
             session.workspaceId === workspaceId && session.id === currentSnapshot?.activeSessionId;
@@ -684,10 +778,65 @@ export function TerminalPanel({
             />
           );
         })}
-        {currentSnapshot?.sessions.length === 0 ? (
+        {!currentSnapshot && terminalApi ? (
           <div className="terminal-empty" role="status">
             <SquareTerminal size={22} aria-hidden="true" />
-            <span>{pending ? '正在启动终端…' : '当前工作区还没有终端会话'}</span>
+            <div className="terminal-empty__copy">
+              <strong>正在读取终端配置…</strong>
+              <span>正在检查当前工作区的 Profile 与启动目录。</span>
+            </div>
+          </div>
+        ) : null}
+        {currentSnapshot?.sessions.length === 0 && configurationIssue ? (
+          <div className="terminal-empty terminal-empty--error" role="alert">
+            <SquareTerminal size={22} aria-hidden="true" />
+            <div className="terminal-empty__copy">
+              <strong>终端设置需要处理</strong>
+              <span>{configurationIssue}</span>
+            </div>
+            <button
+              type="button"
+              className="secondary-button"
+              data-terminal-recovery
+              onClick={onOpenSettings}
+            >
+              打开终端设置
+            </button>
+          </div>
+        ) : null}
+        {currentSnapshot?.sessions.length === 0 && !configurationIssue ? (
+          <div className="terminal-empty" role="status">
+            <SquareTerminal size={22} aria-hidden="true" />
+            <div className="terminal-empty__copy">
+              <strong>{pending ? '正在启动终端…' : '当前工作区还没有终端会话'}</strong>
+              <span>
+                {preferredProfile
+                  ? `${preferredProfile.label} · ${effectiveWorkingDirectoryLabel}`
+                  : '请选择可用的终端 Profile。'}
+              </span>
+            </div>
+            {!pending ? (
+              <button
+                type="button"
+                className="secondary-button"
+                data-terminal-new
+                onClick={() => {
+                  if (!terminalApi || !configurationReady) return;
+                  runSnapshotMutation(
+                    () =>
+                      terminalApi.create({
+                        workspaceId,
+                        configurationRevision: currentSnapshot.configuration.revision,
+                      }),
+                    '无法新建终端；请检查终端设置后重试。',
+                    'surface',
+                    '已使用当前工作区设置新建终端。',
+                  );
+                }}
+              >
+                新建终端
+              </button>
+            ) : null}
           </div>
         ) : null}
         {!terminalApi ? (
@@ -697,8 +846,18 @@ export function TerminalPanel({
           </div>
         ) : null}
       </div>
-      <div className="terminal-announcer" role="status" aria-live="polite">
-        {currentOperationError}
+      <div
+        className={`terminal-announcer ${announcementIsError ? 'is-error' : ''}`}
+        role={announcementIsError ? 'alert' : 'status'}
+        aria-live={announcementIsError ? 'assertive' : 'polite'}
+        hidden={!announcement}
+      >
+        <span>{announcement}</span>
+        {!currentOperationError && currentConfigurationWarning ? (
+          <button type="button" data-terminal-recovery onClick={onOpenSettings}>
+            打开设置
+          </button>
+        ) : null}
       </div>
     </section>
   );

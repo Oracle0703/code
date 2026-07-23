@@ -28,6 +28,7 @@ import {
   settleShutdownsBefore,
 } from './shutdown-coordinator';
 import { createTrustedRendererLocation } from './security/trusted-renderer';
+import { TerminalConfigurationService } from './terminal/terminal-configuration-service';
 import { TerminalManager } from './terminal/terminal-manager';
 import { WindowCloseCoordinator } from './window-close-coordinator';
 import { createWorkspaceIpcAdapter } from './workspace-ipc-adapter';
@@ -142,8 +143,27 @@ async function createMainWindow(
   const requestCloseApproval = (reason: WindowCloseReason): Promise<boolean> =>
     closeCoordinator.requestApproval(reason);
   closeApprovalRequests.add(requestCloseApproval);
+  const terminalConfiguration = new TerminalConfigurationService({
+    store: database,
+    chooseWorkingDirectory: async () => {
+      if (window.isDestroyed()) {
+        throw new Error('The terminal window is unavailable.');
+      }
+      const selection = await dialog.showOpenDialog(window, {
+        title: '选择终端启动目录',
+        properties: ['openDirectory', 'dontAddToRecent'],
+      });
+      if (selection.canceled) return null;
+      const selectedPath = selection.filePaths[0];
+      if (!selectedPath || selection.filePaths.length !== 1) {
+        throw new Error('The terminal directory selection is invalid.');
+      }
+      return selectedPath;
+    },
+  });
   const terminal = new TerminalManager({
     initialWorkspaceId: initialWorkspaceSnapshot.currentWorkspaceId,
+    configurationService: terminalConfiguration,
     eventSink: {
       data: (event) => sendToRenderer(IPC_CHANNELS.terminal.data, event),
       exit: (event) => sendToRenderer(IPC_CHANNELS.terminal.exit, event),

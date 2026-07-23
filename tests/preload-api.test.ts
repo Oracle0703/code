@@ -532,6 +532,7 @@ describe('preload terminal API', () => {
   it('exposes only the declared frozen terminal methods and events', () => {
     expect(Object.keys(api.terminal).sort()).toEqual([
       'activate',
+      'chooseWorkingDirectory',
       'clear',
       'close',
       'create',
@@ -539,8 +540,12 @@ describe('preload terminal API', () => {
       'onData',
       'onExit',
       'onStateChange',
+      'refreshCapabilities',
+      'resetWorkingDirectory',
       'resize',
       'restart',
+      'updateProfile',
+      'updateWslDistribution',
       'write',
     ]);
     expect(Object.isFrozen(api.terminal)).toBe(true);
@@ -550,9 +555,27 @@ describe('preload terminal API', () => {
     const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
     const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
     const target = { workspaceId, sessionId };
+    const revisionTarget = { workspaceId, expectedRevision: 4 };
+    const distributionId = `wsl-${'b'.repeat(64)}`;
 
     await api.terminal.getSnapshot({ workspaceId });
-    await api.terminal.create({ workspaceId, profileId: 'powershell-7' });
+    await api.terminal.create({
+      workspaceId,
+      configurationRevision: 4,
+      profileId: 'powershell-7',
+    });
+    await api.terminal.updateProfile({
+      ...revisionTarget,
+      profileId: 'powershell-7',
+    });
+    await api.terminal.updateWslDistribution({
+      ...revisionTarget,
+      capabilityRevision: 2,
+      distributionId,
+    });
+    await api.terminal.chooseWorkingDirectory(revisionTarget);
+    await api.terminal.resetWorkingDirectory(revisionTarget);
+    await api.terminal.refreshCapabilities({ workspaceId });
     await api.terminal.activate(target);
     await api.terminal.restart(target);
     await api.terminal.write({ ...target, data: 'echo ok\r' });
@@ -562,7 +585,19 @@ describe('preload terminal API', () => {
 
     expect(electron.invoke.mock.calls).toEqual([
       ['terminal:get-snapshot', { workspaceId }],
-      ['terminal:create', { workspaceId, profileId: 'powershell-7' }],
+      ['terminal:create', { workspaceId, configurationRevision: 4, profileId: 'powershell-7' }],
+      ['terminal:update-profile', { ...revisionTarget, profileId: 'powershell-7' }],
+      [
+        'terminal:update-wsl-distribution',
+        {
+          ...revisionTarget,
+          capabilityRevision: 2,
+          distributionId,
+        },
+      ],
+      ['terminal:choose-working-directory', revisionTarget],
+      ['terminal:reset-working-directory', revisionTarget],
+      ['terminal:refresh-capabilities', { workspaceId }],
       ['terminal:activate', target],
       ['terminal:restart', target],
       ['terminal:write', { ...target, data: 'echo ok\r' }],
@@ -594,6 +629,23 @@ describe('preload terminal API', () => {
       activeSessionId: sessionId,
       sessions: [],
       profiles: [],
+      configuration: {
+        revision: 1,
+        preferredProfileId: 'system-default',
+        workingDirectory: {
+          mode: 'user-home',
+          displayPath: '/home/test',
+          available: true,
+        },
+        wsl: {
+          status: 'unsupported',
+          capabilityRevision: 1,
+          distributions: [],
+          selectedDistributionId: null,
+          selectedDistributionLabel: null,
+          selectedDistributionAvailable: true,
+        },
+      },
     };
     const wrappedData = electron.on.mock.calls[0]?.[1] as (
       event: unknown,

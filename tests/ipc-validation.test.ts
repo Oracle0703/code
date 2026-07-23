@@ -33,10 +33,13 @@ import {
   parseTaskRenameInput,
   parseTaskStatusInput,
   parseSessionId,
+  parseTerminalConfigurationRevisionInput,
   parseTerminalCreateInput,
+  parseTerminalProfilePreferenceInput,
   parseTerminalResizeInput,
   parseTerminalSessionTargetInput,
   parseTerminalWorkspaceInput,
+  parseTerminalWslPreferenceInput,
   parseTerminalWriteInput,
   parseWindowCloseResponse,
   parseWorkspaceCreateInput,
@@ -56,6 +59,7 @@ const TAB_ID = '723e4567-e89b-42d3-a456-426614174000';
 const BOOKMARK_ID = '823e4567-e89b-42d3-a456-426614174000';
 const DOWNLOAD_ID = '923e4567-e89b-42d3-a456-426614174000';
 const IMPORT_ID = 'a23e4567-e89b-42d3-a456-426614174000';
+const WSL_DISTRIBUTION_ID = `wsl-${'a'.repeat(64)}`;
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -289,12 +293,50 @@ describe('IPC validation', () => {
     expect(
       parseTerminalCreateInput({
         workspaceId: WORKSPACE_ID,
+        configurationRevision: 3,
         profileId: 'powershell-7',
       }),
     ).toEqual({
       workspaceId: WORKSPACE_ID,
+      configurationRevision: 3,
       profileId: 'powershell-7',
     });
+    expect(
+      parseTerminalCreateInput({
+        workspaceId: WORKSPACE_ID,
+        configurationRevision: 3,
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, configurationRevision: 3 });
+    expect(
+      parseTerminalProfilePreferenceInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 3,
+        profileId: 'bash',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 3,
+      profileId: 'bash',
+    });
+    expect(
+      parseTerminalWslPreferenceInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 3,
+        capabilityRevision: 2,
+        distributionId: WSL_DISTRIBUTION_ID,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 3,
+      capabilityRevision: 2,
+      distributionId: WSL_DISTRIBUTION_ID,
+    });
+    expect(
+      parseTerminalConfigurationRevisionInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 3,
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, expectedRevision: 3 });
     expect(parseTerminalSessionTargetInput({ workspaceId: WORKSPACE_ID, sessionId })).toEqual({
       workspaceId: WORKSPACE_ID,
       sessionId,
@@ -328,13 +370,41 @@ describe('IPC validation', () => {
   it('rejects unsupported terminal profiles, dimensions, and surplus fields', () => {
     const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
     expect(() =>
-      parseTerminalCreateInput({ workspaceId: WORKSPACE_ID, profileId: 'fish' }),
+      parseTerminalCreateInput({
+        workspaceId: WORKSPACE_ID,
+        configurationRevision: 1,
+        profileId: 'fish',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalCreateInput({
+        workspaceId: WORKSPACE_ID,
+        configurationRevision: 1,
+        profileId: 'system-default',
+        cwd: 'C:\\work',
+      }),
     ).toThrow(TypeError);
     expect(() =>
       parseTerminalCreateInput({
         workspaceId: WORKSPACE_ID,
         profileId: 'system-default',
-        cwd: 'C:\\work',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalWslPreferenceInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        capabilityRevision: 1,
+        distributionId: 'Ubuntu; rm -rf /',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalWslPreferenceInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        capabilityRevision: 1,
+        distributionId: WSL_DISTRIBUTION_ID,
+        distributionName: 'Ubuntu',
       }),
     ).toThrow(TypeError);
     expect(() =>

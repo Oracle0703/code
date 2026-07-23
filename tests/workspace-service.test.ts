@@ -38,7 +38,7 @@ describe('workspace service', () => {
     const dataDirectory = await createDataDirectory();
     const service = createService(dataDirectory, [DEFAULT_ID]);
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 7 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 8 });
     await expect(service.getWorkspaceSnapshot()).resolves.toMatchObject({
       currentWorkspaceId: DEFAULT_ID,
       workspaces: [
@@ -507,7 +507,7 @@ describe('workspace service', () => {
 
     const service = createService(dataDirectory, [DEFAULT_ID]);
     const result = await service.open();
-    expect(result.migration).toMatchObject({ fromVersion: 1, toVersion: 7 });
+    expect(result.migration).toMatchObject({ fromVersion: 1, toVersion: 8 });
     expect(result.preMigrationBackup).toMatchObject({ reason: 'pre-migration', schemaVersion: 1 });
     const backup = result.preMigrationBackup;
     expect(backup).toBeDefined();

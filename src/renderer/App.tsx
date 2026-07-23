@@ -55,7 +55,7 @@ import { NotePage } from './components/NotePage';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
 import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
 import { SectionPage } from './components/SectionPage';
-import { SettingsPage } from './components/SettingsPage';
+import { SettingsPage, type SettingsSection } from './components/SettingsPage';
 import { TaskDialog, type TaskDialogState } from './components/TaskDialog';
 import { TaskPage } from './components/TaskPage';
 import { TerminalPanel } from './components/TerminalPanel';
@@ -127,6 +127,7 @@ export function App() {
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
   const [scheduleDialog, setScheduleDialog] = useState<ScheduleDialogState | null>(null);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [requestedNoteId, setRequestedNoteId] = useState<string | null>(null);
   const [notePageGeneration, setNotePageGeneration] = useState(0);
   const [inboxReveal, setInboxReveal] = useState<{
@@ -228,6 +229,10 @@ export function App() {
     },
     [activeView, confirmLeaveNoteDraft, updatePreferences],
   );
+  const openTerminalSettings = useCallback(() => {
+    setSettingsSection('terminal');
+    requestActiveView('settings');
+  }, [requestActiveView]);
   const requestWorkspaceActivation = useCallback(
     (workspaceId: string) => {
       if (!confirmLeaveNoteDraft()) return;
@@ -782,6 +787,15 @@ export function App() {
         action: () => updatePreferences({ terminalOpen: !terminalOpen }),
       },
       {
+        id: 'terminal:settings',
+        label: '配置集成终端',
+        description: '选择当前工作区的 Profile、启动目录与 WSL 发行版',
+        group: '工具',
+        icon: Settings2,
+        keywords: '终端 profile shell cwd wsl 工作目录',
+        action: openTerminalSettings,
+      },
+      {
         id: 'go-today',
         label: '前往今日',
         group: '页面',
@@ -842,6 +856,7 @@ export function App() {
     dataState.importPreview,
     exportData,
     openQuickCapture,
+    openTerminalSettings,
     openTaskCreate,
     confirmLeaveNoteDraft,
     requestActiveView,
@@ -1230,6 +1245,9 @@ export function App() {
                   />
                 ) : activeView === 'settings' ? (
                   <SettingsPage
+                    workspaceId={snapshot.currentWorkspaceId}
+                    section={settingsSection}
+                    onSectionChange={setSettingsSection}
                     onOpenBrowser={() => updatePreferences({ browserOpen: true })}
                     onOpenTerminal={() => updatePreferences({ terminalOpen: true })}
                     dataSnapshot={dataState.snapshot}
@@ -1328,6 +1346,7 @@ export function App() {
               visible={terminalOpen}
               workspaceId={snapshot.currentWorkspaceId}
               onClose={() => updatePreferences({ terminalOpen: false })}
+              onOpenSettings={openTerminalSettings}
               onMaximize={() =>
                 updatePreferences({
                   terminalHeight:

@@ -63,6 +63,50 @@ export function resolveTerminalProfile(
   );
 }
 
+export function resolvePreferredTerminalProfile(
+  snapshot: TerminalSnapshot,
+): TerminalProfile | undefined {
+  return snapshot.profiles.find(({ id }) => id === snapshot.configuration.preferredProfileId);
+}
+
+export function terminalConfigurationIssue(snapshot: TerminalSnapshot): string | null {
+  const profile = resolvePreferredTerminalProfile(snapshot);
+  if (!profile) return '保存的终端 Profile 已不存在，请重新选择。';
+  if (!profile.available) {
+    return profile.unavailableReason ?? `${profile.label} 当前不可用，请重新选择。`;
+  }
+  if (profile.kind !== 'wsl') {
+    if (!snapshot.configuration.workingDirectory.available) {
+      return (
+        snapshot.configuration.workingDirectory.unavailableReason ??
+        '保存的终端启动目录当前不可用，请重新选择。'
+      );
+    }
+    return null;
+  }
+
+  const { wsl } = snapshot.configuration;
+  if (wsl.status === 'unsupported') return 'WSL 终端仅可在 Windows 上使用。';
+  if (wsl.status === 'not-installed') return '本机尚未启用 Windows Subsystem for Linux。';
+  if (wsl.status === 'no-distributions') return '本机尚未检测到可启动的 WSL 发行版。';
+  if (wsl.status === 'probe-error') return '暂时无法读取 WSL 发行版，请重新检测。';
+  if (!wsl.selectedDistributionAvailable) {
+    return wsl.selectedDistributionLabel
+      ? `WSL 发行版“${wsl.selectedDistributionLabel}”当前不可用，请重新选择。`
+      : '系统默认 WSL 发行版当前不可用，请重新选择。';
+  }
+  return null;
+}
+
+export function terminalSessionAccessibleLabel(
+  session: Pick<TerminalSnapshot['sessions'][number], 'label' | 'status'>,
+  index: number,
+  total: number,
+): string {
+  const state = session.status === 'running' ? '运行中' : '已退出';
+  return `${session.label}，终端 ${index + 1}/${total}，${state}`;
+}
+
 export function moveTerminalTab(
   sessionIds: readonly string[],
   activeSessionId: string | null,

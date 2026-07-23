@@ -125,11 +125,14 @@ export function DataImportDialog({
 
       <div className="data-import-dialog__summary">
         <Archive size={15} aria-hidden="true" />
-        <span>
-          共 {totalRecords.toLocaleString()} 条业务记录
-          {preview.includesArchivedData ? '，包含归档数据' : ''}
-          {preview.includesBrowserData ? '，包含浏览器数据' : ''}
-        </span>
+        <div>
+          <span>
+            共 {totalRecords.toLocaleString()} 条业务记录
+            {preview.includesArchivedData ? '，包含归档数据' : ''}
+            {preview.includesBrowserData ? '，包含浏览器数据' : ''}
+          </span>
+          <small>本机终端 Profile、目录授权与 WSL 选择不会从数据包导入。</small>
+        </div>
       </div>
 
       <label className="data-import-dialog__acknowledgement">
