@@ -10,6 +10,16 @@ import type {
   InboxSnapshot,
   InboxTargetInput,
   InboxUndoInput,
+  NoteArchiveInput,
+  NoteConversionResult,
+  NoteConvertInboxInput,
+  NoteCreateInput,
+  NoteSnapshot,
+  NoteUpdateInput,
+  ScheduleCreateInput,
+  ScheduleSnapshot,
+  ScheduleTargetInput,
+  ScheduleUpdateInput,
   TaskConversionResult,
   TaskConvertInboxInput,
   TaskCreateInput,
@@ -25,6 +35,8 @@ import type {
   WorkspaceTargetInput,
 } from '../../shared/contracts';
 import { InboxService } from '../inbox';
+import { NoteService } from '../notes';
+import { ScheduleService } from '../schedule';
 import { TaskService } from '../tasks';
 import { WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
@@ -92,6 +104,9 @@ export interface DatabaseServiceOptions {
   readonly inboxMonotonicNowMs?: () => number;
   readonly taskIdFactory?: () => string;
   readonly taskTodayFactory?: () => string;
+  readonly noteIdFactory?: () => string;
+  readonly scheduleIdFactory?: () => string;
+  readonly scheduleTodayFactory?: () => string;
 }
 
 type ServiceState = 'closed' | 'opening' | 'open' | 'closing' | 'poisoned';
@@ -105,6 +120,8 @@ export class DatabaseService {
   readonly #workspaceService: WorkspaceService;
   readonly #inboxService: InboxService;
   readonly #taskService: TaskService;
+  readonly #noteService: NoteService;
+  readonly #scheduleService: ScheduleService;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
   #backupManager: BackupManager | undefined;
@@ -127,6 +144,9 @@ export class DatabaseService {
     inboxMonotonicNowMs,
     taskIdFactory = randomUUID,
     taskTodayFactory,
+    noteIdFactory = randomUUID,
+    scheduleIdFactory = randomUUID,
+    scheduleTodayFactory,
   }: DatabaseServiceOptions) {
     this.#paths = resolveDatabasePaths(dataDirectory, databaseFileName);
     this.#adapterFactory = adapterFactory;
@@ -152,6 +172,19 @@ export class DatabaseService {
       now,
       idFactory: taskIdFactory,
       todayFactory: taskTodayFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#noteService = new NoteService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      idFactory: noteIdFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#scheduleService = new ScheduleService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      idFactory: scheduleIdFactory,
+      todayFactory: scheduleTodayFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
     });
   }
@@ -353,6 +386,42 @@ export class DatabaseService {
     return this.#taskService.convertInbox(input);
   }
 
+  getNoteSnapshot(input: WorkspaceTargetInput): Promise<NoteSnapshot> {
+    return this.#noteService.getSnapshot(input);
+  }
+
+  createNote(input: NoteCreateInput): Promise<NoteSnapshot> {
+    return this.#noteService.create(input);
+  }
+
+  updateNote(input: NoteUpdateInput): Promise<NoteSnapshot> {
+    return this.#noteService.update(input);
+  }
+
+  archiveNote(input: NoteArchiveInput): Promise<NoteSnapshot> {
+    return this.#noteService.archive(input);
+  }
+
+  convertInboxToNote(input: NoteConvertInboxInput): Promise<NoteConversionResult> {
+    return this.#noteService.convertInbox(input);
+  }
+
+  getScheduleSnapshot(input: WorkspaceTargetInput): Promise<ScheduleSnapshot> {
+    return this.#scheduleService.getSnapshot(input);
+  }
+
+  createScheduleItem(input: ScheduleCreateInput): Promise<ScheduleSnapshot> {
+    return this.#scheduleService.create(input);
+  }
+
+  updateScheduleItem(input: ScheduleUpdateInput): Promise<ScheduleSnapshot> {
+    return this.#scheduleService.update(input);
+  }
+
+  archiveScheduleItem(input: ScheduleTargetInput): Promise<ScheduleSnapshot> {
+    return this.#scheduleService.archive(input);
+  }
+
   async #initialize(): Promise<DatabaseInitializationResult> {
     await prepareDatabaseDirectories(this.#paths);
     const existed = await databaseFileExists(this.#paths.databasePath);
@@ -391,6 +460,8 @@ export class DatabaseService {
         this.#workspaceService.initializeWithinTransaction(database, openedAt);
         this.#inboxService.validateSnapshot(database);
         this.#taskService.validateSnapshot(database);
+        this.#noteService.validateSnapshot(database);
+        this.#scheduleService.validateSnapshot(database);
         health = this.#readHealth(database);
         database.exec('COMMIT');
       } catch (error) {
@@ -470,6 +541,10 @@ export class DatabaseService {
     }
     if (expectedVersion >= 4) {
       this.#taskService.validateSnapshot(database);
+    }
+    if (expectedVersion >= 5) {
+      this.#noteService.validateSnapshot(database);
+      this.#scheduleService.validateSnapshot(database);
     }
   }
 

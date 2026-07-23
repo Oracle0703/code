@@ -2,12 +2,9 @@ import {
   Bot,
   ChevronRight,
   Clock3,
-  FileText,
   Globe2,
   MoreHorizontal,
-  NotebookPen,
   Plus,
-  Search,
   Settings2,
   SquareTerminal,
   Zap,
@@ -17,46 +14,18 @@ import type { ViewId } from '../model';
 import { IconButton } from './IconButton';
 
 interface SectionPageProps {
-  view: Exclude<ViewId, 'today' | 'inbox' | 'tasks'>;
+  view: Exclude<ViewId, 'today' | 'inbox' | 'tasks' | 'notes'>;
   onOpenBrowser: () => void;
   onOpenTerminal: () => void;
 }
 
 const pageMeta: Record<
-  Exclude<ViewId, 'today' | 'inbox' | 'tasks'>,
+  Exclude<ViewId, 'today' | 'inbox' | 'tasks' | 'notes'>,
   { title: string; description: string; icon: LucideIcon }
 > = {
-  notes: { title: '笔记', description: '把想法、资料与项目上下文放在一起。', icon: NotebookPen },
   automations: { title: '自动化', description: '让重复事务在后台按计划完成。', icon: Bot },
   settings: { title: '设置', description: '调整工作台、数据与工具偏好。', icon: Settings2 },
 };
-
-const notes = [
-  {
-    title: 'Daily Workbench 产品方向',
-    excerpt: '工作区承载上下文，浏览器和终端作为当前事务的工具面板…',
-    time: '刚刚',
-    tag: '产品',
-  },
-  {
-    title: 'Electron 安全边界',
-    excerpt: '远程内容必须运行在独立 WebContents 中，关闭 Node 集成…',
-    time: '今天 13:42',
-    tag: '开发',
-  },
-  {
-    title: '公司 Wiki 试点计划',
-    excerpt: '目标用户约 100 人，先在现有 Windows 虚拟机上验证体验…',
-    time: '今天 10:18',
-    tag: '工作',
-  },
-  {
-    title: '本周回顾',
-    excerpt: '完成个人网站的基础优化，下一步关注内容和长期维护…',
-    time: '星期一',
-    tag: '回顾',
-  },
-];
 
 export function SectionPage({ view, onOpenBrowser, onOpenTerminal }: SectionPageProps) {
   const meta = pageMeta[view];
@@ -80,44 +49,6 @@ export function SectionPage({ view, onOpenBrowser, onOpenTerminal }: SectionPage
           </button>
         ) : null}
       </header>
-
-      {view === 'notes' ? (
-        <section className="notes-view">
-          <div className="page-toolbar">
-            <label className="page-search">
-              <Search size={15} />
-              <span className="sr-only">搜索笔记</span>
-              <input placeholder="搜索标题和内容" />
-            </label>
-            <div className="segmented-control">
-              <button className="is-active" type="button">
-                卡片
-              </button>
-              <button type="button">列表</button>
-            </div>
-          </div>
-          <div className="note-grid">
-            {notes.map((note) => (
-              <button type="button" className="note-card" key={note.title}>
-                <span className="note-card__tag">{note.tag}</span>
-                <h2>{note.title}</h2>
-                <p>{note.excerpt}</p>
-                <footer>
-                  <span>
-                    <FileText size={13} /> Markdown
-                  </span>
-                  <time>{note.time}</time>
-                </footer>
-              </button>
-            ))}
-            <button type="button" className="note-card note-card--new">
-              <Plus size={20} />
-              <strong>新建笔记</strong>
-              <span>从空白页开始</span>
-            </button>
-          </div>
-        </section>
-      ) : null}
 
       {view === 'automations' ? (
         <section className="automations-view">

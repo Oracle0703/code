@@ -11,6 +11,16 @@ import {
   type InboxSnapshot,
   type InboxTargetInput,
   type InboxUndoInput,
+  type NoteArchiveInput,
+  type NoteConversionResult,
+  type NoteConvertInboxInput,
+  type NoteCreateInput,
+  type NoteSnapshot,
+  type NoteUpdateInput,
+  type ScheduleCreateInput,
+  type ScheduleSnapshot,
+  type ScheduleTargetInput,
+  type ScheduleUpdateInput,
   type TaskConversionResult,
   type TaskConvertInboxInput,
   type TaskCreateInput,
@@ -93,6 +103,25 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<TaskSnapshot>(IPC_CHANNELS.task.updatePlanning, input),
     convertInbox: (input: TaskConvertInboxInput) =>
       invoke<TaskConversionResult>(IPC_CHANNELS.task.convertInbox, input),
+  }),
+  note: Object.freeze({
+    getSnapshot: (input: WorkspaceTargetInput) =>
+      invoke<NoteSnapshot>(IPC_CHANNELS.note.getSnapshot, input),
+    create: (input: NoteCreateInput) => invoke<NoteSnapshot>(IPC_CHANNELS.note.create, input),
+    update: (input: NoteUpdateInput) => invoke<NoteSnapshot>(IPC_CHANNELS.note.update, input),
+    archive: (input: NoteArchiveInput) => invoke<NoteSnapshot>(IPC_CHANNELS.note.archive, input),
+    convertInbox: (input: NoteConvertInboxInput) =>
+      invoke<NoteConversionResult>(IPC_CHANNELS.note.convertInbox, input),
+  }),
+  schedule: Object.freeze({
+    getSnapshot: (input: WorkspaceTargetInput) =>
+      invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.getSnapshot, input),
+    create: (input: ScheduleCreateInput) =>
+      invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.create, input),
+    update: (input: ScheduleUpdateInput) =>
+      invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.update, input),
+    archive: (input: ScheduleTargetInput) =>
+      invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.archive, input),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),

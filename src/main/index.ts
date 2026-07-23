@@ -105,6 +105,8 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     workspace: database,
     inbox: database,
     task: database,
+    note: database,
+    schedule: database,
     terminal,
     trustedRendererLocation,
   });

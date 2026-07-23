@@ -9,6 +9,16 @@ import {
   type InboxSnapshot,
   type InboxTargetInput,
   type InboxUndoInput,
+  type NoteArchiveInput,
+  type NoteConversionResult,
+  type NoteConvertInboxInput,
+  type NoteCreateInput,
+  type NoteSnapshot,
+  type NoteUpdateInput,
+  type ScheduleCreateInput,
+  type ScheduleSnapshot,
+  type ScheduleTargetInput,
+  type ScheduleUpdateInput,
   type TaskConversionResult,
   type TaskConvertInboxInput,
   type TaskCreateInput,
@@ -35,6 +45,13 @@ import {
   parseInboxCreateInput,
   parseInboxTargetInput,
   parseInboxUndoInput,
+  parseNoteArchiveInput,
+  parseNoteConvertInboxInput,
+  parseNoteCreateInput,
+  parseNoteUpdateInput,
+  parseScheduleCreateInput,
+  parseScheduleTargetInput,
+  parseScheduleUpdateInput,
   parseTaskConvertInboxInput,
   parseTaskCreateInput,
   parseTaskPlanningInput,
@@ -81,6 +98,19 @@ interface IpcDependencies {
     updateTaskPlanning(input: TaskPlanningInput): Promise<TaskSnapshot>;
     convertInboxToTask(input: TaskConvertInboxInput): Promise<TaskConversionResult>;
   };
+  note: {
+    getNoteSnapshot(input: WorkspaceTargetInput): Promise<NoteSnapshot>;
+    createNote(input: NoteCreateInput): Promise<NoteSnapshot>;
+    updateNote(input: NoteUpdateInput): Promise<NoteSnapshot>;
+    archiveNote(input: NoteArchiveInput): Promise<NoteSnapshot>;
+    convertInboxToNote(input: NoteConvertInboxInput): Promise<NoteConversionResult>;
+  };
+  schedule: {
+    getScheduleSnapshot(input: WorkspaceTargetInput): Promise<ScheduleSnapshot>;
+    createScheduleItem(input: ScheduleCreateInput): Promise<ScheduleSnapshot>;
+    updateScheduleItem(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
+    archiveScheduleItem(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
+  };
   terminal: TerminalManager;
   trustedRendererLocation: TrustedRendererLocation;
 }
@@ -94,6 +124,8 @@ export function registerIpcHandlers({
   workspace,
   inbox,
   task,
+  note,
+  schedule,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -200,6 +232,44 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.task.convertInbox, (_event, input, ...args) => {
     assertNoArguments(args, 'Converting an inbox entry to a task');
     return task.convertInboxToTask(parseTaskConvertInboxInput(input));
+  });
+
+  register(IPC_CHANNELS.note.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the note snapshot');
+    return note.getNoteSnapshot(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.note.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating a note');
+    return note.createNote(parseNoteCreateInput(input));
+  });
+  register(IPC_CHANNELS.note.update, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating a note');
+    return note.updateNote(parseNoteUpdateInput(input));
+  });
+  register(IPC_CHANNELS.note.archive, (_event, input, ...args) => {
+    assertNoArguments(args, 'Archiving a note');
+    return note.archiveNote(parseNoteArchiveInput(input));
+  });
+  register(IPC_CHANNELS.note.convertInbox, (_event, input, ...args) => {
+    assertNoArguments(args, 'Converting an inbox entry to a note');
+    return note.convertInboxToNote(parseNoteConvertInboxInput(input));
+  });
+
+  register(IPC_CHANNELS.schedule.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the schedule snapshot');
+    return schedule.getScheduleSnapshot(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.schedule.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating a schedule item');
+    return schedule.createScheduleItem(parseScheduleCreateInput(input));
+  });
+  register(IPC_CHANNELS.schedule.update, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating a schedule item');
+    return schedule.updateScheduleItem(parseScheduleUpdateInput(input));
+  });
+  register(IPC_CHANNELS.schedule.archive, (_event, input, ...args) => {
+    assertNoArguments(args, 'Archiving a schedule item');
+    return schedule.archiveScheduleItem(parseScheduleTargetInput(input));
   });
 
   register(IPC_CHANNELS.window.minimize, () => {

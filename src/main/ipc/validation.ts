@@ -5,6 +5,13 @@ import {
   type InboxCreateInput,
   type InboxTargetInput,
   type InboxUndoInput,
+  type NoteArchiveInput,
+  type NoteConvertInboxInput,
+  type NoteCreateInput,
+  type NoteUpdateInput,
+  type ScheduleCreateInput,
+  type ScheduleTargetInput,
+  type ScheduleUpdateInput,
   type TaskConvertInboxInput,
   type TaskCreateInput,
   type TaskPlanningInput,
@@ -23,6 +30,20 @@ import {
   normalizeInboxId,
   normalizeInboxUndoToken,
 } from '../../shared/inbox-domain';
+import {
+  normalizeNoteBody,
+  normalizeNoteId,
+  normalizeNoteRevision,
+  normalizeNoteTitle,
+} from '../../shared/note-domain';
+import {
+  normalizeScheduleCivilDate,
+  normalizeScheduleId,
+  normalizeScheduleKind,
+  normalizeScheduleRange,
+  normalizeScheduleRevision,
+  normalizeScheduleTitle,
+} from '../../shared/schedule-domain';
 import {
   normalizeTaskId,
   normalizeTaskPlanning,
@@ -248,6 +269,102 @@ export function parseTaskConvertInboxInput(value: unknown): TaskConvertInboxInpu
     workspaceId: normalizeWorkspaceId(value.workspaceId),
     entryId: normalizeInboxId(value.entryId),
     planning: normalizeTaskPlanning(value.planning),
+  };
+}
+
+export function parseNoteCreateInput(value: unknown): NoteCreateInput {
+  if (!isRecord(value)) throw new TypeError('Note creation input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'title', 'body']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    title: normalizeNoteTitle(value.title),
+    body: normalizeNoteBody(value.body),
+  };
+}
+
+export function parseNoteUpdateInput(value: unknown): NoteUpdateInput {
+  if (!isRecord(value)) throw new TypeError('Note update input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'noteId', 'title', 'body', 'expectedRevision']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    noteId: normalizeNoteId(value.noteId),
+    title: normalizeNoteTitle(value.title),
+    body: normalizeNoteBody(value.body),
+    expectedRevision: normalizeNoteRevision(value.expectedRevision),
+  };
+}
+
+export function parseNoteArchiveInput(value: unknown): NoteArchiveInput {
+  if (!isRecord(value)) throw new TypeError('Note archive input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'noteId', 'expectedRevision']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    noteId: normalizeNoteId(value.noteId),
+    expectedRevision: normalizeNoteRevision(value.expectedRevision),
+  };
+}
+
+export function parseNoteConvertInboxInput(value: unknown): NoteConvertInboxInput {
+  if (!isRecord(value)) throw new TypeError('Note conversion input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'entryId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    entryId: normalizeInboxId(value.entryId),
+  };
+}
+
+export function parseScheduleCreateInput(value: unknown): ScheduleCreateInput {
+  if (!isRecord(value)) throw new TypeError('Schedule creation input must be an object');
+  assertOnlyKeys(value, [
+    'workspaceId',
+    'expectedDate',
+    'title',
+    'kind',
+    'startMinute',
+    'endMinute',
+  ]);
+  const range = normalizeScheduleRange(value.startMinute, value.endMinute);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    expectedDate: normalizeScheduleCivilDate(value.expectedDate),
+    title: normalizeScheduleTitle(value.title),
+    kind: normalizeScheduleKind(value.kind),
+    ...range,
+  };
+}
+
+export function parseScheduleTargetInput(value: unknown): ScheduleTargetInput {
+  if (!isRecord(value)) throw new TypeError('Schedule target input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'scheduleId', 'expectedDate', 'expectedRevision']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    scheduleId: normalizeScheduleId(value.scheduleId),
+    expectedDate: normalizeScheduleCivilDate(value.expectedDate),
+    expectedRevision: normalizeScheduleRevision(value.expectedRevision),
+  };
+}
+
+export function parseScheduleUpdateInput(value: unknown): ScheduleUpdateInput {
+  if (!isRecord(value)) throw new TypeError('Schedule update input must be an object');
+  assertOnlyKeys(value, [
+    'workspaceId',
+    'scheduleId',
+    'expectedDate',
+    'expectedRevision',
+    'title',
+    'kind',
+    'startMinute',
+    'endMinute',
+  ]);
+  const range = normalizeScheduleRange(value.startMinute, value.endMinute);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    scheduleId: normalizeScheduleId(value.scheduleId),
+    expectedDate: normalizeScheduleCivilDate(value.expectedDate),
+    expectedRevision: normalizeScheduleRevision(value.expectedRevision),
+    title: normalizeScheduleTitle(value.title),
+    kind: normalizeScheduleKind(value.kind),
+    ...range,
   };
 }
 
