@@ -55,6 +55,14 @@ import { NoteService } from '../notes';
 import { ScheduleService } from '../schedule';
 import { SearchService } from '../search';
 import { TaskService } from '../tasks';
+import { TerminalPreferenceRepository } from '../terminal/terminal-preference-repository';
+import type {
+  StoredTerminalPreferences,
+  TerminalPreferenceStore,
+  TerminalProfilePreferenceWrite,
+  TerminalWorkingDirectoryPreferenceWrite,
+  TerminalWslDistributionPreferenceWrite,
+} from '../terminal/terminal-preference-types';
 import { WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
 import { BackupPolicyRepository } from './backup-policy-repository';
@@ -144,7 +152,7 @@ export interface DatabaseServiceOptions {
 
 type ServiceState = 'closed' | 'opening' | 'open' | 'closing' | 'poisoned';
 
-export class DatabaseService {
+export class DatabaseService implements TerminalPreferenceStore {
   readonly #paths;
   readonly #adapterFactory: SqliteAdapterFactory;
   readonly #migrationRunner: MigrationRunner;
@@ -505,6 +513,42 @@ export class DatabaseService {
     return this.#workspaceService.updatePreferences(input);
   }
 
+  getTerminalPreferences(workspaceId: string): Promise<StoredTerminalPreferences> {
+    return this.#enqueue((database) =>
+      new TerminalPreferenceRepository(database).read(workspaceId),
+    );
+  }
+
+  updateTerminalProfilePreference(
+    input: TerminalProfilePreferenceWrite,
+  ): Promise<StoredTerminalPreferences> {
+    return this.#enqueue((database) =>
+      new TerminalPreferenceRepository(database).updateProfile(input, this.#now().toISOString()),
+    );
+  }
+
+  updateTerminalWorkingDirectoryPreference(
+    input: TerminalWorkingDirectoryPreferenceWrite,
+  ): Promise<StoredTerminalPreferences> {
+    return this.#enqueue((database) =>
+      new TerminalPreferenceRepository(database).updateWorkingDirectory(
+        input,
+        this.#now().toISOString(),
+      ),
+    );
+  }
+
+  updateTerminalWslDistributionPreference(
+    input: TerminalWslDistributionPreferenceWrite,
+  ): Promise<StoredTerminalPreferences> {
+    return this.#enqueue((database) =>
+      new TerminalPreferenceRepository(database).updateWslDistribution(
+        input,
+        this.#now().toISOString(),
+      ),
+    );
+  }
+
   getInboxSnapshot(input: WorkspaceTargetInput): Promise<InboxSnapshot> {
     return this.#inboxService.getSnapshot(input);
   }
@@ -689,6 +733,9 @@ export class DatabaseService {
       try {
         new MetadataRepository(database).initializeWithinTransaction(openedAt, this.#idFactory());
         this.#workspaceService.initializeWithinTransaction(database, openedAt);
+        if (migration.toVersion >= 8) {
+          new TerminalPreferenceRepository(database).validateSnapshot();
+        }
         new BackupPolicyRepository(database).initializeWithinTransaction(openedAt);
         this.#inboxService.validateSnapshot(database);
         this.#taskService.validateSnapshot(database);
@@ -812,6 +859,9 @@ export class DatabaseService {
       new BackupPolicyRepository(database).readPolicy();
       new BackupPolicyRepository(database).readRunState();
       this.#searchService.validateSnapshot(database);
+    }
+    if (expectedVersion >= 8) {
+      new TerminalPreferenceRepository(database).validateSnapshot();
     }
   }
 

@@ -47,12 +47,16 @@ import {
   type TaskSnapshot,
   type TaskStatusInput,
   type TerminalCreateInput,
+  type TerminalConfigurationRevisionInput,
   type TerminalDataEvent,
   type TerminalExitEvent,
+  type TerminalProfilePreferenceInput,
   type TerminalResizeInput,
   type TerminalSessionTargetInput,
   type TerminalSnapshot,
   type TerminalWorkspaceInput,
+  type TerminalWorkingDirectorySelection,
+  type TerminalWslPreferenceInput,
   type TerminalWriteInput,
   type Unsubscribe,
   type WindowCloseRequest,
@@ -288,6 +292,19 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.getSnapshot, input),
     create: (input: TerminalCreateInput) =>
       invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.create, input),
+    updateProfile: (input: TerminalProfilePreferenceInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.updateProfile, input),
+    updateWslDistribution: (input: TerminalWslPreferenceInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.updateWslDistribution, input),
+    chooseWorkingDirectory: (input: TerminalConfigurationRevisionInput) =>
+      invoke<TerminalWorkingDirectorySelection>(
+        IPC_CHANNELS.terminal.chooseWorkingDirectory,
+        input,
+      ),
+    resetWorkingDirectory: (input: TerminalConfigurationRevisionInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.resetWorkingDirectory, input),
+    refreshCapabilities: (input: TerminalWorkspaceInput) =>
+      invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.refreshCapabilities, input),
     activate: (input: TerminalSessionTargetInput) =>
       invoke<TerminalSnapshot>(IPC_CHANNELS.terminal.activate, input),
     restart: (input: TerminalSessionTargetInput) =>

@@ -2,29 +2,37 @@ import { describe, expect, it, vi } from 'vitest';
 import type * as NodePty from 'node-pty';
 import { TerminalManager } from '../src/main/terminal/terminal-manager';
 import type {
-  ResolvedTerminalProfile,
-  TerminalProfileResolverLike,
-} from '../src/main/terminal/terminal-profile-resolver';
+  ResolvedTerminalLaunch,
+  TerminalConfigurationServiceLike,
+  TerminalConfigurationState,
+  TerminalLaunchConfiguration,
+} from '../src/main/terminal/terminal-configuration-service';
+import type { ResolvedTerminalProfile } from '../src/main/terminal/terminal-profile-resolver';
 import type {
+  TerminalConfigurationSnapshot,
   TerminalDataEvent,
   TerminalExitEvent,
+  TerminalProfileId,
   TerminalSnapshot,
 } from '../src/shared/contracts';
 
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
 const WORKSPACE_C = '33333333-3333-4333-8333-333333333333';
+const PROCESS_SETTLE_TEST_WAIT_MS = 750;
 
 describe('terminal manager', () => {
   it('keeps independent sessions, routes sequenced output, and restarts an exited tab in place', async () => {
     const harness = createHarness();
     let snapshot = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     const firstId = snapshot.activeSessionId;
     snapshot = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'command-prompt',
     });
     const secondId = snapshot.activeSessionId;
@@ -75,6 +83,7 @@ describe('terminal manager', () => {
         signal: 15,
       },
     ]);
+    expect(firstPty.kill).not.toHaveBeenCalled();
     expect(() =>
       harness.manager.write({
         workspaceId: WORKSPACE_A,
@@ -93,6 +102,7 @@ describe('terminal manager', () => {
     });
     expect(snapshot.sessions.find(({ id }) => id === firstId)).not.toHaveProperty('exitCode');
     expect(harness.ptys).toHaveLength(3);
+    expect(harness.spawn.mock.calls[2]).toMatchObject(['/bin/sh', ['-l'], { cwd: '/home/tester' }]);
 
     snapshot = await harness.manager.close({
       workspaceId: WORKSPACE_A,
@@ -103,10 +113,126 @@ describe('terminal manager', () => {
     expect(secondPty.kill).not.toHaveBeenCalled();
   });
 
+  it('cleans up a naturally exited Windows PTY before restarting its tab', async () => {
+    const harness = createHarness({ platform: 'win32' });
+    const initial = await harness.manager.create({
+      workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
+      profileId: 'system-default',
+    });
+    const sessionId = initial.activeSessionId!;
+    const pty = harness.ptys[0]!;
+
+    pty.emitExit(0);
+
+    expect(pty.kill).toHaveBeenCalledTimes(1);
+    expect(harness.exitEvents).toEqual([
+      {
+        workspaceId: WORKSPACE_A,
+        sessionId,
+        exitCode: 0,
+      },
+    ]);
+    await expect(
+      harness.manager.restart({ workspaceId: WORKSPACE_A, sessionId }),
+    ).resolves.toMatchObject({
+      activeSessionId: sessionId,
+      sessions: [expect.objectContaining({ id: sessionId, status: 'running' })],
+    });
+    expect(harness.ptys).toHaveLength(2);
+  });
+
+  it('retries failed Windows post-exit cleanup before restarting the tab', async () => {
+    const harness = createHarness({
+      platform: 'win32',
+      configurePty: (pty, index) => {
+        if (index === 0) {
+          pty.kill.mockImplementationOnce(() => {
+            throw new Error('PTY already stopped');
+          });
+        }
+      },
+    });
+    const initial = await harness.manager.create({
+      workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
+      profileId: 'system-default',
+    });
+    const sessionId = initial.activeSessionId!;
+    const pty = harness.ptys[0]!;
+
+    pty.emitExit(23);
+
+    expect(pty.kill).toHaveBeenCalledTimes(1);
+    expect(harness.lastSnapshot(WORKSPACE_A).sessions[0]).toMatchObject({
+      id: sessionId,
+      status: 'exited',
+      exitCode: 23,
+    });
+    expect(harness.exitEvents).toEqual([
+      {
+        workspaceId: WORKSPACE_A,
+        sessionId,
+        exitCode: 23,
+      },
+    ]);
+    await expect(
+      harness.manager.restart({ workspaceId: WORKSPACE_A, sessionId }),
+    ).resolves.toMatchObject({
+      activeSessionId: sessionId,
+      sessions: [expect.objectContaining({ id: sessionId, status: 'running' })],
+    });
+    expect(pty.kill).toHaveBeenCalledTimes(2);
+    expect(harness.ptys).toHaveLength(2);
+  });
+
+  it('refuses to restart while Windows post-exit cleanup keeps failing', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({
+        platform: 'win32',
+        configurePty: (pty, index) => {
+          if (index === 0) {
+            pty.kill.mockImplementation(() => {
+              throw new Error('ConPTY cleanup failed');
+            });
+          }
+        },
+      });
+      const initial = await harness.manager.create({
+        workspaceId: WORKSPACE_A,
+        configurationRevision: 1,
+        profileId: 'system-default',
+      });
+      const sessionId = initial.activeSessionId!;
+      const pty = harness.ptys[0]!;
+      pty.emitExit(31);
+
+      const restart = harness.manager
+        .restart({ workspaceId: WORKSPACE_A, sessionId })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      const error = await restart;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('Unable to stop every terminal process');
+      expect(pty.kill).toHaveBeenCalledTimes(3);
+      expect(harness.spawn).toHaveBeenCalledTimes(1);
+      expect(harness.lastSnapshot(WORKSPACE_A).sessions[0]).toMatchObject({
+        id: sessionId,
+        status: 'exited',
+        exitCode: 31,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('allows only one restart when the same exited tab is restarted concurrently', async () => {
     const harness = createHarness();
     const initial = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     const sessionId = initial.activeSessionId!;
@@ -124,38 +250,50 @@ describe('terminal manager', () => {
     ).toMatchObject({ id: sessionId, status: 'running' });
   });
 
-  it('bounds repeated failed restart processes even when subscription and kill both throw', async () => {
-    const harness = createHarness({
-      configurePty: (pty, index) => {
-        if (index === 0) return;
-        pty.failDataSubscription = true;
-        pty.kill.mockImplementation(() => {
-          throw new Error('conpty teardown failed');
-        });
-      },
-    });
-    const initial = await harness.manager.create({
-      workspaceId: WORKSPACE_A,
-      profileId: 'system-default',
-    });
-    const sessionId = initial.activeSessionId!;
-    harness.ptys[0]!.emitExit(0);
+  it('blocks another restart after a failed spawn cannot release its PTY', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({
+        configurePty: (pty, index) => {
+          if (index === 0) return;
+          pty.failDataSubscription = true;
+          pty.kill.mockImplementation(() => {
+            throw new Error('conpty teardown failed');
+          });
+        },
+      });
+      const initial = await harness.manager.create({
+        workspaceId: WORKSPACE_A,
+        configurationRevision: 1,
+        profileId: 'system-default',
+      });
+      const sessionId = initial.activeSessionId!;
+      harness.ptys[0]!.emitExit(0);
 
-    const attempts = await Promise.allSettled(
-      Array.from({ length: 12 }, () =>
+      await expect(
         harness.manager.restart({ workspaceId: WORKSPACE_A, sessionId }),
-      ),
-    );
+      ).rejects.toThrow('Unable to restart');
+      const blockedRestart = harness.manager
+        .restart({ workspaceId: WORKSPACE_A, sessionId })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(2_000);
 
-    expect(attempts.every(({ status }) => status === 'rejected')).toBe(true);
-    expect(harness.ptys).toHaveLength(1 + 8);
-    expect(harness.spawn).toHaveBeenCalledTimes(1 + 8);
+      const error = await blockedRestart;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('Unable to stop every terminal process');
+      expect(harness.ptys).toHaveLength(2);
+      expect(harness.spawn).toHaveBeenCalledTimes(2);
+      expect(harness.ptys[1]!.kill).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('enforces active-workspace ownership while background output remains correctly attributed', async () => {
     const harness = createHarness();
     const snapshotA = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     const sessionA = snapshotA.activeSessionId!;
@@ -175,6 +313,7 @@ describe('terminal manager', () => {
 
     const snapshotB = await harness.manager.create({
       workspaceId: WORKSPACE_B,
+      configurationRevision: 1,
       profileId: 'command-prompt',
     });
     const sessionB = snapshotB.activeSessionId!;
@@ -203,6 +342,10 @@ describe('terminal manager', () => {
     harness.manager.discardWorkspace(WORKSPACE_A);
     expect(ptyA.kill).toHaveBeenCalledTimes(1);
     expect(ptyB.kill).not.toHaveBeenCalled();
+    expect(harness.lastSnapshot(WORKSPACE_A)).toMatchObject({
+      activeSessionId: null,
+      sessions: [],
+    });
     expect(await harness.manager.getSnapshot({ workspaceId: WORKSPACE_B })).toMatchObject({
       activeSessionId: sessionB,
       sessions: [{ id: sessionB }],
@@ -210,16 +353,19 @@ describe('terminal manager', () => {
   });
 
   it('rejects unavailable profiles before spawning and invalidates a create delayed by switching', async () => {
-    const deferredProfiles = deferred<readonly ResolvedTerminalProfile[]>();
+    const deferredLaunch = deferred<ResolvedTerminalLaunch>();
+    const configurationService = createConfigurationService();
+    configurationService.resolveLaunch = vi.fn(() => deferredLaunch.promise);
     const harness = createHarness({
-      profileResolver: { listProfiles: () => deferredProfiles.promise },
+      configurationService,
     });
     const pending = harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     harness.manager.setActiveWorkspace(WORKSPACE_B);
-    deferredProfiles.resolve(PROFILES);
+    deferredLaunch.resolve(resolvedLaunch('system-default'));
     await expect(pending).rejects.toThrow('active workspace');
     expect(harness.spawn).not.toHaveBeenCalled();
 
@@ -227,6 +373,7 @@ describe('terminal manager', () => {
     await expect(
       unavailableHarness.manager.create({
         workspaceId: WORKSPACE_A,
+        configurationRevision: 1,
         profileId: 'wsl-default',
       }),
     ).rejects.toThrow('未检测到可启动的 WSL 发行版');
@@ -238,12 +385,14 @@ describe('terminal manager', () => {
     for (let index = 0; index < 8; index += 1) {
       await harness.manager.create({
         workspaceId: WORKSPACE_A,
+        configurationRevision: 1,
         profileId: 'system-default',
       });
     }
     await expect(
       harness.manager.create({
         workspaceId: WORKSPACE_A,
+        configurationRevision: 1,
         profileId: 'system-default',
       }),
     ).rejects.toThrow('at most 8');
@@ -252,6 +401,7 @@ describe('terminal manager', () => {
     for (let index = 0; index < 8; index += 1) {
       await harness.manager.create({
         workspaceId: WORKSPACE_B,
+        configurationRevision: 1,
         profileId: 'command-prompt',
       });
     }
@@ -259,6 +409,7 @@ describe('terminal manager', () => {
     await expect(
       harness.manager.create({
         workspaceId: WORKSPACE_C,
+        configurationRevision: 1,
         profileId: 'system-default',
       }),
     ).rejects.toThrow('at most 16');
@@ -269,11 +420,13 @@ describe('terminal manager', () => {
     const harness = createHarness();
     const first = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     const firstId = first.activeSessionId!;
     const second = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'command-prompt',
     });
     const secondId = second.activeSessionId!;
@@ -302,6 +455,7 @@ describe('terminal manager', () => {
     const harness = createHarness();
     await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     const pty = harness.ptys[0]!;
@@ -314,9 +468,7 @@ describe('terminal manager', () => {
       });
 
     harness.manager.setActiveWorkspace(WORKSPACE_B);
-    expect(() => harness.manager.discardWorkspace(WORKSPACE_A)).toThrow(
-      'Unable to stop every terminal process',
-    );
+    expect(() => harness.manager.discardWorkspace(WORKSPACE_A)).not.toThrow();
     expect(pty.kill).toHaveBeenCalledTimes(2);
 
     await expect(harness.manager.shutdown()).resolves.toBeUndefined();
@@ -327,6 +479,7 @@ describe('terminal manager', () => {
     const harness = createHarness();
     const snapshot = await harness.manager.create({
       workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
       profileId: 'system-default',
     });
     const firstChunk = 'x'.repeat(64 * 1024 - 1);
@@ -348,13 +501,189 @@ describe('terminal manager', () => {
       },
     ]);
   });
+
+  it('rejects late configuration reads after a newer preference update was published', async () => {
+    const oldRead = deferred<TerminalConfigurationState>();
+    const updated = deferred<TerminalConfigurationState>();
+    const configurationService = createConfigurationService();
+    configurationService.getState = vi.fn(() => oldRead.promise);
+    configurationService.updateProfile = vi.fn(() => updated.promise);
+    const harness = createHarness({ configurationService });
+
+    const read = harness.manager.getSnapshot({ workspaceId: WORKSPACE_A });
+    const update = harness.manager.updateProfile({
+      workspaceId: WORKSPACE_A,
+      profileId: 'command-prompt',
+      expectedRevision: 1,
+    });
+    updated.resolve(configurationState(2, 1, 'command-prompt'));
+    await expect(update).resolves.toMatchObject({
+      configuration: { revision: 2, preferredProfileId: 'command-prompt' },
+    });
+    oldRead.resolve(configurationState(1, 1, 'system-default'));
+
+    await expect(read).resolves.toMatchObject({
+      configuration: { revision: 2, preferredProfileId: 'command-prompt' },
+    });
+    expect(harness.lastSnapshot(WORKSPACE_A)).toMatchObject({
+      configuration: { revision: 2, preferredProfileId: 'command-prompt' },
+    });
+  });
+
+  it('keeps a newer capability refresh when an older snapshot read completes late', async () => {
+    const oldRead = deferred<TerminalConfigurationState>();
+    const refreshed = deferred<TerminalConfigurationState>();
+    const configurationService = createConfigurationService();
+    configurationService.getState = vi.fn(() => oldRead.promise);
+    configurationService.refreshCapabilities = vi.fn(() => refreshed.promise);
+    const harness = createHarness({ configurationService });
+
+    const read = harness.manager.getSnapshot({ workspaceId: WORKSPACE_A });
+    const refresh = harness.manager.refreshCapabilities({ workspaceId: WORKSPACE_A });
+    refreshed.resolve(configurationState(1, 2));
+    await expect(refresh).resolves.toMatchObject({
+      configuration: { wsl: { capabilityRevision: 2 } },
+    });
+    oldRead.resolve(configurationState(1, 1));
+    await expect(read).resolves.toMatchObject({
+      configuration: { wsl: { capabilityRevision: 2 } },
+    });
+  });
+
+  it('uses request start order to reject a late read with the same version tuple', async () => {
+    const firstRead = deferred<TerminalConfigurationState>();
+    const configurationService = createConfigurationService();
+    configurationService.getState = vi
+      .fn()
+      .mockImplementationOnce(() => firstRead.promise)
+      .mockImplementationOnce(async () => ({
+        ...CONFIGURATION_STATE,
+        configuration: {
+          ...CONFIGURATION,
+          workingDirectory: {
+            ...CONFIGURATION.workingDirectory,
+            available: false,
+            unavailableReason: 'temporarily unavailable',
+          },
+        },
+      }));
+    const harness = createHarness({ configurationService });
+
+    const first = harness.manager.getSnapshot({ workspaceId: WORKSPACE_A });
+    const second = harness.manager.getSnapshot({ workspaceId: WORKSPACE_A });
+    await expect(second).resolves.toMatchObject({
+      configuration: { workingDirectory: { available: false } },
+    });
+    firstRead.resolve(CONFIGURATION_STATE);
+    await expect(first).resolves.toMatchObject({
+      configuration: { workingDirectory: { available: false } },
+    });
+  });
+
+  it('stops acceptance synchronously while a create is awaiting configuration', async () => {
+    const pendingLaunch = deferred<ResolvedTerminalLaunch>();
+    const configurationService = createConfigurationService();
+    configurationService.resolveLaunch = vi.fn(() => pendingLaunch.promise);
+    const harness = createHarness({ configurationService });
+    const create = harness.manager.create({
+      workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
+    });
+
+    const shutdown = harness.manager.shutdown();
+    expect(configurationService.stop).toHaveBeenCalledTimes(1);
+    expect(() =>
+      harness.manager.write({
+        workspaceId: WORKSPACE_A,
+        sessionId: 'missing',
+        data: 'late',
+      }),
+    ).toThrow('shutting down');
+    pendingLaunch.resolve(resolvedLaunch('system-default'));
+
+    await expect(create).rejects.toThrow('shutting down');
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(harness.spawn).not.toHaveBeenCalled();
+  });
+
+  it('waits for native exit instead of treating a successful kill call as completion', async () => {
+    const harness = createHarness({
+      configurePty: (pty) => {
+        pty.kill.mockImplementation(() => undefined);
+      },
+    });
+    const snapshot = await harness.manager.create({
+      workspaceId: WORKSPACE_A,
+      configurationRevision: 1,
+    });
+    const pty = harness.ptys[0]!;
+    let completed = false;
+    const close = harness.manager
+      .close({
+        workspaceId: WORKSPACE_A,
+        sessionId: snapshot.activeSessionId!,
+      })
+      .then((result) => {
+        completed = true;
+        return result;
+      });
+    await Promise.resolve();
+    expect(pty.kill).toHaveBeenCalledTimes(1);
+    expect(completed).toBe(false);
+
+    pty.emitExit(0);
+    await expect(close).resolves.toMatchObject({ sessions: [] });
+    expect(completed).toBe(true);
+  });
+
+  it('does not release a native handle when exit arrives after a failed kill', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({
+        configurePty: (pty) => {
+          pty.kill
+            .mockImplementationOnce(() => {
+              queueMicrotask(() => pty.emitExit(0));
+              throw new Error('kill failed before worker disposal');
+            })
+            .mockImplementationOnce(() => {
+              throw new Error('worker still busy');
+            })
+            .mockImplementationOnce(() => undefined);
+        },
+      });
+      const snapshot = await harness.manager.create({
+        workspaceId: WORKSPACE_A,
+        configurationRevision: 1,
+      });
+      const close = harness.manager.close({
+        workspaceId: WORKSPACE_A,
+        sessionId: snapshot.activeSessionId!,
+      });
+      let completed = false;
+      void close.then(() => {
+        completed = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(PROCESS_SETTLE_TEST_WAIT_MS - 1);
+      expect(completed).toBe(false);
+      expect(harness.ptys[0]!.kill).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(close).resolves.toMatchObject({ sessions: [] });
+      expect(harness.ptys[0]!.kill).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 function createHarness(
   options: {
-    profileResolver?: TerminalProfileResolverLike;
+    configurationService?: TerminalConfigurationServiceLike;
     idCount?: number;
     configurePty?: (pty: FakePty, index: number) => void;
+    platform?: NodeJS.Platform;
   } = {},
 ) {
   const ptys: FakePty[] = [];
@@ -379,14 +708,11 @@ function createHarness(
       exit: (event) => exitEvents.push(event),
       stateChanged: (snapshot) => snapshots.push(snapshot),
     },
-    profileResolver: options.profileResolver ?? {
-      listProfiles: async () => PROFILES,
-    },
+    configurationService: options.configurationService ?? createConfigurationService(),
     ptyFactory: { spawn },
     now: () => new Date('2026-07-22T12:00:00.000Z'),
     idFactory: () => ids.shift() ?? '99999999-9999-4999-8999-999999999999',
-    workingDirectory: () => '/home/tester',
-    platform: 'linux',
+    platform: options.platform ?? 'linux',
     environment: { PATH: '/usr/bin' },
   });
   return {
@@ -410,7 +736,7 @@ class FakePty {
   readonly write = vi.fn();
   readonly resize = vi.fn();
   readonly clear = vi.fn();
-  readonly kill = vi.fn();
+  readonly kill = vi.fn(() => this.emitExit(0));
   public failDataSubscription = false;
   #dataListeners = new Set<(data: string) => void>();
   #exitListeners = new Set<(event: { exitCode: number; signal?: number }) => void>();
@@ -475,6 +801,84 @@ const PROFILES: readonly ResolvedTerminalProfile[] = [
     args: [],
   },
 ];
+
+const CONFIGURATION: TerminalConfigurationSnapshot = {
+  revision: 1,
+  preferredProfileId: 'system-default',
+  workingDirectory: {
+    mode: 'user-home',
+    displayPath: '/home/tester',
+    available: true,
+  },
+  wsl: {
+    status: 'unsupported',
+    capabilityRevision: 1,
+    distributions: [],
+    selectedDistributionId: null,
+    selectedDistributionLabel: null,
+    selectedDistributionAvailable: false,
+  },
+};
+
+const CONFIGURATION_STATE: TerminalConfigurationState = {
+  profiles: PROFILES,
+  configuration: CONFIGURATION,
+};
+
+function configurationState(
+  revision: number,
+  capabilityRevision: number,
+  preferredProfileId: TerminalProfileId = 'system-default',
+): TerminalConfigurationState {
+  return {
+    profiles: PROFILES,
+    configuration: {
+      ...CONFIGURATION,
+      revision,
+      preferredProfileId,
+      wsl: {
+        ...CONFIGURATION.wsl,
+        capabilityRevision,
+      },
+    },
+  };
+}
+
+function resolvedLaunch(profileId: TerminalProfileId): ResolvedTerminalLaunch {
+  const resolved = PROFILES.find(({ profile }) => profile.id === profileId);
+  if (!resolved?.profile.available || !resolved.executable) {
+    throw new Error(resolved?.profile.unavailableReason ?? 'The terminal profile is unavailable');
+  }
+  const launch: TerminalLaunchConfiguration = {
+    profileId,
+    profileKind: resolved.profile.kind,
+    label: resolved.profile.label,
+    executable: resolved.executable,
+    args: resolved.args,
+    cwd: '/home/tester',
+    wslDistributionName: null,
+  };
+  return { state: CONFIGURATION_STATE, launch };
+}
+
+function createConfigurationService() {
+  return {
+    getState: vi.fn(async () => CONFIGURATION_STATE),
+    resolveLaunch: vi.fn(async (input: { profileId?: TerminalProfileId }) =>
+      resolvedLaunch(input.profileId ?? 'system-default'),
+    ),
+    revalidateLaunch: vi.fn(async () => CONFIGURATION_STATE),
+    updateProfile: vi.fn(async () => CONFIGURATION_STATE),
+    updateWslDistribution: vi.fn(async () => CONFIGURATION_STATE),
+    chooseWorkingDirectory: vi.fn(async () => ({
+      status: 'cancelled' as const,
+      state: CONFIGURATION_STATE,
+    })),
+    resetWorkingDirectory: vi.fn(async () => CONFIGURATION_STATE),
+    refreshCapabilities: vi.fn(async () => CONFIGURATION_STATE),
+    stop: vi.fn(),
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

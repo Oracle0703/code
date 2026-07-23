@@ -70,8 +70,9 @@ async function main(): Promise<void> {
     await smokeVersionFourUpgrade(join(root, 'legacy v4 数据'));
     await smokeVersionFiveUpgrade(join(root, 'legacy v5 数据'));
     await smokeVersionSixUpgrade(join(root, 'legacy v6 数据'));
+    await smokeVersionSevenUpgrade(join(root, 'legacy v7 数据'));
     console.log(
-      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
+      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
         `(Electron ${process.versions.electron}, Node ${process.versions.node}, ` +
         `SQLite ${process.versions.sqlite}).`,
     );
@@ -108,7 +109,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
   try {
     const initialized = await service.open();
     assert.equal(initialized.migration.fromVersion, 0);
-    assert.equal(initialized.migration.toVersion, 7);
+    assert.equal(initialized.migration.toVersion, 8);
     assert.equal(initialized.preMigrationBackup, undefined);
 
     const status = await service.getStatus();
@@ -121,8 +122,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         backupCount: status.backupCount,
       },
       {
-        schemaVersion: 7,
-        appliedMigrations: 7,
+        schemaVersion: 8,
+        appliedMigrations: 8,
         journalMode: 'wal',
         integrityCheck: 'ok',
         backupCount: 0,
@@ -135,6 +136,54 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(snapshot.currentWorkspaceId, DEFAULT_WORKSPACE_ID);
     assert.equal(snapshot.workspaces.length, 1);
     assert.equal(snapshot.workspaces[0]?.name, '我的工作台');
+    let terminalPreferences = await service.getTerminalPreferences(DEFAULT_WORKSPACE_ID);
+    assert.deepEqual(
+      {
+        preferredProfileId: terminalPreferences.preferredProfileId,
+        nativeCwdPlatform: terminalPreferences.nativeCwdPlatform,
+        nativeCwdPath: terminalPreferences.nativeCwdPath,
+        wslDistributionName: terminalPreferences.wslDistributionName,
+        revision: terminalPreferences.revision,
+      },
+      {
+        preferredProfileId: 'system-default',
+        nativeCwdPlatform: null,
+        nativeCwdPath: null,
+        wslDistributionName: null,
+        revision: 1,
+      },
+    );
+    terminalPreferences = await service.updateTerminalProfilePreference({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      preferredProfileId: 'bash',
+      expectedRevision: terminalPreferences.revision,
+    });
+    terminalPreferences = await service.updateTerminalWorkingDirectoryPreference({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      nativeCwdPlatform:
+        process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux',
+      nativeCwdPath: dataDirectory,
+      expectedRevision: terminalPreferences.revision,
+    });
+    terminalPreferences = await service.updateTerminalWslDistributionPreference({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      wslDistributionName: 'Ubuntu-开发',
+      expectedRevision: terminalPreferences.revision,
+    });
+    assert.deepEqual(
+      {
+        preferredProfileId: terminalPreferences.preferredProfileId,
+        nativeCwdPath: terminalPreferences.nativeCwdPath,
+        wslDistributionName: terminalPreferences.wslDistributionName,
+        revision: terminalPreferences.revision,
+      },
+      {
+        preferredProfileId: 'bash',
+        nativeCwdPath: dataDirectory,
+        wslDistributionName: 'Ubuntu-开发',
+        revision: 4,
+      },
+    );
     let inbox = await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.deepEqual(inbox.entries, []);
     inbox = await service.createInboxEntry({
@@ -350,6 +399,15 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       color: WORKSPACE_COLORS[2],
     });
     assert.equal(snapshot.currentWorkspaceId, SECOND_WORKSPACE_ID);
+    assert.deepEqual(await service.getTerminalPreferences(SECOND_WORKSPACE_ID), {
+      workspaceId: SECOND_WORKSPACE_ID,
+      preferredProfileId: 'system-default',
+      nativeCwdPlatform: null,
+      nativeCwdPath: null,
+      wslDistributionName: null,
+      revision: 1,
+      updatedAt: FIXED_NOW.toISOString(),
+    });
     browser = await service.getBrowserData({ workspaceId: SECOND_WORKSPACE_ID });
     assert.equal(browser.activeTabId, THIRD_BROWSER_TAB_ID);
     assert.equal(browser.tabs.length, 1);
@@ -602,11 +660,11 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
 
     const created = await service.createBackup();
     assert.equal(created.reason, 'manual');
-    assert.equal(created.schemaVersion, 7);
+    assert.equal(created.schemaVersion, 8);
     assert.equal('path' in created, false);
     const scheduled = await service.createScheduledBackup();
     assert.equal(scheduled.reason, 'scheduled');
-    assert.equal(scheduled.schemaVersion, 7);
+    assert.equal(scheduled.schemaVersion, 8);
     assert.equal('path' in scheduled, false);
     assert.deepEqual(await service.validateExistingBackup(scheduled.id, 'scheduled'), scheduled);
     assert.deepEqual(await service.pruneScheduledBackups(scheduled.id), {
@@ -632,7 +690,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     const backupPath = join(dataDirectory, 'backups', created.fileName);
     const backup = new DatabaseSync(backupPath, { readOnly: true });
     try {
-      assert.equal(backup.prepare('PRAGMA user_version').get()?.user_version, 7);
+      assert.equal(backup.prepare('PRAGMA user_version').get()?.user_version, 8);
       assert.equal(backup.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
       assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM workspaces').get()?.count, 2);
       assert.equal(
@@ -744,6 +802,26 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         backup.prepare('SELECT COUNT(*) AS count FROM browser_bookmarks').get()?.count,
         1,
       );
+      assert.equal(
+        backup.prepare('SELECT COUNT(*) AS count FROM workspace_terminal_preferences').get()?.count,
+        2,
+      );
+      const terminalPreferenceRow = backup
+        .prepare(
+          `SELECT preferred_profile_id, native_cwd_platform, native_cwd_path,
+                  wsl_distribution_name, revision
+           FROM workspace_terminal_preferences
+           WHERE workspace_id = ?`,
+        )
+        .get(DEFAULT_WORKSPACE_ID);
+      assert.equal(terminalPreferenceRow?.preferred_profile_id, 'bash');
+      assert.equal(
+        terminalPreferenceRow?.native_cwd_platform,
+        process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux',
+      );
+      assert.equal(terminalPreferenceRow?.native_cwd_path, dataDirectory);
+      assert.equal(terminalPreferenceRow?.wsl_distribution_name, 'Ubuntu-开发');
+      assert.equal(terminalPreferenceRow?.revision, 4);
     } finally {
       backup.close();
     }
@@ -751,7 +829,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     const scheduledBackupPath = join(dataDirectory, 'backups', scheduled.fileName);
     const scheduledBackup = new DatabaseSync(scheduledBackupPath, { readOnly: true });
     try {
-      assert.equal(scheduledBackup.prepare('PRAGMA user_version').get()?.user_version, 7);
+      assert.equal(scheduledBackup.prepare('PRAGMA user_version').get()?.user_version, 8);
       assert.equal(scheduledBackup.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
       assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM tasks').get()?.count, 4);
       assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM notes').get()?.count, 3);
@@ -765,8 +843,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       scheduleTodayFactory: () => FIXED_TODAY,
     });
     const reopened = await service.open();
-    assert.equal(reopened.migration.fromVersion, 7);
-    assert.equal(reopened.migration.toVersion, 7);
+    assert.equal(reopened.migration.fromVersion, 8);
+    assert.equal(reopened.migration.toVersion, 8);
     assert.equal(reopened.migration.applied.length, 0);
     snapshot = await service.getWorkspaceSnapshot();
     assert.equal(snapshot.currentWorkspaceId, DEFAULT_WORKSPACE_ID);
@@ -800,6 +878,21 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(browser.activeTabId, FIRST_BROWSER_TAB_ID);
     assert.equal(browser.tabs[0]?.url, 'https://example.com/packaged');
     assert.equal(browser.bookmarks[0]?.id, FIRST_BROWSER_BOOKMARK_ID);
+    terminalPreferences = await service.getTerminalPreferences(DEFAULT_WORKSPACE_ID);
+    assert.deepEqual(
+      {
+        preferredProfileId: terminalPreferences.preferredProfileId,
+        nativeCwdPath: terminalPreferences.nativeCwdPath,
+        wslDistributionName: terminalPreferences.wslDistributionName,
+        revision: terminalPreferences.revision,
+      },
+      {
+        preferredProfileId: 'bash',
+        nativeCwdPath: dataDirectory,
+        wslDistributionName: 'Ubuntu-开发',
+        revision: 4,
+      },
+    );
     assert.equal((await service.getStatus()).backupCount, 2);
     assert.deepEqual((await service.getBackupSchedulerState()).policy, backupPolicy);
     assert.deepEqual(
@@ -835,12 +928,12 @@ async function smokePortableRoundTrip(
     exportId: PORTABLE_EXPORT_ID,
     exportedAt: FIXED_NOW.toISOString(),
     sourceAppVersion: '0.1.0',
-    sourceSchemaVersion: 7,
+    sourceSchemaVersion: 8,
     records: sourceRecords,
   });
   const parsedPackage = parsePortablePackage(packageBytes);
   assert.equal(parsedPackage.manifest.recordCount, sourceRecords.length);
-  assert.equal(parsedPackage.manifest.sourceSchemaVersion, 7);
+  assert.equal(parsedPackage.manifest.sourceSchemaVersion, 8);
   assert.deepEqual(parsedPackage.records, sourceRecords);
 
   const destinationPath = join(directory, `import-${PORTABLE_IMPORT_ID}.sqlite3`);
@@ -871,12 +964,21 @@ async function smokePortableRoundTrip(
   try {
     const initialized = await imported.open();
     assert.deepEqual(initialized.migration, {
-      fromVersion: 7,
-      toVersion: 7,
+      fromVersion: 8,
+      toVersion: 8,
       applied: [],
     });
     assert.deepEqual(await imported.readPortableRecords(), sourceRecords);
     assert.deepEqual((await imported.getBackupSchedulerState()).policy, localBackupPolicy);
+    assert.deepEqual(await imported.getTerminalPreferences(DEFAULT_WORKSPACE_ID), {
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      preferredProfileId: 'system-default',
+      nativeCwdPlatform: null,
+      nativeCwdPath: null,
+      wslDistributionName: null,
+      revision: 1,
+      updatedAt: FIXED_NOW.toISOString(),
+    });
     for (const expected of expectedSearches) {
       assert.deepEqual(
         await imported.search({
@@ -891,6 +993,61 @@ async function smokePortableRoundTrip(
     imported = undefined;
   } finally {
     await imported?.close().catch(() => undefined);
+  }
+
+  const legacyDirectory = join(directory, 'legacy v7 package');
+  await mkdir(legacyDirectory, { recursive: true });
+  const legacyPackage = parsePortablePackage(
+    serializePortablePackage({
+      exportId: PORTABLE_EXPORT_ID,
+      exportedAt: FIXED_NOW.toISOString(),
+      sourceAppVersion: '0.1.0',
+      sourceSchemaVersion: 7,
+      records: sourceRecords,
+    }),
+  );
+  assert.equal(legacyPackage.manifest.sourceSchemaVersion, 7);
+  const legacyDestinationPath = join(legacyDirectory, `import-${PORTABLE_IMPORT_ID}.sqlite3`);
+  const legacyStager = new AtomicImportStager({
+    directory: legacyDirectory,
+    idFactory: () => PORTABLE_STAGING_ID,
+    driver: new DatabaseImportStagingDriver({
+      localBackupPolicy,
+      now: () => FIXED_NOW,
+      idFactory: () => PORTABLE_DATABASE_ID,
+    }),
+  });
+  const legacyStagingContext = {
+    importId: PORTABLE_IMPORT_ID,
+    package: legacyPackage,
+    destinationPath: legacyDestinationPath,
+  };
+  await legacyStager.stage(legacyStagingContext);
+  await legacyStager.validate(legacyStagingContext);
+
+  let legacyImported: DatabaseService | undefined = new DatabaseService({
+    dataDirectory: legacyDirectory,
+    databaseFileName: basename(legacyDestinationPath),
+    now: () => FIXED_NOW,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+  });
+  try {
+    const initialized = await legacyImported.open();
+    assert.deepEqual(initialized.migration, {
+      fromVersion: 8,
+      toVersion: 8,
+      applied: [],
+    });
+    assert.deepEqual(await legacyImported.readPortableRecords(), sourceRecords);
+    assert.equal(
+      (await legacyImported.getTerminalPreferences(DEFAULT_WORKSPACE_ID)).preferredProfileId,
+      'system-default',
+    );
+    await legacyImported.close();
+    legacyImported = undefined;
+  } finally {
+    await legacyImported?.close().catch(() => undefined);
   }
 }
 
@@ -917,7 +1074,7 @@ async function smokeVersionOneUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 1);
-    assert.equal(upgraded.migration.toVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 1);
     assert.equal((await service.getWorkspaceSnapshot()).currentWorkspaceId, DEFAULT_WORKSPACE_ID);
     assert.deepEqual(
@@ -985,7 +1142,7 @@ async function smokeVersionTwoUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 2);
-    assert.equal(upgraded.migration.toVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 2);
     assert.deepEqual(
       (await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).entries,
@@ -1082,7 +1239,7 @@ async function smokeVersionThreeUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 3);
-    assert.equal(upgraded.migration.toVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 3);
     const beforeConversion = await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(beforeConversion.todayDate, FIXED_TODAY);
@@ -1195,7 +1352,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 4);
-    assert.equal(upgraded.migration.toVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 4);
     const preservedInbox = await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(preservedInbox.entries.length, 1);
@@ -1268,7 +1425,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
       scheduleTodayFactory: () => FIXED_TODAY,
     });
     const reopened = await service.open();
-    assert.deepEqual(reopened.migration, { fromVersion: 7, toVersion: 7, applied: [] });
+    assert.deepEqual(reopened.migration, { fromVersion: 8, toVersion: 8, applied: [] });
     assert.equal(
       (await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).tasks[0]?.id,
       FIRST_TASK_ID,
@@ -1339,7 +1496,7 @@ async function smokeVersionFiveUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 5);
-    assert.equal(upgraded.migration.toVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 5);
     assert.equal(
       (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]?.id,
@@ -1436,7 +1593,7 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 6);
-    assert.equal(upgraded.migration.toVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 6);
     assert.equal(
       (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]?.id,
@@ -1472,7 +1629,7 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
     service = undefined;
     const upgradedSnapshot = new DatabaseSync(databasePath, { readOnly: true });
     try {
-      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 7);
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 8);
       assert.equal(
         upgradedSnapshot
           .prepare("SELECT COUNT(*) AS count FROM notes_search WHERE notes_search MATCH '搜索索引'")
@@ -1492,6 +1649,97 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
     }
   } finally {
     await service?.close().catch(() => undefined);
+  }
+}
+
+async function smokeVersionSevenUpgrade(dataDirectory: string): Promise<void> {
+  let legacy: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    migrations: DEFAULT_MIGRATIONS.slice(0, 7),
+    now: () => FIXED_NOW,
+    workspaceIdFactory: () => DEFAULT_WORKSPACE_ID,
+    noteIdFactory: () => FIRST_NOTE_ID,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+    browserTabIdFactory: () => FIRST_BROWSER_TAB_ID,
+  });
+  try {
+    const initialized = await legacy.open();
+    assert.equal(initialized.migration.toVersion, 7);
+    await legacy.createNote({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      title: 'v7 → v8 终端偏好回填',
+      body: '既有业务数据必须保留。',
+    });
+    await legacy.close();
+    legacy = undefined;
+  } finally {
+    await legacy?.close().catch(() => undefined);
+  }
+
+  let upgradedService: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    now: () => FIXED_NOW,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+  });
+  try {
+    const upgraded = await upgradedService.open();
+    assert.equal(upgraded.migration.fromVersion, 7);
+    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.preMigrationBackup?.schemaVersion, 7);
+    assert.equal(
+      (await upgradedService.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]
+        ?.title,
+      'v7 → v8 终端偏好回填',
+    );
+    assert.deepEqual(await upgradedService.getTerminalPreferences(DEFAULT_WORKSPACE_ID), {
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      preferredProfileId: 'system-default',
+      nativeCwdPlatform: null,
+      nativeCwdPath: null,
+      wslDistributionName: null,
+      revision: 1,
+      updatedAt: FIXED_NOW.toISOString(),
+    });
+
+    const backup = upgraded.preMigrationBackup;
+    assert.ok(backup);
+    const legacySnapshot = new DatabaseSync(join(dataDirectory, 'backups', backup.fileName), {
+      readOnly: true,
+    });
+    try {
+      assert.equal(legacySnapshot.prepare('PRAGMA user_version').get()?.user_version, 7);
+      assert.equal(
+        legacySnapshot
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'workspace_terminal_preferences'",
+          )
+          .get()?.count,
+        0,
+      );
+    } finally {
+      legacySnapshot.close();
+    }
+
+    await upgradedService.close();
+    upgradedService = undefined;
+    const upgradedSnapshot = new DatabaseSync(join(dataDirectory, 'daily-workbench.sqlite3'), {
+      readOnly: true,
+    });
+    try {
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 8);
+      assert.equal(
+        upgradedSnapshot
+          .prepare('SELECT COUNT(*) AS count FROM workspace_terminal_preferences')
+          .get()?.count,
+        1,
+      );
+    } finally {
+      upgradedSnapshot.close();
+    }
+  } finally {
+    await upgradedService?.close().catch(() => undefined);
   }
 }
 

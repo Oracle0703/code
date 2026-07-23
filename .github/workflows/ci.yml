@@ -101,7 +101,7 @@ jobs:
           cp reports/terminal-smoke/terminal-manager-smoke.cjs "$smoke_root/terminal-manager-smoke.cjs"
           DAILY_WORKBENCH_PACKAGED_ASAR="$asar_path" \
             NODE_PATH="$asar_path/node_modules" \
-            timeout --kill-after=5s 60s \
+            timeout --kill-after=5s 90s \
             'out/Daily Workbench-linux-x64/daily-workbench' \
             "$smoke_root/terminal-manager-smoke.cjs"
 
@@ -218,9 +218,9 @@ jobs:
               -ArgumentList @("`"$managerSmoke`"") `
               -NoNewWindow `
               -PassThru
-            if (-not $process.WaitForExit(60000)) {
+            if (-not $process.WaitForExit(90000)) {
               taskkill /PID $process.Id /T /F | Out-Null
-              throw 'Packaged TerminalManager smoke test timed out after 60 seconds.'
+              throw 'Packaged TerminalManager smoke test timed out after 90 seconds.'
             }
             if ($process.ExitCode -ne 0) {
               throw "Packaged terminal smoke test failed with exit code $($process.ExitCode)."

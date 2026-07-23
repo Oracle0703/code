@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TerminalProfileResolver } from '../src/main/terminal/terminal-profile-resolver';
+import type { WslDiscoveryLike, WslDiscoverySnapshot } from '../src/main/terminal/wsl-discovery';
 
 describe('terminal profile resolver', () => {
   it('separates Windows shells and exposes WSL only after a real distribution probe', async () => {
@@ -9,7 +10,18 @@ describe('terminal profile resolver', () => {
       'C:\\Windows\\System32\\cmd.exe',
       'C:\\Windows\\System32\\wsl.exe',
     ]);
-    const probeWsl = vi.fn(async () => true);
+    const wslDiscovery = fakeWslDiscovery({
+      status: 'ready',
+      capabilityRevision: 1,
+      executable: 'C:\\Windows\\System32\\wsl.exe',
+      distributions: [
+        {
+          id: `wsl-${'1'.repeat(64)}`,
+          label: 'Ubuntu',
+          name: 'Ubuntu',
+        },
+      ],
+    });
     const resolver = new TerminalProfileResolver({
       platform: 'win32',
       environment: {
@@ -17,11 +29,11 @@ describe('terminal profile resolver', () => {
         ProgramW6432: 'C:\\Program Files',
       },
       resolveExecutable: (candidates) => candidates.find((candidate) => existing.has(candidate)),
-      probeWsl,
+      wslDiscovery,
     });
 
     const profiles = await resolver.listProfiles();
-    expect(probeWsl).toHaveBeenCalledExactlyOnceWith('C:\\Windows\\System32\\wsl.exe');
+    expect(wslDiscovery.getSnapshot).toHaveBeenCalledTimes(1);
     expect(
       profiles.slice(0, 5).map(({ profile, executable, args }) => ({
         id: profile.id,
@@ -57,6 +69,7 @@ describe('terminal profile resolver', () => {
         id: 'wsl-default',
         available: true,
         executable: 'C:\\Windows\\System32\\wsl.exe',
+        args: ['~'],
       },
     ]);
     expect(Object.isFrozen(profiles)).toBe(true);
@@ -74,7 +87,12 @@ describe('terminal profile resolver', () => {
         candidates.find((candidate) =>
           ['C:\\Windows\\System32\\cmd.exe', 'C:\\Windows\\System32\\wsl.exe'].includes(candidate),
         ),
-      probeWsl: async () => false,
+      wslDiscovery: fakeWslDiscovery({
+        status: 'no-distributions',
+        capabilityRevision: 1,
+        executable: 'C:\\Windows\\System32\\wsl.exe',
+        distributions: [],
+      }),
     });
 
     const profiles = await resolver.listProfiles();
@@ -142,3 +160,14 @@ describe('terminal profile resolver', () => {
     expect(resolveExecutable.mock.calls[0]?.[0]).not.toContain('malicious-shell');
   });
 });
+
+function fakeWslDiscovery(snapshot: WslDiscoverySnapshot): WslDiscoveryLike & {
+  getSnapshot: ReturnType<typeof vi.fn<() => Promise<WslDiscoverySnapshot>>>;
+} {
+  const getSnapshot = vi.fn(async () => snapshot);
+  return {
+    getSnapshot,
+    refresh: vi.fn(async () => snapshot),
+    stop: vi.fn(),
+  };
+}

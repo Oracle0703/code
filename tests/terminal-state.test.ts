@@ -5,7 +5,10 @@ import {
   mergeTerminalSnapshot,
   moveTerminalTab,
   registerTerminalSurface,
+  resolvePreferredTerminalProfile,
   resolveTerminalProfile,
+  terminalConfigurationIssue,
+  terminalSessionAccessibleLabel,
 } from '../src/renderer/terminal-state';
 import type { TerminalSnapshot } from '../src/shared/contracts';
 
@@ -78,6 +81,82 @@ describe('terminal renderer state', () => {
     ).toBe('system-default');
   });
 
+  it('keeps an unavailable persisted preference explicit instead of silently falling back', () => {
+    const current = snapshot(0);
+    const configured = {
+      ...current,
+      profiles: current.profiles.map((profile) =>
+        profile.id === 'wsl-default' ? { ...profile, available: true } : profile,
+      ),
+      configuration: {
+        ...current.configuration,
+        preferredProfileId: 'wsl-default' as const,
+        wsl: {
+          ...current.configuration.wsl,
+          status: 'no-distributions' as const,
+          selectedDistributionAvailable: false,
+        },
+      },
+    };
+
+    expect(resolvePreferredTerminalProfile(configured)?.id).toBe('wsl-default');
+    expect(terminalConfigurationIssue(configured)).toBe('本机尚未检测到可启动的 WSL 发行版。');
+  });
+
+  it('reports an unavailable working directory before a terminal can be created', () => {
+    const current = snapshot(0);
+    expect(
+      terminalConfigurationIssue({
+        ...current,
+        configuration: {
+          ...current.configuration,
+          workingDirectory: {
+            mode: 'selected-directory',
+            displayPath: 'D:\\missing',
+            available: false,
+            unavailableReason: '保存的目录已不存在',
+          },
+        },
+      }),
+    ).toBe('保存的目录已不存在');
+  });
+
+  it('keeps native directory preferences separate from the WSL distribution home', () => {
+    const current = snapshot(0);
+    expect(
+      terminalConfigurationIssue({
+        ...current,
+        profiles: current.profiles.map((profile) =>
+          profile.id === 'wsl-default' ? { ...profile, available: true } : profile,
+        ),
+        configuration: {
+          ...current.configuration,
+          preferredProfileId: 'wsl-default',
+          workingDirectory: {
+            mode: 'selected-directory',
+            displayPath: 'D:\\missing',
+            available: false,
+            unavailableReason: '保存的目录已不存在',
+          },
+          wsl: {
+            status: 'ready',
+            capabilityRevision: 2,
+            distributions: [{ id: 'wsl-id', label: 'Ubuntu' }],
+            selectedDistributionId: 'wsl-id',
+            selectedDistributionLabel: 'Ubuntu',
+            selectedDistributionAvailable: true,
+          },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it('gives duplicate terminal tabs unique accessible names', () => {
+    const session = { label: 'PowerShell 7', status: 'running' as const };
+    expect(terminalSessionAccessibleLabel(session, 0, 2)).toBe('PowerShell 7，终端 1/2，运行中');
+    expect(terminalSessionAccessibleLabel(session, 1, 2)).toBe('PowerShell 7，终端 2/2，运行中');
+  });
+
   it('wraps arrow navigation and supports Home and End', () => {
     const ids = ['a', 'b', 'c'];
     expect(moveTerminalTab(ids, 'c', 'ArrowRight')).toBe('a');
@@ -118,5 +197,22 @@ function snapshot(revision: number): TerminalSnapshot {
         unavailableReason: 'No distribution',
       },
     ],
+    configuration: {
+      revision: 1,
+      preferredProfileId: 'system-default',
+      workingDirectory: {
+        mode: 'user-home',
+        displayPath: '/home/test',
+        available: true,
+      },
+      wsl: {
+        status: 'no-distributions',
+        capabilityRevision: 1,
+        distributions: [],
+        selectedDistributionId: null,
+        selectedDistributionLabel: null,
+        selectedDistributionAvailable: false,
+      },
+    },
   };
 }

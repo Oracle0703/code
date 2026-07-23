@@ -36,10 +36,14 @@ import {
   type TaskSnapshot,
   type TaskStatusInput,
   type TerminalCreateInput,
+  type TerminalConfigurationRevisionInput,
+  type TerminalProfilePreferenceInput,
   type TerminalResizeInput,
   type TerminalSessionTargetInput,
   type TerminalSnapshot,
   type TerminalWorkspaceInput,
+  type TerminalWorkingDirectorySelection,
+  type TerminalWslPreferenceInput,
   type TerminalWriteInput,
   type WindowCloseResponse,
   type WorkspaceCreateInput,
@@ -83,9 +87,12 @@ import {
   parseTaskRenameInput,
   parseTaskStatusInput,
   parseTerminalCreateInput,
+  parseTerminalConfigurationRevisionInput,
+  parseTerminalProfilePreferenceInput,
   parseTerminalResizeInput,
   parseTerminalSessionTargetInput,
   parseTerminalWorkspaceInput,
+  parseTerminalWslPreferenceInput,
   parseTerminalWriteInput,
   parseWindowCloseResponse,
   parseWorkspaceCreateInput,
@@ -156,6 +163,21 @@ interface IpcDependencies {
   terminal: {
     getSnapshot(input: TerminalWorkspaceInput): TerminalSnapshot | Promise<TerminalSnapshot>;
     create(input: TerminalCreateInput): TerminalSnapshot | Promise<TerminalSnapshot>;
+    updateProfile(
+      input: TerminalProfilePreferenceInput,
+    ): TerminalSnapshot | Promise<TerminalSnapshot>;
+    updateWslDistribution(
+      input: TerminalWslPreferenceInput,
+    ): TerminalSnapshot | Promise<TerminalSnapshot>;
+    chooseWorkingDirectory(
+      input: TerminalConfigurationRevisionInput,
+    ): TerminalWorkingDirectorySelection | Promise<TerminalWorkingDirectorySelection>;
+    resetWorkingDirectory(
+      input: TerminalConfigurationRevisionInput,
+    ): TerminalSnapshot | Promise<TerminalSnapshot>;
+    refreshCapabilities(
+      input: TerminalWorkspaceInput,
+    ): TerminalSnapshot | Promise<TerminalSnapshot>;
     activate(input: TerminalSessionTargetInput): TerminalSnapshot | Promise<TerminalSnapshot>;
     restart(input: TerminalSessionTargetInput): TerminalSnapshot | Promise<TerminalSnapshot>;
     write(input: TerminalWriteInput): void | Promise<void>;
@@ -467,6 +489,26 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.terminal.create, (_event, input, ...args) => {
     assertNoArguments(args, 'Creating a terminal session');
     return terminal.create(parseTerminalCreateInput(input));
+  });
+  register(IPC_CHANNELS.terminal.updateProfile, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating the terminal profile');
+    return terminal.updateProfile(parseTerminalProfilePreferenceInput(input));
+  });
+  register(IPC_CHANNELS.terminal.updateWslDistribution, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating the terminal WSL distribution');
+    return terminal.updateWslDistribution(parseTerminalWslPreferenceInput(input));
+  });
+  register(IPC_CHANNELS.terminal.chooseWorkingDirectory, (_event, input, ...args) => {
+    assertNoArguments(args, 'Choosing the terminal working directory');
+    return terminal.chooseWorkingDirectory(parseTerminalConfigurationRevisionInput(input));
+  });
+  register(IPC_CHANNELS.terminal.resetWorkingDirectory, (_event, input, ...args) => {
+    assertNoArguments(args, 'Resetting the terminal working directory');
+    return terminal.resetWorkingDirectory(parseTerminalConfigurationRevisionInput(input));
+  });
+  register(IPC_CHANNELS.terminal.refreshCapabilities, (_event, input, ...args) => {
+    assertNoArguments(args, 'Refreshing terminal capabilities');
+    return terminal.refreshCapabilities(parseTerminalWorkspaceInput(input));
   });
   register(IPC_CHANNELS.terminal.activate, (_event, input, ...args) => {
     assertNoArguments(args, 'Activating a terminal session');

@@ -1,6 +1,5 @@
 import {
   BACKUP_CADENCES,
-  TERMINAL_PROFILE_IDS,
   type BackupCadence,
   type BackupPolicyUpdateInput,
   type BrowserBounds,
@@ -33,10 +32,12 @@ import {
   type TaskRenameInput,
   type TaskStatusInput,
   type TerminalCreateInput,
-  type TerminalProfileId,
+  type TerminalConfigurationRevisionInput,
+  type TerminalProfilePreferenceInput,
   type TerminalResizeInput,
   type TerminalSessionTargetInput,
   type TerminalWorkspaceInput,
+  type TerminalWslPreferenceInput,
   type TerminalWriteInput,
   type WindowCloseResponse,
   type WorkspaceCreateInput,
@@ -44,6 +45,11 @@ import {
   type WorkspaceRenameInput,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  normalizeTerminalPreferenceRevision,
+  normalizeTerminalProfileId,
+  normalizeWslDistributionId,
+} from '../../shared/terminal-domain';
 import {
   normalizeInboxCategory,
   normalizeInboxContent,
@@ -595,22 +601,63 @@ export function parseTerminalWorkspaceInput(value: unknown): TerminalWorkspaceIn
   return { workspaceId: normalizeWorkspaceId(value.workspaceId) };
 }
 
-function parseTerminalProfileId(value: unknown): TerminalProfileId {
-  if (typeof value !== 'string' || !TERMINAL_PROFILE_IDS.includes(value as TerminalProfileId)) {
-    throw new TypeError('Unsupported terminal profile');
-  }
-
-  return value as TerminalProfileId;
-}
-
 export function parseTerminalCreateInput(value: unknown): TerminalCreateInput {
   if (!isRecord(value)) {
     throw new TypeError('Terminal creation input must be an object');
   }
-  assertOnlyKeys(value, ['workspaceId', 'profileId']);
+  assertOnlyKeys(value, ['workspaceId', 'configurationRevision', 'profileId']);
   return {
     workspaceId: normalizeWorkspaceId(value.workspaceId),
-    profileId: parseTerminalProfileId(value.profileId),
+    configurationRevision: normalizeTerminalPreferenceRevision(value.configurationRevision),
+    ...(value.profileId === undefined
+      ? {}
+      : { profileId: normalizeTerminalProfileId(value.profileId) }),
+  };
+}
+
+export function parseTerminalConfigurationRevisionInput(
+  value: unknown,
+): TerminalConfigurationRevisionInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal configuration input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'expectedRevision']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    expectedRevision: normalizeTerminalPreferenceRevision(value.expectedRevision),
+  };
+}
+
+export function parseTerminalProfilePreferenceInput(
+  value: unknown,
+): TerminalProfilePreferenceInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal profile preference input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'expectedRevision', 'profileId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    expectedRevision: normalizeTerminalPreferenceRevision(value.expectedRevision),
+    profileId: normalizeTerminalProfileId(value.profileId),
+  };
+}
+
+export function parseTerminalWslPreferenceInput(value: unknown): TerminalWslPreferenceInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Terminal WSL preference input must be an object');
+  }
+  assertOnlyKeys(value, [
+    'workspaceId',
+    'expectedRevision',
+    'capabilityRevision',
+    'distributionId',
+  ]);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    expectedRevision: normalizeTerminalPreferenceRevision(value.expectedRevision),
+    capabilityRevision: normalizeTerminalPreferenceRevision(value.capabilityRevision),
+    distributionId:
+      value.distributionId === null ? null : normalizeWslDistributionId(value.distributionId),
   };
 }
 

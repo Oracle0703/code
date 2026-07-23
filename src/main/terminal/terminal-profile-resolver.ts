@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { constants, accessSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, win32 } from 'node:path';
 import type {
@@ -6,9 +5,7 @@ import type {
   TerminalProfileId,
   TerminalProfileKind,
 } from '../../shared/contracts';
-
-const WSL_PROBE_TIMEOUT_MS = 3_000;
-const WSL_PROBE_MAX_BYTES = 64 * 1024;
+import { WslDiscovery, type WslDiscoveryLike, type WslDiscoverySnapshot } from './wsl-discovery';
 
 export interface ResolvedTerminalProfile {
   readonly profile: TerminalProfile;
@@ -17,39 +14,77 @@ export interface ResolvedTerminalProfile {
 }
 
 export interface TerminalProfileResolverLike {
-  listProfiles(): Promise<readonly ResolvedTerminalProfile[]>;
+  listProfiles(options?: {
+    readonly refresh?: boolean;
+  }): Promise<readonly ResolvedTerminalProfile[]>;
+  getWslSnapshot(options?: { readonly refresh?: boolean }): Promise<WslDiscoverySnapshot>;
+  stop(): void;
 }
 
 export interface TerminalProfileResolverOptions {
   readonly platform?: NodeJS.Platform;
   readonly environment?: NodeJS.ProcessEnv;
   readonly resolveExecutable?: (candidates: readonly string[]) => string | undefined;
-  readonly probeWsl?: (executable: string) => Promise<boolean>;
+  readonly wslDiscovery?: WslDiscoveryLike;
 }
 
 export class TerminalProfileResolver implements TerminalProfileResolverLike {
   readonly #platform: NodeJS.Platform;
   readonly #environment: NodeJS.ProcessEnv;
   readonly #resolveExecutable: (candidates: readonly string[]) => string | undefined;
-  readonly #probeWsl: (executable: string) => Promise<boolean>;
+  readonly #wslDiscovery: WslDiscoveryLike;
   #profilesPromise: Promise<readonly ResolvedTerminalProfile[]> | null = null;
 
   public constructor(options: TerminalProfileResolverOptions = {}) {
     this.#platform = options.platform ?? process.platform;
     this.#environment = options.environment ?? process.env;
     this.#resolveExecutable = options.resolveExecutable ?? firstExecutable;
-    this.#probeWsl = options.probeWsl ?? probeDefaultWslDistribution;
+    this.#wslDiscovery =
+      options.wslDiscovery ??
+      new WslDiscovery({
+        platform: this.#platform,
+        resolveExecutable: () => {
+          const systemRoot =
+            this.#environment.SystemRoot || this.#environment.WINDIR || 'C:\\Windows';
+          return this.#resolveExecutable([win32.join(systemRoot, 'System32', 'wsl.exe')]);
+        },
+      });
   }
 
-  public listProfiles(): Promise<readonly ResolvedTerminalProfile[]> {
-    this.#profilesPromise ??= this.#discoverProfiles();
+  public listProfiles(
+    options: { readonly refresh?: boolean } = {},
+  ): Promise<readonly ResolvedTerminalProfile[]> {
+    if (options.refresh) {
+      this.#profilesPromise = this.#discoverProfiles(true).catch((error: unknown) => {
+        this.#profilesPromise = null;
+        throw error;
+      });
+      return this.#profilesPromise;
+    }
+    this.#profilesPromise ??= this.#discoverProfiles(false).catch((error: unknown) => {
+      this.#profilesPromise = null;
+      throw error;
+    });
     return this.#profilesPromise;
   }
 
-  async #discoverProfiles(): Promise<readonly ResolvedTerminalProfile[]> {
+  public getWslSnapshot(
+    options: { readonly refresh?: boolean } = {},
+  ): Promise<WslDiscoverySnapshot> {
+    return options.refresh ? this.#wslDiscovery.refresh() : this.#wslDiscovery.getSnapshot();
+  }
+
+  public stop(): void {
+    this.#wslDiscovery.stop();
+  }
+
+  async #discoverProfiles(refreshWsl: boolean): Promise<readonly ResolvedTerminalProfile[]> {
+    if (refreshWsl && this.#platform !== 'win32') {
+      await this.getWslSnapshot({ refresh: true });
+    }
     const profiles =
       this.#platform === 'win32'
-        ? await this.#discoverWindowsProfiles()
+        ? await this.#discoverWindowsProfiles(refreshWsl)
         : this.#discoverPosixProfiles();
     return Object.freeze(
       profiles.map((profile) =>
@@ -62,7 +97,7 @@ export class TerminalProfileResolver implements TerminalProfileResolverLike {
     );
   }
 
-  async #discoverWindowsProfiles(): Promise<ResolvedTerminalProfile[]> {
+  async #discoverWindowsProfiles(refreshWsl: boolean): Promise<ResolvedTerminalProfile[]> {
     const systemRoot = this.#environment.SystemRoot || this.#environment.WINDIR || 'C:\\Windows';
     const programFiles =
       this.#environment.ProgramW6432 || this.#environment.ProgramFiles || 'C:\\Program Files';
@@ -73,8 +108,7 @@ export class TerminalProfileResolver implements TerminalProfileResolverLike {
       win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ]);
     const commandPrompt = this.#resolveExecutable([win32.join(systemRoot, 'System32', 'cmd.exe')]);
-    const wslExecutable = this.#resolveExecutable([win32.join(systemRoot, 'System32', 'wsl.exe')]);
-    const wslAvailable = wslExecutable ? await this.#probeWsl(wslExecutable) : false;
+    const wsl = await this.getWslSnapshot({ refresh: refreshWsl });
     const systemDefault = powershell7
       ? {
           executable: powershell7,
@@ -137,9 +171,9 @@ export class TerminalProfileResolver implements TerminalProfileResolverLike {
         'WSL 默认发行版',
         'wsl',
         false,
-        wslAvailable ? wslExecutable : undefined,
-        [],
-        wslExecutable ? '未检测到可启动的 WSL 发行版' : '本机未启用 Windows Subsystem for Linux',
+        wsl.status === 'ready' ? wsl.executable : undefined,
+        wsl.status === 'ready' ? ['~'] : [],
+        wslUnavailableReason(wsl),
       ),
       unavailableProfile('bash', 'Bash', 'posix', '此配置仅在 macOS 或 Linux 可用'),
       unavailableProfile('zsh', 'Zsh', 'posix', '此配置仅在 macOS 或 Linux 可用'),
@@ -261,30 +295,17 @@ function displayExecutableName(executable: string): string {
   return name.length > 40 ? 'Shell' : name;
 }
 
-function probeDefaultWslDistribution(executable: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    execFile(
-      executable,
-      ['--list', '--quiet'],
-      {
-        encoding: 'utf8',
-        maxBuffer: WSL_PROBE_MAX_BYTES,
-        timeout: WSL_PROBE_TIMEOUT_MS,
-        windowsHide: true,
-      },
-      (error, stdout) => {
-        if (error) {
-          resolve(false);
-          return;
-        }
-        const distributions = stdout
-          .replaceAll('\u0000', '')
-          .replace(/^\uFEFF/u, '')
-          .split(/\r?\n/u)
-          .map((entry) => entry.trim())
-          .filter(Boolean);
-        resolve(distributions.length > 0);
-      },
-    );
-  });
+function wslUnavailableReason(snapshot: WslDiscoverySnapshot): string {
+  switch (snapshot.status) {
+    case 'not-installed':
+      return '本机未启用 Windows Subsystem for Linux';
+    case 'no-distributions':
+      return '未检测到可启动的 WSL 发行版';
+    case 'probe-error':
+      return '无法安全读取本机 WSL 发行版';
+    case 'unsupported':
+      return '此配置仅在 Windows 可用';
+    case 'ready':
+      return 'WSL 配置不可用';
+  }
 }

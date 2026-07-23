@@ -47,7 +47,7 @@ describe('browser persistence service', () => {
       bookmarkIds: [BOOKMARK_A],
     });
     const opened = await service.open();
-    expect(opened.migration).toMatchObject({ fromVersion: 0, toVersion: 7 });
+    expect(opened.migration).toMatchObject({ fromVersion: 0, toVersion: 8 });
 
     let data = await service.getBrowserData({ workspaceId: WORKSPACE_A });
     expect(data).toEqual({

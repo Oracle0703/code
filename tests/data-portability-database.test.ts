@@ -82,8 +82,19 @@ describe('portable database codec', () => {
       'import-dddddddd-dddd-4ddd-8ddd-dddddddddddd.sqlite3',
     ]);
 
-    const source = createNodeSqliteAdapter(sourcePath, { readOnly: true });
+    const source = createNodeSqliteAdapter(sourcePath);
     source.open();
+    source.run(
+      `UPDATE workspace_terminal_preferences
+       SET preferred_profile_id = 'bash',
+           native_cwd_platform = 'linux',
+           native_cwd_path = '/tmp/local-only',
+           wsl_distribution_name = 'Ubuntu Local',
+           revision = 2,
+           updated_at = ?
+       WHERE workspace_id = ?`,
+      [T6, ACTIVE_WORKSPACE_ID],
+    );
     const beforeChanges = source.get<{ changes: number }>(
       'SELECT total_changes() AS changes',
     )?.changes;
@@ -112,6 +123,32 @@ describe('portable database codec', () => {
     ]);
     expect(firstRead.some(({ type }) => type.includes('backup'))).toBe(false);
     expect(firstRead.some(({ type }) => type.includes('metadata'))).toBe(false);
+    expect(firstRead.some(({ type }) => type.includes('terminal'))).toBe(false);
+    expect(
+      source.all<Record<string, unknown>>(
+        `SELECT workspace_id, preferred_profile_id, native_cwd_platform,
+                native_cwd_path, wsl_distribution_name, revision
+         FROM workspace_terminal_preferences
+         ORDER BY workspace_id`,
+      ),
+    ).toEqual([
+      {
+        workspace_id: ACTIVE_WORKSPACE_ID,
+        preferred_profile_id: 'bash',
+        native_cwd_platform: 'linux',
+        native_cwd_path: '/tmp/local-only',
+        wsl_distribution_name: 'Ubuntu Local',
+        revision: 2,
+      },
+      {
+        workspace_id: ARCHIVED_WORKSPACE_ID,
+        preferred_profile_id: 'system-default',
+        native_cwd_platform: null,
+        native_cwd_path: null,
+        wsl_distribution_name: null,
+        revision: 1,
+      },
+    ]);
     expect(new BackupPolicyRepository(source).readPolicy()).toEqual(LOCAL_BACKUP_POLICY);
     expect(new MetadataRepository(source).read().databaseId).toBe(DATABASE_ID);
     expect(
@@ -140,7 +177,7 @@ describe('portable database codec', () => {
         exportId: ROUND_TRIP_EXPORT_ID,
         exportedAt: BUILD_TIME,
         sourceAppVersion: '0.1.0',
-        sourceSchemaVersion: 7,
+        sourceSchemaVersion: 8,
         records: firstRead,
       }),
     );
@@ -155,6 +192,31 @@ describe('portable database codec', () => {
     roundTrip.open();
     expect(readPortableDatabaseRecords(roundTrip)).toEqual(firstRead);
     expect(new BackupPolicyRepository(roundTrip).readPolicy()).toEqual(LOCAL_BACKUP_POLICY);
+    expect(
+      roundTrip.all<Record<string, unknown>>(
+        `SELECT workspace_id, preferred_profile_id, native_cwd_platform,
+                native_cwd_path, wsl_distribution_name, revision
+         FROM workspace_terminal_preferences
+         ORDER BY workspace_id`,
+      ),
+    ).toEqual([
+      {
+        workspace_id: ACTIVE_WORKSPACE_ID,
+        preferred_profile_id: 'system-default',
+        native_cwd_platform: null,
+        native_cwd_path: null,
+        wsl_distribution_name: null,
+        revision: 1,
+      },
+      {
+        workspace_id: ARCHIVED_WORKSPACE_ID,
+        preferred_profile_id: 'system-default',
+        native_cwd_platform: null,
+        native_cwd_path: null,
+        wsl_distribution_name: null,
+        revision: 1,
+      },
+    ]);
     roundTrip.close();
   });
 
@@ -219,6 +281,46 @@ describe('portable database codec', () => {
       ).rejects.toBeInstanceOf(DataPackageError);
     }
     expect(await readdir(directory)).toEqual([]);
+  });
+
+  it('accepts v7 and v8 logical packages but rejects unsupported source schemas', async () => {
+    const directory = await createTemporaryDirectory();
+    await expect(
+      stagePackage(
+        directory,
+        '50000000-0000-4000-8000-000000000001',
+        '50000000-0000-4000-8000-000000000002',
+        createPackage(7),
+        createDriver(),
+      ),
+    ).resolves.toContain('import-50000000-0000-4000-8000-000000000001.sqlite3');
+    await expect(
+      stagePackage(
+        directory,
+        '50000000-0000-4000-8000-000000000003',
+        '50000000-0000-4000-8000-000000000004',
+        createPackage(8),
+        createDriver(),
+      ),
+    ).resolves.toContain('import-50000000-0000-4000-8000-000000000003.sqlite3');
+    await expect(
+      stagePackage(
+        directory,
+        '50000000-0000-4000-8000-000000000005',
+        '50000000-0000-4000-8000-000000000006',
+        createPackage(6),
+        createDriver(),
+      ),
+    ).rejects.toBeInstanceOf(DataPackageError);
+    await expect(
+      stagePackage(
+        directory,
+        '50000000-0000-4000-8000-000000000007',
+        '50000000-0000-4000-8000-000000000008',
+        createPackage(9),
+        createDriver(),
+      ),
+    ).rejects.toBeInstanceOf(DataPackageError);
   });
 
   it('binds validation to the previewed logical records and verifies FTS content', async () => {
@@ -369,13 +471,13 @@ async function stagePackage(
   return destinationPath;
 }
 
-function createPackage(): ParsedPortablePackage {
+function createPackage(sourceSchemaVersion = 7): ParsedPortablePackage {
   return parsePortablePackage(
     serializePortablePackage({
       exportId: EXPORT_ID,
       exportedAt: BUILD_TIME,
       sourceAppVersion: '0.1.0',
-      sourceSchemaVersion: 7,
+      sourceSchemaVersion,
       records: [...createRecords()].reverse(),
     }),
   );

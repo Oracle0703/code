@@ -68,6 +68,7 @@ import { ScheduleService } from '../schedule/schedule-service';
 import { SearchService } from '../search/search-service';
 import { normalizeBrowserUrl } from '../security/browser-url';
 import { TaskService } from '../tasks/task-service';
+import { TerminalPreferenceRepository } from '../terminal/terminal-preference-repository';
 import { WorkspaceService } from '../workspaces/workspace-service';
 import {
   DATA_PACKAGE_FORMAT,
@@ -82,7 +83,8 @@ import {
 } from './package-format';
 import { DEFAULT_MAX_IMPORT_STAGING_BYTES, type ImportStagingDriver } from './staging';
 
-export const PORTABLE_DATABASE_SCHEMA_VERSION = 7;
+export const PORTABLE_DATABASE_SCHEMA_VERSION = 8;
+export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8] as const);
 const MAX_PORTABLE_LOGICAL_RECORDS = 100_000;
 const MAX_PORTABLE_WORKSPACES = 500;
 const MAX_PORTABLE_BROWSER_TABS = 6_000;
@@ -211,7 +213,7 @@ interface PortableDatabaseModel {
 }
 
 /**
- * Reads only user-visible logical data from an already-open, healthy v7 database.
+ * Reads only user-visible logical data from an already-open, healthy current database.
  * Records are grouped by type and deterministically sorted within every group.
  */
 export function readPortableDatabaseRecords(
@@ -226,7 +228,7 @@ export function readPortableDatabaseRecords(
 
 /**
  * Builds and independently validates the SQLite file consumed by AtomicImportStager.
- * The source package never supplies metadata, backup policy, backup run state, or FTS rows.
+ * The source package never supplies metadata, backup state, FTS rows, or host terminal settings.
  */
 export class DatabaseImportStagingDriver implements ImportStagingDriver {
   readonly #localBackupPolicy: BackupPolicy;
@@ -536,7 +538,9 @@ function decodePortablePackage(packageData: ParsedPortablePackage): PortableData
   if (
     packageData.manifest.format !== DATA_PACKAGE_FORMAT ||
     packageData.manifest.formatVersion !== DATA_PACKAGE_FORMAT_VERSION ||
-    packageData.manifest.sourceSchemaVersion !== PORTABLE_DATABASE_SCHEMA_VERSION ||
+    !SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS.some(
+      (version) => version === packageData.manifest.sourceSchemaVersion,
+    ) ||
     packageData.manifest.recordCount !== packageData.records.length
   ) {
     throw new DataPackageError('The data package manifest does not match its records.');
@@ -1339,6 +1343,7 @@ function validateDatabaseSnapshot(
   const execute = async <T>(operation: (target: SqliteAdapter) => Promise<T> | T): Promise<T> =>
     operation(database);
   new WorkspaceService({ execute }).validateSnapshot(database);
+  new TerminalPreferenceRepository(database).validateSnapshot();
   new InboxService({ execute }).validateSnapshot(database);
   new TaskService({ execute }).validateSnapshot(database);
   new NoteService({ execute }).validateSnapshot(database);
@@ -1483,7 +1488,7 @@ function sqliteSidecarPaths(databasePath: string): readonly string[] {
 function assertCurrentMigrationSet(migrations: readonly Migration[]): void {
   const runner = new MigrationRunner(migrations);
   if (runner.latestVersion !== PORTABLE_DATABASE_SCHEMA_VERSION) {
-    throw new TypeError('The import codec requires the current v7 migration set.');
+    throw new TypeError('The import codec requires the current v8 migration set.');
   }
 }
 

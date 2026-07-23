@@ -238,6 +238,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'notes_schedule',
     'browser_tabs_bookmarks',
     'search_data_protection',
+    'terminal_workspace_preferences',
     'database-initialized-v1',
     'database-initializing-v1',
     'schema_migrations',
@@ -247,6 +248,9 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'CREATE TABLE workspace_app_state',
     'CREATE TABLE inbox_entries',
     'CREATE TABLE backup_policy',
+    'CREATE TABLE workspace_terminal_preferences',
+    'terminal preference revision must advance exactly once',
+    'archived workspace terminal preferences are immutable',
     'CREATE VIRTUAL TABLE notes_search',
     'database:get-management-snapshot',
     'database:update-backup-policy',
@@ -303,6 +307,11 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'browser:open-url-requested',
     'terminal:get-snapshot',
     'terminal:create',
+    'terminal:update-profile',
+    'terminal:update-wsl-distribution',
+    'terminal:choose-working-directory',
+    'terminal:reset-working-directory',
+    'terminal:refresh-capabilities',
     'terminal:activate',
     'terminal:restart',
     'terminal:write',
@@ -316,6 +325,10 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'windows-powershell',
     'command-prompt',
     'wsl-default',
+    '--list',
+    '--quiet',
+    '--distribution',
+    'openDirectory',
     'window:close-protection-ready',
     'window:respond-close-request',
     'window:close-requested',
@@ -396,6 +409,11 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     mainBundle.includes('browser:get-state'),
     false,
     'Packaged main bundle still contains the removed browser:get-state IPC channel.',
+  );
+  assert.equal(
+    mainBundle.includes('--cd'),
+    false,
+    'Packaged Main must not pass an arbitrary working directory into WSL.',
   );
   for (const shortcutToken of ['before-input-event', 'isComposing']) {
     assert.ok(
@@ -485,6 +503,11 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'browser:open-url-requested',
     'terminal:get-snapshot',
     'terminal:create',
+    'terminal:update-profile',
+    'terminal:update-wsl-distribution',
+    'terminal:choose-working-directory',
+    'terminal:reset-working-directory',
+    'terminal:refresh-capabilities',
     'terminal:activate',
     'terminal:restart',
     'terminal:write',
@@ -522,8 +545,12 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
   );
   for (const requiredTerminalRendererToken of [
     'terminal-tab__select',
+    'terminal-cwd-summary',
     'terminal-announcer',
     '当前工作区终端会话',
+    '当前工作区终端',
+    'Windows Subsystem for Linux',
+    '本机终端 Profile、目录授权与 WSL 选择不会从数据包导入。',
     '较早的终端输出已截断',
   ]) {
     assert.ok(

@@ -55,7 +55,7 @@ describe('inbox service', () => {
       inboxIds: [ENTRY_A],
     });
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 7 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 8 });
     await expect(service.getInboxSnapshot({ workspaceId: WORKSPACE_A })).resolves.toEqual({
       workspaceId: WORKSPACE_A,
       entries: [],
@@ -86,7 +86,7 @@ describe('inbox service', () => {
 
     const reopened = createService(dataDirectory);
     const result = await reopened.open();
-    expect(result.migration).toEqual({ fromVersion: 7, toVersion: 7, applied: [] });
+    expect(result.migration).toEqual({ fromVersion: 8, toVersion: 8, applied: [] });
     await expect(reopened.getInboxSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
       entries: [{ id: ENTRY_A, content: original.trim(), category: 'task' }],
     });
@@ -384,7 +384,7 @@ describe('inbox service', () => {
     });
     await service.archiveInboxEntry({ workspaceId: WORKSPACE_A, entryId: ENTRY_A });
     const backup = await service.createBackup();
-    expect(backup.schemaVersion).toBe(7);
+    expect(backup.schemaVersion).toBe(8);
     await service.close();
 
     const snapshot = new DatabaseSync(join(dataDirectory, 'backups', backup.fileName), {
@@ -439,7 +439,7 @@ describe('inbox service', () => {
 
     const service = createService(dataDirectory, { inboxIds: [ENTRY_A] });
     const result = await service.open();
-    expect(result.migration).toMatchObject({ fromVersion: 2, toVersion: 7 });
+    expect(result.migration).toMatchObject({ fromVersion: 2, toVersion: 8 });
     expect(result.preMigrationBackup).toMatchObject({
       reason: 'pre-migration',
       schemaVersion: 2,

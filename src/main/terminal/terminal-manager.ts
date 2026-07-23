@@ -1,35 +1,43 @@
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
 import * as nodePty from 'node-pty';
 import type {
+  TerminalConfigurationRevisionInput,
   TerminalCreateInput,
   TerminalDataEvent,
   TerminalExitEvent,
+  TerminalProfilePreferenceInput,
   TerminalResizeInput,
   TerminalSession,
   TerminalSessionTargetInput,
   TerminalSnapshot,
+  TerminalWorkingDirectorySelection,
   TerminalWorkspaceInput,
+  TerminalWslPreferenceInput,
   TerminalWriteInput,
 } from '../../shared/contracts';
-import { createTerminalEnvironment } from './terminal-environment';
 import {
-  TerminalProfileResolver,
-  type ResolvedTerminalProfile,
-  type TerminalProfileResolverLike,
-} from './terminal-profile-resolver';
+  type ResolvedTerminalLaunch,
+  type TerminalConfigurationServiceLike,
+  type TerminalConfigurationState,
+  type TerminalLaunchConfiguration,
+} from './terminal-configuration-service';
+import { createTerminalEnvironment } from './terminal-environment';
 
 const MAX_SESSIONS_PER_WORKSPACE = 8;
 const MAX_SESSIONS_PER_WINDOW = 16;
 const MAX_DATA_EVENT_CODE_UNITS = 64 * 1024;
+const PROCESS_EXIT_WAIT_MS = 750;
+const PROCESS_KILL_ATTEMPTS = 2;
 
 interface ManagedSession {
   info: TerminalSession;
+  launch: TerminalLaunchConfiguration;
   process: nodePty.IPty | null;
   dataSubscription: nodePty.IDisposable | null;
   exitSubscription: nodePty.IDisposable | null;
   sequence: number;
   closing: boolean;
+  restarting: boolean;
 }
 
 interface TerminalEventSink {
@@ -46,14 +54,13 @@ interface TerminalPtyFactory {
   ): nodePty.IPty;
 }
 
-interface TerminalManagerOptions {
+export interface TerminalManagerOptions {
   readonly initialWorkspaceId: string;
   readonly eventSink: TerminalEventSink;
-  readonly profileResolver?: TerminalProfileResolverLike;
+  readonly configurationService: TerminalConfigurationServiceLike;
   readonly ptyFactory?: TerminalPtyFactory;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
-  readonly workingDirectory?: () => string;
   readonly platform?: NodeJS.Platform;
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -66,7 +73,16 @@ interface WorkspaceToken {
 interface PendingProcessKill {
   readonly process: nodePty.IPty;
   readonly workspaceId: string;
+  readonly settled: Promise<void>;
+  readonly resolveSettled: () => void;
   exitSubscription: nodePty.IDisposable | null;
+  exitObserved: boolean;
+  killAccepted: boolean;
+}
+
+interface CachedConfigurationState {
+  readonly state: TerminalConfigurationState;
+  readonly requestSequence: number;
 }
 
 export class TerminalManager {
@@ -74,72 +90,74 @@ export class TerminalManager {
   readonly #pendingProcessKills = new Map<nodePty.IPty, PendingProcessKill>();
   readonly #activeSessionIds = new Map<string, string>();
   readonly #revisions = new Map<string, number>();
+  readonly #configurationStates = new Map<string, CachedConfigurationState>();
   readonly #eventSink: TerminalEventSink;
-  readonly #profileResolver: TerminalProfileResolverLike;
+  readonly #configurationService: TerminalConfigurationServiceLike;
   readonly #ptyFactory: TerminalPtyFactory;
   readonly #now: () => Date;
   readonly #idFactory: () => string;
-  readonly #workingDirectory: () => string;
   readonly #platform: NodeJS.Platform;
   readonly #environment: NodeJS.ProcessEnv;
-  #profiles: readonly ResolvedTerminalProfile[] = [];
   #activeWorkspaceId: string;
   #workspaceGeneration = 0;
+  #configurationRequestSequence = 0;
   #accepting = true;
   #shutdownPromise: Promise<void> | null = null;
 
   public constructor(options: TerminalManagerOptions) {
     this.#activeWorkspaceId = options.initialWorkspaceId;
     this.#eventSink = options.eventSink;
-    this.#profileResolver = options.profileResolver ?? new TerminalProfileResolver();
+    this.#configurationService = options.configurationService;
     this.#ptyFactory = options.ptyFactory ?? nodePty;
     this.#now = options.now ?? (() => new Date());
     this.#idFactory = options.idFactory ?? randomUUID;
-    this.#workingDirectory = options.workingDirectory ?? homedir;
     this.#platform = options.platform ?? process.platform;
     this.#environment = options.environment ?? process.env;
   }
 
   public async getSnapshot(input: TerminalWorkspaceInput): Promise<TerminalSnapshot> {
     const token = this.#captureWorkspace(input.workspaceId);
-    await this.#ensureProfiles();
+    const requestSequence = this.#beginConfigurationRequest();
+    const state = await this.#configurationService.getState(input.workspaceId);
     this.#assertWorkspaceToken(token);
+    this.#cacheState(input.workspaceId, state, requestSequence);
     return this.#snapshot(input.workspaceId);
   }
 
   public async create(input: TerminalCreateInput): Promise<TerminalSnapshot> {
     const token = this.#captureWorkspace(input.workspaceId);
-    const profiles = await this.#ensureProfiles();
+    const requestSequence = this.#beginConfigurationRequest();
+    const resolved = await this.#configurationService.resolveLaunch(input);
     this.#assertWorkspaceToken(token);
-    const profile = profiles.find(({ profile: candidate }) => candidate.id === input.profileId);
-    if (!profile?.profile.available || !profile.executable) {
-      throw new Error(profile?.profile.unavailableReason ?? 'The terminal profile is unavailable');
-    }
+    this.#cacheResolvedLaunch(input.workspaceId, resolved, requestSequence);
     this.#assertCapacity(input.workspaceId);
 
     const id = this.#createUniqueId();
+    const launch = freezeLaunchConfiguration(resolved.launch);
     const session: ManagedSession = {
       info: {
         id,
         workspaceId: input.workspaceId,
-        profileId: profile.profile.id,
-        label: profile.profile.label,
+        profileId: launch.profileId,
+        label: launch.label,
         status: 'running',
         createdAt: this.#now().toISOString(),
       },
+      launch,
       process: null,
       dataSubscription: null,
       exitSubscription: null,
       sequence: 0,
       closing: false,
+      restarting: false,
     };
     this.#sessions.set(id, session);
     try {
-      this.#spawn(session, profile);
+      this.#spawn(session);
       this.#assertWorkspaceToken(token);
     } catch {
       this.#discardSession(session);
-      throw new Error(`Unable to start the ${profile.profile.label} terminal profile`);
+      throw new Error(`Unable to start the ${launch.label} terminal profile`);
     }
 
     this.#activeSessionIds.set(input.workspaceId, id);
@@ -147,10 +165,71 @@ export class TerminalManager {
     return this.#publishSnapshot(input.workspaceId);
   }
 
-  public async activate(input: TerminalSessionTargetInput): Promise<TerminalSnapshot> {
+  public async updateProfile(input: TerminalProfilePreferenceInput): Promise<TerminalSnapshot> {
     const token = this.#captureWorkspace(input.workspaceId);
-    await this.#ensureProfiles();
+    const requestSequence = this.#beginConfigurationRequest();
+    const state = await this.#configurationService.updateProfile(input);
     this.#assertWorkspaceToken(token);
+    this.#cacheState(input.workspaceId, state, requestSequence);
+    this.#advanceRevision(input.workspaceId);
+    return this.#publishSnapshot(input.workspaceId);
+  }
+
+  public async updateWslDistribution(input: TerminalWslPreferenceInput): Promise<TerminalSnapshot> {
+    const token = this.#captureWorkspace(input.workspaceId);
+    const requestSequence = this.#beginConfigurationRequest();
+    const state = await this.#configurationService.updateWslDistribution(input);
+    this.#assertWorkspaceToken(token);
+    this.#cacheState(input.workspaceId, state, requestSequence);
+    this.#advanceRevision(input.workspaceId);
+    return this.#publishSnapshot(input.workspaceId);
+  }
+
+  public async chooseWorkingDirectory(
+    input: TerminalConfigurationRevisionInput,
+  ): Promise<TerminalWorkingDirectorySelection> {
+    const token = this.#captureWorkspace(input.workspaceId);
+    const requestSequence = this.#beginConfigurationRequest();
+    const selection = await this.#configurationService.chooseWorkingDirectory(input);
+    this.#assertWorkspaceToken(token);
+    this.#cacheState(input.workspaceId, selection.state, requestSequence);
+    if (selection.status === 'cancelled') {
+      return Object.freeze({
+        status: 'cancelled',
+        snapshot: this.#snapshot(input.workspaceId),
+      });
+    }
+    this.#advanceRevision(input.workspaceId);
+    return Object.freeze({
+      status: 'updated',
+      snapshot: this.#publishSnapshot(input.workspaceId),
+    });
+  }
+
+  public async resetWorkingDirectory(
+    input: TerminalConfigurationRevisionInput,
+  ): Promise<TerminalSnapshot> {
+    const token = this.#captureWorkspace(input.workspaceId);
+    const requestSequence = this.#beginConfigurationRequest();
+    const state = await this.#configurationService.resetWorkingDirectory(input);
+    this.#assertWorkspaceToken(token);
+    this.#cacheState(input.workspaceId, state, requestSequence);
+    this.#advanceRevision(input.workspaceId);
+    return this.#publishSnapshot(input.workspaceId);
+  }
+
+  public async refreshCapabilities(input: TerminalWorkspaceInput): Promise<TerminalSnapshot> {
+    const token = this.#captureWorkspace(input.workspaceId);
+    const requestSequence = this.#beginConfigurationRequest();
+    const state = await this.#configurationService.refreshCapabilities(input.workspaceId);
+    this.#assertWorkspaceToken(token);
+    this.#cacheState(input.workspaceId, state, requestSequence);
+    this.#advanceRevision(input.workspaceId);
+    return this.#publishSnapshot(input.workspaceId);
+  }
+
+  public async activate(input: TerminalSessionTargetInput): Promise<TerminalSnapshot> {
+    this.#captureWorkspace(input.workspaceId);
     this.#getOwnedSession(input);
     if (this.#activeSessionIds.get(input.workspaceId) !== input.sessionId) {
       this.#activeSessionIds.set(input.workspaceId, input.sessionId);
@@ -161,46 +240,53 @@ export class TerminalManager {
 
   public async restart(input: TerminalSessionTargetInput): Promise<TerminalSnapshot> {
     const token = this.#captureWorkspace(input.workspaceId);
+    const requestSequence = this.#beginConfigurationRequest();
     const session = this.#getOwnedSession(input);
-    if (session.info.status !== 'exited' || session.process) {
+    if (session.info.status !== 'exited' || session.process || session.restarting) {
       throw new Error('Only an exited terminal session can be restarted');
     }
-    const profiles = await this.#ensureProfiles();
-    this.#assertWorkspaceToken(token);
-    if (
-      this.#sessions.get(input.sessionId) !== session ||
-      session.closing ||
-      session.info.status !== 'exited' ||
-      session.process
-    ) {
-      throw new Error('The terminal session is no longer available');
-    }
-    const profile = profiles.find(
-      ({ profile: candidate }) => candidate.id === session.info.profileId,
-    );
-    if (!profile?.profile.available || !profile.executable) {
-      throw new Error(profile?.profile.unavailableReason ?? 'The terminal profile is unavailable');
-    }
-    this.#assertProcessCapacity(input.workspaceId);
-
-    session.info = {
-      ...session.info,
-      label: profile.profile.label,
-      status: 'running',
-    };
-    delete (session.info as { exitCode?: number }).exitCode;
+    session.restarting = true;
     try {
-      this.#spawn(session, profile);
+      await this.#settlePendingProcessKills(input.workspaceId);
       this.#assertWorkspaceToken(token);
-    } catch {
-      this.#terminateSessionProcess(session);
-      session.info = { ...session.info, status: 'exited', exitCode: -1 };
-      throw new Error(`Unable to restart the ${profile.profile.label} terminal profile`);
-    }
+      const state = await this.#configurationService.revalidateLaunch(
+        input.workspaceId,
+        session.launch,
+      );
+      this.#assertWorkspaceToken(token);
+      if (
+        this.#sessions.get(input.sessionId) !== session ||
+        session.closing ||
+        session.info.status !== 'exited' ||
+        session.process
+      ) {
+        throw new Error('The terminal session is no longer available');
+      }
+      this.#cacheState(input.workspaceId, state, requestSequence);
+      this.#assertProcessCapacity(input.workspaceId);
 
-    this.#activeSessionIds.set(input.workspaceId, input.sessionId);
-    this.#advanceRevision(input.workspaceId);
-    return this.#publishSnapshot(input.workspaceId);
+      session.info = {
+        ...session.info,
+        status: 'running',
+      };
+      delete (session.info as { exitCode?: number }).exitCode;
+      try {
+        this.#spawn(session);
+        this.#assertWorkspaceToken(token);
+      } catch {
+        this.#terminateSessionProcess(session);
+        session.info = { ...session.info, status: 'exited', exitCode: -1 };
+        throw new Error(`Unable to restart the ${session.launch.label} terminal profile`);
+      }
+
+      this.#activeSessionIds.set(input.workspaceId, input.sessionId);
+      this.#advanceRevision(input.workspaceId);
+      return this.#publishSnapshot(input.workspaceId);
+    } finally {
+      if (this.#sessions.get(input.sessionId) === session) {
+        session.restarting = false;
+      }
+    }
   }
 
   public write(input: TerminalWriteInput): void {
@@ -232,14 +318,11 @@ export class TerminalManager {
   }
 
   public async close(input: TerminalSessionTargetInput): Promise<TerminalSnapshot> {
-    const token = this.#captureWorkspace(input.workspaceId);
-    await this.#ensureProfiles();
-    this.#assertWorkspaceToken(token);
+    this.#captureWorkspace(input.workspaceId);
     const session = this.#getOwnedSession(input);
     const workspaceSessions = this.#workspaceSessions(input.workspaceId);
     const closedIndex = workspaceSessions.indexOf(session);
     this.#discardSession(session);
-    this.#retryPendingProcessKills(input.workspaceId);
 
     if (this.#activeSessionIds.get(input.workspaceId) === input.sessionId) {
       const remaining = this.#workspaceSessions(input.workspaceId);
@@ -253,7 +336,7 @@ export class TerminalManager {
     }
     this.#advanceRevision(input.workspaceId);
     const snapshot = this.#publishSnapshot(input.workspaceId);
-    this.#assertWorkspaceProcessesStopped(input.workspaceId);
+    await this.#settlePendingProcessKills(input.workspaceId);
     return snapshot;
   }
 
@@ -266,34 +349,46 @@ export class TerminalManager {
   public discardWorkspace(workspaceId: string): void {
     const sessions = this.#workspaceSessions(workspaceId);
     for (const session of sessions) this.#discardSession(session);
-    this.#retryPendingProcessKills(workspaceId);
     this.#activeSessionIds.delete(workspaceId);
-    this.#advanceRevision(workspaceId);
-    this.#publishSnapshot(workspaceId);
-    this.#assertWorkspaceProcessesStopped(workspaceId);
+    if (this.#configurationStates.has(workspaceId)) {
+      this.#advanceRevision(workspaceId);
+      this.#publishSnapshot(workspaceId);
+    }
+    this.#configurationStates.delete(workspaceId);
+    this.#revisions.delete(workspaceId);
+    void this.#settlePendingProcessKills(workspaceId).catch(() => {
+      // Retain failed native handles for bounded capacity and the final shutdown retry.
+    });
   }
 
   public shutdown(): Promise<void> {
-    this.#shutdownPromise ??= Promise.resolve().then(() => {
-      this.#accepting = false;
-      this.#workspaceGeneration += 1;
-      for (const session of [...this.#sessions.values()]) this.#discardSession(session);
-      this.#activeSessionIds.clear();
-      this.#retryPendingProcessKills();
-      if (this.#pendingProcessKills.size > 0) {
-        throw new Error('Unable to stop every terminal process');
+    if (this.#shutdownPromise) return this.#shutdownPromise;
+    this.#accepting = false;
+    this.#workspaceGeneration += 1;
+    let configurationStopFailed = false;
+    try {
+      this.#configurationService.stop();
+    } catch {
+      configurationStopFailed = true;
+    }
+    for (const session of [...this.#sessions.values()]) this.#discardSession(session);
+    this.#activeSessionIds.clear();
+    this.#configurationStates.clear();
+    this.#shutdownPromise = this.#settlePendingProcessKills().then(() => {
+      if (configurationStopFailed) {
+        throw new Error('Unable to stop terminal configuration services');
       }
     });
     return this.#shutdownPromise;
   }
 
-  #spawn(session: ManagedSession, profile: ResolvedTerminalProfile): void {
-    if (!profile.executable) throw new Error('profile unavailable');
-    const process = this.#ptyFactory.spawn(profile.executable, [...profile.args], {
+  #spawn(session: ManagedSession): void {
+    const launch = session.launch;
+    const process = this.#ptyFactory.spawn(launch.executable, [...launch.args], {
       name: 'xterm-256color',
       cols: 120,
       rows: 30,
-      cwd: this.#workingDirectory(),
+      cwd: launch.cwd,
       env: createTerminalEnvironment(this.#environment, this.#platform),
     });
     session.process = process;
@@ -332,6 +427,7 @@ export class TerminalManager {
         status: 'exited',
         exitCode: event.exitCode,
       };
+      this.#cleanupExitedProcess(process, session.info.workspaceId);
       this.#advanceRevision(session.info.workspaceId);
       this.#safeSink(() =>
         this.#eventSink.exit({
@@ -345,14 +441,13 @@ export class TerminalManager {
     });
   }
 
-  async #ensureProfiles(): Promise<readonly ResolvedTerminalProfile[]> {
-    if (this.#profiles.length > 0) return this.#profiles;
-    try {
-      this.#profiles = await this.#profileResolver.listProfiles();
-      return this.#profiles;
-    } catch {
-      throw new Error('Unable to discover terminal profiles');
-    }
+  #cleanupExitedProcess(process: nodePty.IPty, workspaceId: string): void {
+    if (this.#platform !== 'win32') return;
+    // On Windows, node-pty can report the shell exit while ConPTY helper handles remain alive.
+    // Retain the old handle before asking node-pty to release those resources; a failed cleanup
+    // remains capacity-bounded and must settle before this tab can be restarted.
+    this.#retainPendingProcessKill(process, workspaceId, true);
+    this.#attemptPendingProcessKill(process);
   }
 
   #getRunningSession(input: TerminalSessionTargetInput): ManagedSession {
@@ -458,72 +553,140 @@ export class TerminalManager {
     }
   }
 
-  #terminateSessionProcess(session: ManagedSession): boolean {
+  #terminateSessionProcess(session: ManagedSession): void {
     const process = session.process;
     if (!process) {
       this.#disposeProcessBindings(session);
-      return true;
+      return;
     }
-    if (!this.#pendingProcessKills.has(process)) {
-      const pending: PendingProcessKill = {
-        process,
-        workspaceId: session.info.workspaceId,
-        exitSubscription: null,
-      };
-      this.#pendingProcessKills.set(process, pending);
+    this.#retainPendingProcessKill(process, session.info.workspaceId, false);
+    this.#disposeProcessBindings(session);
+    this.#attemptPendingProcessKill(process);
+  }
+
+  #retainPendingProcessKill(
+    process: nodePty.IPty,
+    workspaceId: string,
+    exitObserved: boolean,
+  ): PendingProcessKill {
+    const existing = this.#pendingProcessKills.get(process);
+    if (existing) {
+      if (exitObserved) {
+        existing.exitObserved = true;
+        this.#completePendingProcessKill(process);
+      }
+      return existing;
+    }
+    let resolveSettled = (): void => undefined;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const pending: PendingProcessKill = {
+      process,
+      workspaceId,
+      settled,
+      resolveSettled,
+      exitSubscription: null,
+      exitObserved,
+      killAccepted: false,
+    };
+    this.#pendingProcessKills.set(process, pending);
+    if (!exitObserved) {
       try {
         pending.exitSubscription = process.onExit(() => {
+          pending.exitObserved = true;
           this.#completePendingProcessKill(process);
         });
       } catch {
-        // A later explicit retry still retains the native handle.
+        // A failed observer keeps the handle retained until bounded shutdown reports failure.
       }
     }
-    this.#disposeProcessBindings(session);
-    return this.#attemptPendingProcessKill(process);
+    return pending;
   }
 
-  #attemptPendingProcessKill(process: nodePty.IPty): boolean {
-    if (!this.#pendingProcessKills.has(process)) return true;
+  #attemptPendingProcessKill(process: nodePty.IPty): void {
+    const pending = this.#pendingProcessKills.get(process);
+    if (!pending) return;
     try {
       process.kill();
+      pending.killAccepted = true;
       this.#completePendingProcessKill(process);
-      return true;
     } catch {
-      // Keep the handle reachable and counted until a later retry or native exit succeeds.
-      return !this.#pendingProcessKills.has(process);
+      pending.killAccepted = false;
     }
   }
 
   #completePendingProcessKill(process: nodePty.IPty): void {
     const pending = this.#pendingProcessKills.get(process);
-    if (!pending) return;
+    // A returned kill call alone does not prove native exit, while exit alone does not make
+    // node-pty release its Windows ConPTY worker. Both facts are required before dropping the
+    // only handle that can finish cleanup.
+    if (!pending || !pending.exitObserved || !pending.killAccepted) return;
     this.#pendingProcessKills.delete(process);
     try {
       pending.exitSubscription?.dispose();
     } catch {
-      // The native process is already gone; listener disposal cannot make cleanup fail.
+      // The process is already gone; listener disposal cannot make cleanup fail.
     }
     pending.exitSubscription = null;
+    pending.resolveSettled();
   }
 
-  #retryPendingProcessKills(workspaceId?: string): void {
-    for (const pending of [...this.#pendingProcessKills.values()]) {
-      if (workspaceId && pending.workspaceId !== workspaceId) continue;
-      this.#attemptPendingProcessKill(pending.process);
+  async #settlePendingProcessKills(workspaceId?: string): Promise<void> {
+    for (let round = 0; round < PROCESS_KILL_ATTEMPTS; round += 1) {
+      let pending = this.#pendingKillsForWorkspace(workspaceId);
+      if (pending.length === 0) return;
+      for (const entry of pending) {
+        if (!entry.killAccepted) {
+          this.#attemptPendingProcessKill(entry.process);
+        }
+      }
+      pending = this.#pendingKillsForWorkspace(workspaceId);
+      if (pending.length === 0) return;
+      await waitForProcessExits(pending, PROCESS_EXIT_WAIT_MS);
+    }
+    if (this.#pendingKillsForWorkspace(workspaceId).length > 0) {
+      throw new Error(
+        workspaceId
+          ? 'Unable to stop every terminal process in this workspace'
+          : 'Unable to stop every terminal process',
+      );
     }
   }
 
-  #assertWorkspaceProcessesStopped(workspaceId: string): void {
-    if (
-      [...this.#pendingProcessKills.values()].some((pending) => pending.workspaceId === workspaceId)
-    ) {
-      throw new Error('Unable to stop every terminal process in this workspace');
-    }
+  #pendingKillsForWorkspace(workspaceId?: string): PendingProcessKill[] {
+    return [...this.#pendingProcessKills.values()].filter(
+      (pending) => workspaceId === undefined || pending.workspaceId === workspaceId,
+    );
   }
 
   #workspaceSessions(workspaceId: string): ManagedSession[] {
     return [...this.#sessions.values()].filter(({ info }) => info.workspaceId === workspaceId);
+  }
+
+  #beginConfigurationRequest(): number {
+    this.#configurationRequestSequence += 1;
+    return this.#configurationRequestSequence;
+  }
+
+  #cacheResolvedLaunch(
+    workspaceId: string,
+    resolved: ResolvedTerminalLaunch,
+    requestSequence: number,
+  ): void {
+    this.#cacheState(workspaceId, resolved.state, requestSequence);
+  }
+
+  #cacheState(
+    workspaceId: string,
+    state: TerminalConfigurationState,
+    requestSequence: number,
+  ): void {
+    const current = this.#configurationStates.get(workspaceId);
+    if (current && compareConfigurationStates(state, requestSequence, current) < 0) {
+      return;
+    }
+    this.#configurationStates.set(workspaceId, { state, requestSequence });
   }
 
   #advanceRevision(workspaceId: string): void {
@@ -531,6 +694,11 @@ export class TerminalManager {
   }
 
   #snapshot(workspaceId: string): TerminalSnapshot {
+    const cached = this.#configurationStates.get(workspaceId);
+    if (!cached) {
+      throw new Error('Terminal configuration has not been loaded for this workspace.');
+    }
+    const { state } = cached;
     const sessions = this.#workspaceSessions(workspaceId).map(({ info }) => ({ ...info }));
     const activeSessionId = this.#activeSessionIds.get(workspaceId);
     return {
@@ -541,7 +709,17 @@ export class TerminalManager {
           ? activeSessionId
           : (sessions[0]?.id ?? null),
       sessions,
-      profiles: this.#profiles.map(({ profile }) => ({ ...profile })),
+      profiles: state.profiles.map(({ profile }) => ({ ...profile })),
+      configuration: {
+        ...state.configuration,
+        workingDirectory: { ...state.configuration.workingDirectory },
+        wsl: {
+          ...state.configuration.wsl,
+          distributions: state.configuration.wsl.distributions.map((distribution) => ({
+            ...distribution,
+          })),
+        },
+      },
     };
   }
 
@@ -558,6 +736,48 @@ export class TerminalManager {
       // A disappearing Renderer must not corrupt native terminal lifecycle state.
     }
   }
+}
+
+function waitForProcessExits(
+  pending: readonly PendingProcessKill[],
+  milliseconds: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, milliseconds);
+    void Promise.all(pending.map(({ settled }) => settled)).then(() => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
+function compareConfigurationStates(
+  candidate: TerminalConfigurationState,
+  requestSequence: number,
+  current: CachedConfigurationState,
+): number {
+  const configurationRevision =
+    candidate.configuration.revision - current.state.configuration.revision;
+  if (configurationRevision !== 0) return configurationRevision;
+  const capabilityRevision =
+    candidate.configuration.wsl.capabilityRevision -
+    current.state.configuration.wsl.capabilityRevision;
+  if (capabilityRevision !== 0) return capabilityRevision;
+  return requestSequence - current.requestSequence;
+}
+
+function freezeLaunchConfiguration(
+  launch: TerminalLaunchConfiguration,
+): TerminalLaunchConfiguration {
+  return Object.freeze({
+    profileId: launch.profileId,
+    profileKind: launch.profileKind,
+    label: launch.label,
+    executable: launch.executable,
+    args: Object.freeze([...launch.args]),
+    cwd: launch.cwd,
+    wslDistributionName: launch.wslDistributionName,
+  });
 }
 
 function splitTerminalOutput(data: string): string[] {

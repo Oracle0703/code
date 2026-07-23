@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { chmod, lstat, open, readdir, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, open, readdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import type { DatabaseBackupInfo } from '../../shared/contracts';
 import { DatabaseBackupError } from './errors';
@@ -10,6 +10,15 @@ import type { BackupReason, BackupResult, BackupRetentionResult, DatabasePaths }
 const BACKUP_FILE_PATTERN =
   /^daily-workbench-v(\d+)-(manual|scheduled|pre-migration|pre-import)-([0-9]{8}T[0-9]{9}Z)-([0-9a-fA-F-]{36})\.sqlite3$/u;
 const DEFAULT_LIST_LIMIT = 100;
+const BACKUP_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'] as const;
+
+type BackupSidecarSuffix = (typeof BACKUP_SIDECAR_SUFFIXES)[number];
+type BackupArtifactSuffix = '' | BackupSidecarSuffix;
+
+interface ObservedBackupSidecar {
+  readonly suffix: BackupSidecarSuffix;
+  readonly stats: Stats;
+}
 
 export interface BackupDurabilityOperations {
   readonly syncFile: (path: string) => Promise<void>;
@@ -107,19 +116,12 @@ export class BackupManager {
           );
         }
       } catch (error) {
-        const cleanupErrors: unknown[] = [];
-        await rm(destinationPath, { force: true }).catch((cleanupError: unknown) => {
-          cleanupErrors.push(cleanupError);
-        });
-        await this.#durability
-          .syncDirectory(this.#paths.backupDirectory)
-          .catch((cleanupError: unknown) => {
-            cleanupErrors.push(cleanupError);
-          });
-        if (cleanupErrors.length > 0) {
+        try {
+          await this.#removeBackupArtifacts(destinationPath, true);
+        } catch (cleanupError) {
           throw new DatabaseBackupError(
             'An invalid published database backup could not be cleaned up safely.',
-            { cause: new AggregateError([error, ...cleanupErrors]) },
+            { cause: new AggregateError([error, cleanupError]) },
           );
         }
         throw error;
@@ -137,8 +139,19 @@ export class BackupManager {
         pages,
       };
     } catch (error) {
+      let cleanupFailure: { readonly error: unknown } | undefined;
       if (temporaryPath) {
-        await rm(temporaryPath, { force: true }).catch(() => undefined);
+        try {
+          await this.#removeBackupArtifacts(temporaryPath, true);
+        } catch (cleanupError) {
+          cleanupFailure = { error: cleanupError };
+        }
+      }
+      if (cleanupFailure) {
+        throw new DatabaseBackupError(
+          'An invalid temporary database backup could not be cleaned up safely.',
+          { cause: new AggregateError([error, cleanupFailure.error]) },
+        );
       }
       if (error instanceof DatabaseBackupError) {
         throw error;
@@ -275,12 +288,31 @@ export class BackupManager {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
           throw error;
         });
-        if (!current) continue;
-        if (!current.isFile() || current.isSymbolicLink()) {
+        if (!current) {
+          await this.#unlinkBackupArtifacts(path, BACKUP_SIDECAR_SUFFIXES);
+          const replacement = await lstat(path).catch((error: unknown) => {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+            throw error;
+          });
+          if (replacement) {
+            throw new DatabaseBackupError(
+              'A scheduled backup reappeared during retention cleanup.',
+            );
+          }
+          continue;
+        }
+        if (!isSafeRegularFile(current)) {
           throw new DatabaseBackupError('A scheduled backup changed before retention cleanup.');
         }
         await validateProtectedBackup();
-        await rm(path);
+        const finalEntry = await lstat(path).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+          throw error;
+        });
+        if (!finalEntry || !sameStableFile(current, finalEntry)) {
+          throw new DatabaseBackupError('A scheduled backup changed before retention cleanup.');
+        }
+        await this.#unlinkBackupArtifacts(path, ['', ...BACKUP_SIDECAR_SUFFIXES], new Set(['']));
         deleted += 1;
       }
       return {
@@ -334,13 +366,68 @@ export class BackupManager {
   }
 
   async #validate(path: string, schemaVersion: number): Promise<void> {
+    const before = await lstat(path);
+    if (!isSafeRegularFile(before)) {
+      throw new DatabaseBackupError('The database backup validation target is not a regular file.');
+    }
+    const preexistingSidecars = await this.#readBackupSidecars(path);
+    if (preexistingSidecars.length > 0) {
+      throw new DatabaseBackupError(
+        'The database backup has active SQLite sidecars and cannot be validated safely.',
+      );
+    }
+
     const snapshot = this.#adapterFactory(path, { readOnly: true, timeoutMs: 5_000 });
+    const validationFailures: unknown[] = [];
     try {
       snapshot.open();
       snapshot.exec('PRAGMA trusted_schema = OFF; PRAGMA query_only = ON;');
       this.#validateSnapshot(snapshot, schemaVersion);
+    } catch (error) {
+      validationFailures.push(error);
     } finally {
-      snapshot.close();
+      try {
+        snapshot.close();
+      } catch (error) {
+        validationFailures.push(error);
+      }
+    }
+
+    const after = await lstat(path).catch((error: unknown) => {
+      validationFailures.push(error);
+      return undefined;
+    });
+    if (!after || !sameStableFile(before, after)) {
+      throw new DatabaseBackupError(
+        'The database backup changed while its SQLite snapshot was validated.',
+        { cause: combineFailures(validationFailures) },
+      );
+    }
+
+    const generatedSidecars = await this.#readBackupSidecars(path);
+    try {
+      await this.#removeValidatedSidecars(path, generatedSidecars);
+    } catch (error) {
+      throw new DatabaseBackupError('SQLite validation sidecars could not be cleaned up safely.', {
+        cause: combineFailures([...validationFailures, error]),
+      });
+    }
+
+    const finalEntry = await lstat(path).catch((error: unknown) => {
+      validationFailures.push(error);
+      return undefined;
+    });
+    const remainingSidecars = await this.#readBackupSidecars(path);
+    if (!finalEntry || !sameStableFile(after, finalEntry) || remainingSidecars.length > 0) {
+      throw new DatabaseBackupError(
+        'The database backup changed after its SQLite snapshot was validated.',
+        { cause: combineFailures(validationFailures) },
+      );
+    }
+    if (validationFailures.length > 0) {
+      throw validationFailures.length === 1
+        ? validationFailures[0]
+        : new AggregateError(validationFailures);
     }
   }
 
@@ -360,6 +447,106 @@ export class BackupManager {
       throw new DatabaseBackupError('The generated database backup path escaped its directory.');
     }
     return path;
+  }
+
+  async #removeBackupArtifacts(path: string, includeMainFile: boolean): Promise<void> {
+    await this.#unlinkBackupArtifacts(
+      path,
+      includeMainFile ? ['', ...BACKUP_SIDECAR_SUFFIXES] : BACKUP_SIDECAR_SUFFIXES,
+    );
+  }
+
+  async #removeValidatedSidecars(
+    path: string,
+    sidecars: readonly ObservedBackupSidecar[],
+  ): Promise<void> {
+    for (const sidecar of sidecars) {
+      if (!isSafeValidationSidecar(sidecar)) {
+        throw new DatabaseBackupError(
+          'An unexpected SQLite sidecar appeared during backup validation.',
+        );
+      }
+    }
+    const currentSidecars = await this.#readBackupSidecars(path);
+    if (
+      currentSidecars.length !== sidecars.length ||
+      currentSidecars.some((sidecar, index) => {
+        const expected = sidecars[index];
+        return (
+          !expected ||
+          sidecar.suffix !== expected.suffix ||
+          !sameObservedFile(sidecar.stats, expected.stats)
+        );
+      })
+    ) {
+      throw new DatabaseBackupError('A SQLite sidecar changed before backup validation cleanup.');
+    }
+    await this.#unlinkBackupArtifacts(
+      path,
+      sidecars.map(({ suffix }) => suffix),
+      new Set(sidecars.map(({ suffix }) => suffix)),
+    );
+  }
+
+  async #readBackupSidecars(path: string): Promise<ObservedBackupSidecar[]> {
+    const name = basename(path);
+    if (this.#resolveBackupPath(name) !== path) {
+      throw new DatabaseBackupError('The database backup sidecar path is invalid.');
+    }
+    const sidecars: ObservedBackupSidecar[] = [];
+    for (const suffix of BACKUP_SIDECAR_SUFFIXES) {
+      const sidecarPath = this.#resolveBackupPath(`${name}${suffix}`);
+      const stats = await lstat(sidecarPath).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (stats) sidecars.push({ suffix, stats });
+    }
+    return sidecars;
+  }
+
+  async #unlinkBackupArtifacts(
+    path: string,
+    suffixes: readonly BackupArtifactSuffix[],
+    requiredSuffixes: ReadonlySet<BackupArtifactSuffix> = new Set(),
+  ): Promise<void> {
+    const name = basename(path);
+    if (this.#resolveBackupPath(name) !== path) {
+      throw new DatabaseBackupError('The database backup cleanup path is invalid.');
+    }
+    const cleanupPaths = [
+      ...suffixes.filter((suffix) => suffix !== ''),
+      ...suffixes.filter((suffix) => suffix === ''),
+    ].map((suffix) => ({
+      path: this.#resolveBackupPath(`${name}${suffix}`),
+      suffix,
+    }));
+    const failures: unknown[] = [];
+    let removed = false;
+    // Leave the discoverable main backup until every exact sidecar has been attempted.
+    for (const artifact of cleanupPaths) {
+      try {
+        await unlink(artifact.path);
+        removed = true;
+      } catch (error) {
+        if (
+          (error as NodeJS.ErrnoException).code !== 'ENOENT' ||
+          requiredSuffixes.has(artifact.suffix)
+        ) {
+          failures.push(error);
+        }
+      }
+    }
+    if (removed) {
+      await this.#durability.syncDirectory(this.#paths.backupDirectory).catch((error: unknown) => {
+        failures.push(error);
+      });
+    }
+    if (failures.length > 0) {
+      throw new DatabaseBackupError('Database backup artifacts could not be removed.', {
+        cause: new AggregateError(failures),
+      });
+    }
   }
 }
 
@@ -433,11 +620,39 @@ function isSafeRegularFile(entry: Stats): boolean {
   );
 }
 
+function isSafeValidationSidecar(sidecar: ObservedBackupSidecar): boolean {
+  if (
+    !sidecar.stats.isFile() ||
+    sidecar.stats.isSymbolicLink() ||
+    !Number.isSafeInteger(sidecar.stats.size) ||
+    sidecar.stats.size < 0
+  ) {
+    return false;
+  }
+  if (sidecar.suffix === '-wal' || sidecar.suffix === '-journal') {
+    return sidecar.stats.size === 0;
+  }
+  return sidecar.stats.size === 32_768;
+}
+
 function sameFileIdentity(left: Stats, right: Stats): boolean {
   if (left.dev !== 0 && left.ino !== 0 && right.dev !== 0 && right.ino !== 0) {
     return left.dev === right.dev && left.ino === right.ino;
   }
   return left.size === right.size && left.birthtimeMs === right.birthtimeMs;
+}
+
+function sameObservedFile(left: Stats, right: Stats): boolean {
+  return (
+    left.isFile() &&
+    !left.isSymbolicLink() &&
+    right.isFile() &&
+    !right.isSymbolicLink() &&
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
 }
 
 function sameStableFile(left: Stats, right: Stats): boolean {
@@ -449,6 +664,12 @@ function sameStableFile(left: Stats, right: Stats): boolean {
     left.mtimeMs === right.mtimeMs &&
     left.ctimeMs === right.ctimeMs
   );
+}
+
+function combineFailures(failures: readonly unknown[]): unknown {
+  if (failures.length === 0) return undefined;
+  if (failures.length === 1) return failures[0];
+  return new AggregateError(failures);
 }
 
 function samePublishedFile(left: Stats, right: Stats): boolean {

@@ -32,11 +32,11 @@ describe('v7 search and data protection schema', () => {
         "SELECT sqlite_compileoption_used('ENABLE_FTS5') AS enabled",
       ),
     ).toEqual({ enabled: 1 });
-    expect(new MigrationRunner(DEFAULT_MIGRATIONS).apply(database)).toMatchObject({
+    expect(new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 7)).apply(database)).toMatchObject({
       fromVersion: 0,
       toVersion: 7,
     });
-    expect(DEFAULT_MIGRATIONS.at(-1)).toMatchObject({
+    expect(DEFAULT_MIGRATIONS[6]).toMatchObject({
       version: 7,
       name: 'search_data_protection',
     });
@@ -143,7 +143,7 @@ async function createDatabase(): Promise<SqliteAdapter> {
 
 async function createV7Database(): Promise<SqliteAdapter> {
   const database = await createDatabase();
-  new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+  new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 7)).apply(database);
   return database;
 }
 
