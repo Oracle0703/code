@@ -265,6 +265,9 @@ export function useNoteController(workspaceId: string | null) {
     retry: () => {
       if (workspaceId) void load(workspaceId);
     },
+    refresh: async () => {
+      if (workspaceId) await load(workspaceId);
+    },
     clearOperationError: () => setOperationErrorState(null),
     create,
     update,

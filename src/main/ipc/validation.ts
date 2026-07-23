@@ -1,4 +1,10 @@
 import {
+  type AutomationAction,
+  type AutomationCreateInput,
+  type AutomationSchedule,
+  type AutomationSetEnabledInput,
+  type AutomationTargetInput,
+  type AutomationUpdateInput,
   BACKUP_CADENCES,
   type BackupCadence,
   type BackupPolicyUpdateInput,
@@ -45,6 +51,14 @@ import {
   type WorkspaceRenameInput,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  normalizeAutomationAction,
+  normalizeAutomationActionKind,
+  normalizeAutomationId,
+  normalizeAutomationName,
+  normalizeAutomationRevision,
+  normalizeAutomationSchedule,
+} from '../../shared/automation-domain';
 import {
   normalizeTerminalPreferenceRevision,
   normalizeTerminalProfileId,
@@ -590,6 +604,74 @@ export function parseScheduleUpdateInput(value: unknown): ScheduleUpdateInput {
     title: normalizeScheduleTitle(value.title),
     kind: normalizeScheduleKind(value.kind),
     ...range,
+  };
+}
+
+function parseAutomationSchedule(value: unknown): AutomationSchedule {
+  if (!isRecord(value)) throw new TypeError('Automation schedule must be an object');
+  assertOnlyKeys(value, ['cadence', 'localTimeMinute', 'weekday']);
+  return normalizeAutomationSchedule(value);
+}
+
+function parseAutomationAction(value: unknown): AutomationAction {
+  if (!isRecord(value)) throw new TypeError('Automation action must be an object');
+  const kind = normalizeAutomationActionKind(value.kind);
+  assertOnlyKeys(
+    value,
+    kind === 'create-today-task' ? ['kind', 'title'] : ['kind', 'title', 'body'],
+  );
+  return normalizeAutomationAction(value);
+}
+
+export function parseAutomationCreateInput(value: unknown): AutomationCreateInput {
+  if (!isRecord(value)) throw new TypeError('Automation creation input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'name', 'schedule', 'action']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    name: normalizeAutomationName(value.name),
+    schedule: parseAutomationSchedule(value.schedule),
+    action: parseAutomationAction(value.action),
+  };
+}
+
+export function parseAutomationTargetInput(value: unknown): AutomationTargetInput {
+  if (!isRecord(value)) throw new TypeError('Automation target input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'automationId', 'expectedRevision']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    automationId: normalizeAutomationId(value.automationId),
+    expectedRevision: normalizeAutomationRevision(value.expectedRevision),
+  };
+}
+
+export function parseAutomationUpdateInput(value: unknown): AutomationUpdateInput {
+  if (!isRecord(value)) throw new TypeError('Automation update input must be an object');
+  assertOnlyKeys(value, [
+    'workspaceId',
+    'automationId',
+    'expectedRevision',
+    'name',
+    'schedule',
+    'action',
+  ]);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    automationId: normalizeAutomationId(value.automationId),
+    expectedRevision: normalizeAutomationRevision(value.expectedRevision),
+    name: normalizeAutomationName(value.name),
+    schedule: parseAutomationSchedule(value.schedule),
+    action: parseAutomationAction(value.action),
+  };
+}
+
+export function parseAutomationSetEnabledInput(value: unknown): AutomationSetEnabledInput {
+  if (!isRecord(value)) throw new TypeError('Automation enabled input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'automationId', 'expectedRevision', 'enabled']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    automationId: normalizeAutomationId(value.automationId),
+    expectedRevision: normalizeAutomationRevision(value.expectedRevision),
+    enabled: parseBoolean(value.enabled, 'enabled'),
   };
 }
 

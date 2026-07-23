@@ -239,6 +239,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'browser_tabs_bookmarks',
     'search_data_protection',
     'terminal_workspace_preferences',
+    'scheduled_automations',
     'database-initialized-v1',
     'database-initializing-v1',
     'schema_migrations',
@@ -249,8 +250,14 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'CREATE TABLE inbox_entries',
     'CREATE TABLE backup_policy',
     'CREATE TABLE workspace_terminal_preferences',
+    'CREATE TABLE automations',
+    'CREATE TABLE automation_run_state',
+    'CREATE TABLE automation_occurrences',
     'terminal preference revision must advance exactly once',
     'archived workspace terminal preferences are immutable',
+    'automation revision must advance exactly once',
+    'automation occurrences are immutable',
+    'automation output does not match its workspace or action',
     'CREATE VIRTUAL TABLE notes_search',
     'database:get-management-snapshot',
     'database:update-backup-policy',
@@ -260,6 +267,12 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'database:cancel-import',
     'database:backup-state-changed',
     'search:query',
+    'automation:get-snapshot',
+    'automation:create',
+    'automation:update',
+    'automation:set-enabled',
+    'automation:archive',
+    'automation:changed',
     'workspace:get-snapshot',
     'workspace:update-preferences',
     'inbox:get-snapshot',
@@ -456,6 +469,12 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'database:cancel-import',
     'database:backup-state-changed',
     'search:query',
+    'automation:get-snapshot',
+    'automation:create',
+    'automation:update',
+    'automation:set-enabled',
+    'automation:archive',
+    'automation:changed',
     'workspace:get-snapshot',
     'workspace:update-preferences',
     'inbox:get-snapshot',
@@ -531,6 +550,18 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     false,
     'Packaged preload bundle still contains the removed browser:get-state IPC channel.',
   );
+  for (const forbiddenAutomationChannel of [
+    'automation:run-now',
+    'automation:set-cron',
+    'automation:execute-command',
+  ]) {
+    assert.equal(
+      mainBundle.includes(forbiddenAutomationChannel) ||
+        preloadBundle.includes(forbiddenAutomationChannel),
+      false,
+      `Packaged bundles expose forbidden automation channel ${forbiddenAutomationChannel}.`,
+    );
+  }
 
   const rendererBundle = await readRendererText(
     path.join(asarPath, '.vite', 'renderer', 'main_window'),
@@ -556,6 +587,20 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     assert.ok(
       rendererBundle.includes(requiredTerminalRendererToken),
       `Packaged renderer does not contain terminal UI token ${requiredTerminalRendererToken}.`,
+    );
+  }
+  for (const requiredAutomationRendererToken of [
+    'automation-hero',
+    'automation-switch',
+    'automation-dialog',
+    '按本地时间自动创建今日任务或 Markdown 笔记。',
+    '仅在 Daily Workbench 运行时执行',
+    '每条规则最多补执行最近一次错过的计划。',
+    '动作类型创建后不可更改',
+  ]) {
+    assert.ok(
+      rendererBundle.includes(requiredAutomationRendererToken),
+      `Packaged renderer does not contain automation UI token ${requiredAutomationRendererToken}.`,
     );
   }
   for (const forbiddenToken of [

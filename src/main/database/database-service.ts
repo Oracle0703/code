@@ -3,6 +3,11 @@ import { constants, type Stats } from 'node:fs';
 import { chmod, lstat, open, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import type {
+  AutomationCreateInput,
+  AutomationSetEnabledInput,
+  AutomationSnapshot,
+  AutomationTargetInput,
+  AutomationUpdateInput,
   BackupPolicy,
   BackupPolicyUpdateInput,
   BackupRunErrorCode,
@@ -40,6 +45,12 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  AutomationService,
+  type AutomationRunInput,
+  type AutomationRunResult,
+  type StoredAutomation,
+} from '../automations';
 import {
   BrowserService,
   type BrowserBookmarkDataInput,
@@ -146,6 +157,9 @@ export interface DatabaseServiceOptions {
   readonly noteIdFactory?: () => string;
   readonly scheduleIdFactory?: () => string;
   readonly scheduleTodayFactory?: () => string;
+  readonly automationIdFactory?: () => string;
+  readonly automationTaskIdFactory?: () => string;
+  readonly automationNoteIdFactory?: () => string;
   readonly browserTabIdFactory?: () => string;
   readonly browserBookmarkIdFactory?: () => string;
 }
@@ -163,6 +177,7 @@ export class DatabaseService implements TerminalPreferenceStore {
   readonly #taskService: TaskService;
   readonly #noteService: NoteService;
   readonly #scheduleService: ScheduleService;
+  readonly #automationService: AutomationService;
   readonly #searchService: SearchService;
   readonly #browserService: BrowserService;
   #state: ServiceState = 'closed';
@@ -190,6 +205,9 @@ export class DatabaseService implements TerminalPreferenceStore {
     noteIdFactory = randomUUID,
     scheduleIdFactory = randomUUID,
     scheduleTodayFactory,
+    automationIdFactory = randomUUID,
+    automationTaskIdFactory = randomUUID,
+    automationNoteIdFactory = randomUUID,
     browserTabIdFactory = randomUUID,
     browserBookmarkIdFactory = randomUUID,
   }: DatabaseServiceOptions) {
@@ -230,6 +248,14 @@ export class DatabaseService implements TerminalPreferenceStore {
       now,
       idFactory: scheduleIdFactory,
       todayFactory: scheduleTodayFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#automationService = new AutomationService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      automationIdFactory,
+      taskIdFactory: automationTaskIdFactory,
+      noteIdFactory: automationNoteIdFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
     });
     this.#searchService = new SearchService({
@@ -629,6 +655,34 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#scheduleService.archive(input);
   }
 
+  getAutomationSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot> {
+    return this.#automationService.getSnapshot(input);
+  }
+
+  createAutomation(input: AutomationCreateInput): Promise<AutomationSnapshot> {
+    return this.#automationService.create(input);
+  }
+
+  updateAutomation(input: AutomationUpdateInput): Promise<AutomationSnapshot> {
+    return this.#automationService.update(input);
+  }
+
+  setAutomationEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot> {
+    return this.#automationService.setEnabled(input);
+  }
+
+  archiveAutomation(input: AutomationTargetInput): Promise<AutomationSnapshot> {
+    return this.#automationService.archive(input);
+  }
+
+  readAutomationSchedulerEntries(): Promise<readonly StoredAutomation[]> {
+    return this.#automationService.readSchedulerEntries();
+  }
+
+  runAutomationOccurrence(input: AutomationRunInput): Promise<AutomationRunResult> {
+    return this.#automationService.runOccurrence(input);
+  }
+
   search(input: SearchQueryInput): Promise<SearchSnapshot> {
     return this.#searchService.query(input);
   }
@@ -741,6 +795,9 @@ export class DatabaseService implements TerminalPreferenceStore {
         this.#taskService.validateSnapshot(database);
         this.#noteService.validateSnapshot(database);
         this.#scheduleService.validateSnapshot(database);
+        if (migration.toVersion >= 9) {
+          this.#automationService.validateSnapshot(database);
+        }
         this.#browserService.validateSnapshot(database);
         this.#searchService.validateSnapshot(database);
         this.#searchService.validateContentIntegrity(database);
@@ -862,6 +919,9 @@ export class DatabaseService implements TerminalPreferenceStore {
     }
     if (expectedVersion >= 8) {
       new TerminalPreferenceRepository(database).validateSnapshot();
+    }
+    if (expectedVersion >= 9) {
+      this.#automationService.validateSnapshot(database);
     }
   }
 

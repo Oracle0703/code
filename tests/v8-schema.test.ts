@@ -34,11 +34,11 @@ afterEach(async () => {
 describe('v8 workspace terminal preference schema', () => {
   it('registers the terminal preference migration after v7', async () => {
     const database = await createDatabase();
-    expect(new MigrationRunner(DEFAULT_MIGRATIONS).apply(database)).toMatchObject({
+    expect(new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 8)).apply(database)).toMatchObject({
       fromVersion: 0,
       toVersion: 8,
     });
-    expect(DEFAULT_MIGRATIONS.at(-1)).toMatchObject({
+    expect(DEFAULT_MIGRATIONS[7]).toMatchObject({
       version: 8,
       name: 'terminal_workspace_preferences',
     });
@@ -57,7 +57,7 @@ describe('v8 workspace terminal preference schema', () => {
     seedV7Workspace(database, ACTIVE_WORKSPACE_ID, '活动空间', T0, null);
     insertWorkspace(database, ARCHIVED_WORKSPACE_ID, '归档空间', T1, T2);
 
-    expect(new MigrationRunner(DEFAULT_MIGRATIONS).apply(database)).toMatchObject({
+    expect(new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 8)).apply(database)).toMatchObject({
       fromVersion: 7,
       toVersion: 8,
     });
@@ -181,7 +181,7 @@ describe('v8 workspace terminal preference schema', () => {
     const database = await createV7Database();
     seedV7Workspace(database, ACTIVE_WORKSPACE_ID, '活动空间', T0, null);
     const runner = new MigrationRunner([
-      ...DEFAULT_MIGRATIONS,
+      ...DEFAULT_MIGRATIONS.slice(0, 8),
       {
         version: 9,
         name: 'broken_after_terminal_preferences',
@@ -224,7 +224,7 @@ async function createV7Database(): Promise<SqliteAdapter> {
 
 async function createV8Database(): Promise<SqliteAdapter> {
   const database = await createDatabase();
-  new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+  new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 8)).apply(database);
   return database;
 }
 

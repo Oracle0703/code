@@ -8,7 +8,18 @@ import {
   normalizeBrowserRevision,
   normalizeBrowserTitle,
 } from '../../shared/browser-domain';
+import {
+  AUTOMATION_ACTIVE_GLOBAL_LIMIT,
+  AUTOMATION_ENABLED_WORKSPACE_LIMIT,
+  normalizeAutomationAction,
+  normalizeAutomationId,
+  normalizeAutomationName,
+  normalizeAutomationRevision,
+  normalizeAutomationSchedule,
+} from '../../shared/automation-domain';
 import type {
+  AutomationAction,
+  AutomationSchedule,
   BackupPolicy,
   DataImportCounts,
   InboxCategory,
@@ -50,6 +61,7 @@ import {
   normalizeWorkspaceName,
   normalizeWorkspacePreferencesPatch,
 } from '../../shared/workspace-domain';
+import { AutomationRepository } from '../automations/automation-repository';
 import { BrowserService } from '../browser/browser-service';
 import { BackupPolicyRepository } from '../database/backup-policy-repository';
 import { DEFAULT_MIGRATIONS } from '../database/default-migrations';
@@ -73,6 +85,7 @@ import { WorkspaceService } from '../workspaces/workspace-service';
 import {
   DATA_PACKAGE_FORMAT,
   DATA_PACKAGE_FORMAT_VERSION,
+  LEGACY_DATA_PACKAGE_FORMAT_VERSION,
   DataPackageError,
   PORTABLE_RECORD_TYPES,
   canonicalJson,
@@ -83,8 +96,8 @@ import {
 } from './package-format';
 import { DEFAULT_MAX_IMPORT_STAGING_BYTES, type ImportStagingDriver } from './staging';
 
-export const PORTABLE_DATABASE_SCHEMA_VERSION = 8;
-export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8] as const);
+export const PORTABLE_DATABASE_SCHEMA_VERSION = 9;
+export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8, 9] as const);
 const MAX_PORTABLE_LOGICAL_RECORDS = 100_000;
 const MAX_PORTABLE_WORKSPACES = 500;
 const MAX_PORTABLE_BROWSER_TABS = 6_000;
@@ -199,6 +212,19 @@ interface BrowserBookmarkRecord {
   readonly createdAt: string;
 }
 
+interface AutomationDefinitionRecord {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly schedule: AutomationSchedule;
+  readonly action: AutomationAction;
+  readonly revision: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly archivedAt: string | null;
+}
+
 interface PortableDatabaseModel {
   readonly appState: AppStateRecord;
   readonly workspaces: readonly WorkspaceRecord[];
@@ -210,6 +236,7 @@ interface PortableDatabaseModel {
   readonly browserTabs: readonly BrowserTabRecord[];
   readonly browserStates: readonly BrowserStateRecord[];
   readonly browserBookmarks: readonly BrowserBookmarkRecord[];
+  readonly automations: readonly AutomationDefinitionRecord[];
 }
 
 /**
@@ -269,7 +296,7 @@ export class DatabaseImportStagingDriver implements ImportStagingDriver {
   }
 
   async build(packageData: ParsedPortablePackage, temporaryPath: string): Promise<void> {
-    const model = decodePortablePackage(packageData);
+    const model = pausePortableAutomations(decodePortablePackage(packageData));
     const expectedLogicalDigest = digestPortableModel(model);
     const timestamp = readClockTimestamp(this.#now);
     const databaseId = this.#idFactory();
@@ -322,7 +349,9 @@ export class DatabaseImportStagingDriver implements ImportStagingDriver {
 
   async validate(stagingPath: string, packageData: ParsedPortablePackage): Promise<void> {
     const resolvedPath = resolve(stagingPath);
-    const expectedLogicalDigest = digestPortableModel(decodePortablePackage(packageData));
+    const expectedLogicalDigest = digestPortableModel(
+      pausePortableAutomations(decodePortablePackage(packageData)),
+    );
     const database = this.#adapterFactory(resolvedPath, { timeoutMs: this.#timeoutMs });
     try {
       try {
@@ -529,15 +558,55 @@ function readRawPortableRecords(database: SqliteAdapter): PortableDataRecord[] {
       }),
     );
   }
+  for (const row of database.all<Record<string, unknown>>(
+    `SELECT id, workspace_id AS workspaceId, name, enabled, cadence,
+            local_time_minute AS localTimeMinute, weekday,
+            action_kind AS actionKind, action_title AS actionTitle,
+            action_body AS actionBody, revision, created_at AS createdAt,
+            updated_at AS updatedAt, archived_at AS archivedAt
+     FROM automations
+     ORDER BY workspace_id, created_at, id`,
+  )) {
+    const actionKind = readSqlString(row.actionKind, 'automation action kind');
+    const actionTitle = readSqlString(row.actionTitle, 'automation action title');
+    const actionBody = readSqlNullableString(row.actionBody, 'automation action body');
+    records.push(
+      portableRecord('automation-definition', {
+        id: readSqlString(row.id, 'automation id'),
+        workspaceId: readSqlString(row.workspaceId, 'automation workspace id'),
+        name: readSqlString(row.name, 'automation name'),
+        enabled: readSqlBoolean(row.enabled, 'automation enabled state'),
+        schedule: {
+          cadence: readSqlString(row.cadence, 'automation cadence'),
+          localTimeMinute: readSqlInteger(row.localTimeMinute, 'automation local time'),
+          weekday: row.weekday === null ? null : readSqlInteger(row.weekday, 'automation weekday'),
+        },
+        action:
+          actionKind === 'create-today-task'
+            ? { kind: actionKind, title: actionTitle }
+            : { kind: actionKind, title: actionTitle, body: actionBody },
+        revision: readSqlInteger(row.revision, 'automation revision'),
+        createdAt: readSqlString(row.createdAt, 'automation creation timestamp'),
+        updatedAt: readSqlString(row.updatedAt, 'automation update timestamp'),
+        archivedAt: readSqlNullableString(row.archivedAt, 'automation archive timestamp'),
+      }),
+    );
+  }
   return records;
 }
 
 function decodePortablePackage(packageData: ParsedPortablePackage): PortableDatabaseModel {
   assertPlainObject(packageData, 'The parsed data package is invalid.');
   assertPlainObject(packageData.manifest, 'The data package manifest is invalid.');
+  const formatMatchesSchema =
+    (packageData.manifest.formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION &&
+      (packageData.manifest.sourceSchemaVersion === 7 ||
+        packageData.manifest.sourceSchemaVersion === 8)) ||
+    (packageData.manifest.formatVersion === DATA_PACKAGE_FORMAT_VERSION &&
+      packageData.manifest.sourceSchemaVersion === 9);
   if (
     packageData.manifest.format !== DATA_PACKAGE_FORMAT ||
-    packageData.manifest.formatVersion !== DATA_PACKAGE_FORMAT_VERSION ||
+    !formatMatchesSchema ||
     !SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS.some(
       (version) => version === packageData.manifest.sourceSchemaVersion,
     ) ||
@@ -546,6 +615,12 @@ function decodePortablePackage(packageData: ParsedPortablePackage): PortableData
     throw new DataPackageError('The data package manifest does not match its records.');
   }
   const model = decodePortableRecords(packageData.records);
+  if (
+    packageData.manifest.formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION &&
+    model.automations.length !== 0
+  ) {
+    throw new DataPackageError('A legacy data package cannot contain automation definitions.');
+  }
   const counts = countPortableModel(model);
   if (!sameCounts(packageData.manifest.counts, counts)) {
     throw new DataPackageError('The data package counts do not match its records.');
@@ -571,6 +646,7 @@ function decodePortableRecords(records: readonly PortableDataRecord[]): Portable
   const browserTabs: BrowserTabRecord[] = [];
   const browserStates: BrowserStateRecord[] = [];
   const browserBookmarks: BrowserBookmarkRecord[] = [];
+  const automations: AutomationDefinitionRecord[] = [];
 
   for (const value of records as readonly unknown[]) {
     assertExactObjectKeys(value, ['data', 'type'], 'The data package record is invalid.');
@@ -616,6 +692,9 @@ function decodePortableRecords(records: readonly PortableDataRecord[]): Portable
       case 'browser-bookmark':
         browserBookmarks.push(decodeBrowserBookmark(data));
         break;
+      case 'automation-definition':
+        automations.push(decodeAutomationDefinition(data));
+        break;
     }
   }
   if (!appState) {
@@ -648,6 +727,10 @@ function decodePortableRecords(records: readonly PortableDataRecord[]): Portable
       browserBookmarks,
       (item) => `${item.workspaceId}\0${item.createdAt}\0${item.id}`,
     ),
+    automations: sortBy(
+      automations,
+      (item) => `${item.workspaceId}\0${item.createdAt}\0${item.id}`,
+    ),
   };
   validatePortableModelLimits(model);
   validatePortableRelationships(model);
@@ -665,13 +748,21 @@ function validatePortableModelLimits(model: PortableDatabaseModel): void {
     model.scheduleItems.length +
     model.browserTabs.length +
     model.browserStates.length +
-    model.browserBookmarks.length;
+    model.browserBookmarks.length +
+    model.automations.length;
+  const activeWorkspaceIds = new Set(
+    model.workspaces.filter(({ archivedAt }) => archivedAt === null).map(({ id }) => id),
+  );
+  const activeAutomationCount = model.automations.filter(
+    ({ archivedAt, workspaceId }) => archivedAt === null && activeWorkspaceIds.has(workspaceId),
+  ).length;
   if (
     totalRecords > MAX_PORTABLE_LOGICAL_RECORDS ||
     model.workspaces.length > MAX_PORTABLE_WORKSPACES ||
     model.browserStates.length > MAX_PORTABLE_WORKSPACES ||
     model.browserTabs.length > MAX_PORTABLE_BROWSER_TABS ||
-    model.browserBookmarks.length > MAX_PORTABLE_BROWSER_BOOKMARKS
+    model.browserBookmarks.length > MAX_PORTABLE_BROWSER_BOOKMARKS ||
+    activeAutomationCount > AUTOMATION_ACTIVE_GLOBAL_LIMIT
   ) {
     throw new DataPackageError('The data package exceeds the logical database limits.');
   }
@@ -965,6 +1056,77 @@ function decodeBrowserBookmark(value: unknown): BrowserBookmarkRecord {
   };
 }
 
+function decodeAutomationDefinition(value: unknown): AutomationDefinitionRecord {
+  const data = exactPayload(
+    value,
+    [
+      'action',
+      'archivedAt',
+      'createdAt',
+      'enabled',
+      'id',
+      'name',
+      'revision',
+      'schedule',
+      'updatedAt',
+      'workspaceId',
+    ],
+    'automation definition',
+  );
+  const schedulePayload = exactPayload(
+    data.schedule,
+    ['cadence', 'localTimeMinute', 'weekday'],
+    'automation schedule',
+  );
+  const actionValue = data.action;
+  if (!isPlainObject(actionValue) || typeof actionValue.kind !== 'string') {
+    throw new DataPackageError('The data package automation action is invalid.');
+  }
+  const actionPayload = exactPayload(
+    actionValue,
+    actionValue.kind === 'create-today-task' ? ['kind', 'title'] : ['body', 'kind', 'title'],
+    'automation action',
+  );
+  let schedule: AutomationSchedule;
+  let action: AutomationAction;
+  try {
+    schedule = normalizeAutomationSchedule(schedulePayload);
+    action = normalizeAutomationAction(actionPayload);
+    if (
+      canonicalJson(schedule) !== canonicalJson(schedulePayload) ||
+      canonicalJson(action) !== canonicalJson(actionPayload)
+    ) {
+      throw new TypeError('Automation values are not in persisted form.');
+    }
+  } catch (error) {
+    throw new DataPackageError('The data package automation schedule or action is invalid.', {
+      cause: error,
+    });
+  }
+  if (typeof data.enabled !== 'boolean') {
+    throw new DataPackageError('The data package automation enabled state is invalid.');
+  }
+  const createdAt = readIsoTimestamp(data.createdAt, 'automation creation time');
+  const updatedAt = readIsoTimestamp(data.updatedAt, 'automation update time');
+  const archivedAt = readNullableIsoTimestamp(data.archivedAt, 'automation archive time');
+  assertTimestampOrder(createdAt, updatedAt, archivedAt, 'automation');
+  if (archivedAt !== null && data.enabled) {
+    throw new DataPackageError('An archived automation cannot be enabled.');
+  }
+  return {
+    id: normalizedValue(data.id, normalizeAutomationId, 'automation id'),
+    workspaceId: normalizedValue(data.workspaceId, normalizeWorkspaceId, 'automation workspace id'),
+    name: normalizedValue(data.name, normalizeAutomationName, 'automation name'),
+    enabled: data.enabled,
+    schedule,
+    action,
+    revision: normalizedValue(data.revision, normalizeAutomationRevision, 'automation revision'),
+    createdAt,
+    updatedAt,
+    archivedAt,
+  };
+}
+
 function validatePortableRelationships(model: PortableDatabaseModel): void {
   if (model.workspaces.length === 0) {
     throw new DataPackageError('The data package contains no workspaces.');
@@ -1087,6 +1249,21 @@ function validatePortableRelationships(model: PortableDatabaseModel): void {
     if (count < 1 || count > BROWSER_MAX_BOOKMARKS || !states.has(workspaceId)) {
       throw new DataPackageError('The imported browser bookmark count is invalid.');
     }
+  }
+
+  uniqueMap(model.automations, ({ id }) => id, 'automation');
+  const enabledAutomationCounts = new Map<string, number>();
+  for (const automation of model.automations) {
+    const workspace = requireWorkspace(workspaces, automation.workspaceId, 'automation');
+    if (workspace.archivedAt !== null && automation.enabled) {
+      throw new DataPackageError('An automation in an archived workspace cannot be enabled.');
+    }
+    if (!automation.enabled) continue;
+    const enabled = (enabledAutomationCounts.get(automation.workspaceId) ?? 0) + 1;
+    if (enabled > AUTOMATION_ENABLED_WORKSPACE_LIMIT) {
+      throw new DataPackageError('The imported enabled automation count is invalid.');
+    }
+    enabledAutomationCounts.set(automation.workspaceId, enabled);
   }
 }
 
@@ -1248,18 +1425,67 @@ function insertPortableModel(database: SqliteAdapter, model: PortableDatabaseMod
       [bookmark.id, bookmark.workspaceId, bookmark.url, bookmark.title, bookmark.createdAt],
     );
   }
-
+  const automationsByWorkspace = new Map<string, AutomationDefinitionRecord[]>();
+  for (const automation of model.automations) {
+    const definitions = automationsByWorkspace.get(automation.workspaceId) ?? [];
+    definitions.push(automation);
+    automationsByWorkspace.set(automation.workspaceId, definitions);
+  }
   for (const workspace of model.workspaces) {
     if (workspace.archivedAt === null) continue;
-    const result = database.run(
-      `UPDATE workspaces
-       SET name = ?, name_key = ?, archived_at = ?
-       WHERE id = ? AND archived_at IS NULL`,
-      [workspace.name, createWorkspaceNameKey(workspace.name), workspace.archivedAt, workspace.id],
-    );
-    if (Number(result.changes) !== 1) {
-      throw new DatabaseIntegrityError('An imported workspace could not be archived.');
+    for (const automation of automationsByWorkspace.get(workspace.id) ?? []) {
+      insertAutomationDefinition(database, automation);
     }
+    archiveImportedWorkspace(database, workspace);
+  }
+  for (const workspace of model.workspaces) {
+    if (workspace.archivedAt !== null) continue;
+    for (const automation of automationsByWorkspace.get(workspace.id) ?? []) {
+      insertAutomationDefinition(database, automation);
+    }
+  }
+}
+
+function insertAutomationDefinition(
+  database: SqliteAdapter,
+  automation: AutomationDefinitionRecord,
+): void {
+  database.run(
+    `INSERT INTO automations (
+       id, workspace_id, name, cadence, local_time_minute, weekday,
+       action_kind, action_title, action_body, enabled, effective_at,
+       revision, created_at, updated_at, archived_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?)`,
+    [
+      automation.id,
+      automation.workspaceId,
+      automation.name,
+      automation.schedule.cadence,
+      automation.schedule.localTimeMinute,
+      automation.schedule.weekday,
+      automation.action.kind,
+      automation.action.title,
+      automation.action.kind === 'create-note' ? automation.action.body : null,
+      automation.revision,
+      automation.createdAt,
+      automation.updatedAt,
+      automation.archivedAt,
+    ],
+  );
+}
+
+function archiveImportedWorkspace(database: SqliteAdapter, workspace: WorkspaceRecord): void {
+  if (workspace.archivedAt === null) {
+    throw new DatabaseIntegrityError('An active imported workspace cannot be archived.');
+  }
+  const result = database.run(
+    `UPDATE workspaces
+     SET name = ?, name_key = ?, archived_at = ?
+     WHERE id = ? AND archived_at IS NULL`,
+    [workspace.name, createWorkspaceNameKey(workspace.name), workspace.archivedAt, workspace.id],
+  );
+  if (Number(result.changes) !== 1) {
+    throw new DatabaseIntegrityError('An imported workspace could not be archived.');
   }
 }
 
@@ -1350,6 +1576,7 @@ function validateDatabaseSnapshot(
   new ScheduleService({ execute }).validateSnapshot(database);
   new BrowserService({ execute }).validateSnapshot(database);
   new SearchService({ execute }).validateSnapshot(database);
+  new AutomationRepository(database).validateSnapshot();
 
   const backup = new BackupPolicyRepository(database);
   const policy = backup.readPolicy();
@@ -1368,6 +1595,39 @@ function validateDatabaseSnapshot(
       runState.consecutiveFailures !== 0)
   ) {
     throw new DatabaseIntegrityError('The staged database backup run state is not fresh.');
+  }
+  if (expectedBackupPolicy) validateImportedAutomationState(database);
+}
+
+function validateImportedAutomationState(database: SqliteAdapter): void {
+  const activeState = database.get<{ present: unknown }>(
+    `SELECT 1 AS present
+     FROM automations
+     WHERE enabled <> 0 OR effective_at IS NOT NULL
+     LIMIT 1`,
+  );
+  const runState = database.get<{ present: unknown }>(
+    `SELECT 1 AS present
+     FROM automation_run_state
+     WHERE last_attempt_at IS NOT NULL
+        OR last_attempt_occurrence IS NOT NULL
+        OR last_success_at IS NOT NULL
+        OR last_success_occurrence IS NOT NULL
+        OR last_output_kind IS NOT NULL
+        OR last_error_code IS NOT NULL
+        OR consecutive_failures <> 0
+        OR next_retry_at IS NOT NULL
+     LIMIT 1`,
+  );
+  const occurrence = database.get<{ present: unknown }>(
+    `SELECT 1 AS present
+     FROM automation_occurrences
+     LIMIT 1`,
+  );
+  if (activeState || runState || occurrence) {
+    throw new DatabaseIntegrityError(
+      'The staged database automation definitions are not freshly paused.',
+    );
   }
 }
 
@@ -1429,6 +1689,16 @@ function validateFtsContentIntegrity(database: SqliteAdapter): void {
   }
 }
 
+function pausePortableAutomations(model: PortableDatabaseModel): PortableDatabaseModel {
+  return {
+    ...model,
+    automations: model.automations.map((automation) => ({
+      ...automation,
+      enabled: false,
+    })),
+  };
+}
+
 function digestPortableModel(model: PortableDatabaseModel): string {
   const hash = createHash('sha256');
   hash.update('daily-workbench-portable-database-v1\0', 'utf8');
@@ -1450,6 +1720,7 @@ function digestPortableModel(model: PortableDatabaseModel): string {
   append('browser-tab', model.browserTabs);
   append('browser-state', model.browserStates);
   append('browser-bookmark', model.browserBookmarks);
+  append('automation-definition', model.automations);
   return hash.digest('hex');
 }
 
@@ -1488,7 +1759,7 @@ function sqliteSidecarPaths(databasePath: string): readonly string[] {
 function assertCurrentMigrationSet(migrations: readonly Migration[]): void {
   const runner = new MigrationRunner(migrations);
   if (runner.latestVersion !== PORTABLE_DATABASE_SCHEMA_VERSION) {
-    throw new TypeError('The import codec requires the current v8 migration set.');
+    throw new TypeError('The import codec requires the current v9 migration set.');
   }
 }
 
@@ -1553,6 +1824,8 @@ function countPortableModel(model: PortableDatabaseModel): DataImportCounts {
     scheduleItems: model.scheduleItems.length,
     browserTabs: model.browserTabs.length,
     browserBookmarks: model.browserBookmarks.length,
+    automations: model.automations.length,
+    enabledAutomations: model.automations.filter(({ enabled }) => enabled).length,
   };
 }
 
@@ -1560,8 +1833,10 @@ function sameCounts(left: DataImportCounts, right: DataImportCounts): boolean {
   if (!isPlainObject(left)) return false;
   const keys: readonly (keyof DataImportCounts)[] = [
     'archivedWorkspaces',
+    'automations',
     'browserBookmarks',
     'browserTabs',
+    'enabledAutomations',
     'inboxEntries',
     'notes',
     'scheduleItems',

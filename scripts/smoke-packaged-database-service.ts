@@ -15,9 +15,11 @@ import {
 import {
   AtomicImportStager,
   DatabaseImportStagingDriver,
+  type PortableDataRecord,
   parsePortablePackage,
   serializePortablePackage,
 } from '../src/main/data-portability';
+import { AutomationController } from '../src/main/automations';
 import { InboxService } from '../src/main/inbox';
 import { BrowserService } from '../src/main/browser';
 import { NoteService } from '../src/main/notes';
@@ -52,6 +54,10 @@ const PORTABLE_EXPORT_ID = '31313131-3131-4131-8131-313131313131';
 const PORTABLE_IMPORT_ID = '32323232-3232-4232-8232-323232323232';
 const PORTABLE_STAGING_ID = '33333333-3333-4333-8333-333333333333';
 const PORTABLE_DATABASE_ID = '34343434-3434-4434-8434-343434343434';
+const DAILY_AUTOMATION_ID = '35353535-3535-4535-8535-353535353535';
+const WEEKLY_AUTOMATION_ID = '36363636-3636-4636-8636-363636363636';
+const AUTOMATION_TASK_ID = '37373737-3737-4737-8737-373737373737';
+const AUTOMATION_NOTE_ID = '38383838-3838-4838-8838-383838383838';
 const FIXED_NOW = new Date('2026-07-22T12:34:56.000Z');
 const FIXED_TODAY = '2026-07-22';
 
@@ -71,8 +77,9 @@ async function main(): Promise<void> {
     await smokeVersionFiveUpgrade(join(root, 'legacy v5 数据'));
     await smokeVersionSixUpgrade(join(root, 'legacy v6 数据'));
     await smokeVersionSevenUpgrade(join(root, 'legacy v7 数据'));
+    await smokeVersionEightUpgrade(join(root, 'legacy v8 数据'));
     console.log(
-      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
+      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
         `(Electron ${process.versions.electron}, Node ${process.versions.node}, ` +
         `SQLite ${process.versions.sqlite}).`,
     );
@@ -90,9 +97,11 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
   const scheduleIds = [FIRST_SCHEDULE_ID, SECOND_SCHEDULE_ID, THIRD_SCHEDULE_ID];
   const browserTabIds = [FIRST_BROWSER_TAB_ID, SECOND_BROWSER_TAB_ID, THIRD_BROWSER_TAB_ID];
   const browserBookmarkIds = [FIRST_BROWSER_BOOKMARK_ID];
+  const automationIds = [DAILY_AUTOMATION_ID, WEEKLY_AUTOMATION_ID];
+  let serviceNow = FIXED_NOW;
   let service: DatabaseService | undefined = new DatabaseService({
     dataDirectory,
-    now: () => FIXED_NOW,
+    now: () => serviceNow,
     workspaceIdFactory: () => ids.shift() ?? '33333333-3333-4333-8333-333333333333',
     inboxIdFactory: () => inboxIds.shift() ?? 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
     inboxUndoTokenFactory: () => undoTokens.shift() ?? 'ffffffff-ffff-4fff-8fff-ffffffffffff',
@@ -104,12 +113,15 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     browserTabIdFactory: () => browserTabIds.shift() ?? '27272727-2727-4727-8727-272727272727',
     browserBookmarkIdFactory: () =>
       browserBookmarkIds.shift() ?? '28282828-2828-4828-8828-282828282828',
+    automationIdFactory: () => automationIds.shift() ?? '39393939-3939-4939-8939-393939393939',
+    automationTaskIdFactory: () => AUTOMATION_TASK_ID,
+    automationNoteIdFactory: () => AUTOMATION_NOTE_ID,
   });
 
   try {
     const initialized = await service.open();
     assert.equal(initialized.migration.fromVersion, 0);
-    assert.equal(initialized.migration.toVersion, 8);
+    assert.equal(initialized.migration.toVersion, 9);
     assert.equal(initialized.preMigrationBackup, undefined);
 
     const status = await service.getStatus();
@@ -122,8 +134,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         backupCount: status.backupCount,
       },
       {
-        schemaVersion: 8,
-        appliedMigrations: 8,
+        schemaVersion: 9,
+        appliedMigrations: 9,
         journalMode: 'wal',
         integrityCheck: 'ok',
         backupCount: 0,
@@ -658,13 +670,17 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       updatedAt: FIXED_NOW.toISOString(),
     });
 
+    const automationOccurrences = await smokeScheduledAutomations(service, (value) => {
+      serviceNow = value;
+    });
+
     const created = await service.createBackup();
     assert.equal(created.reason, 'manual');
-    assert.equal(created.schemaVersion, 8);
+    assert.equal(created.schemaVersion, 9);
     assert.equal('path' in created, false);
     const scheduled = await service.createScheduledBackup();
     assert.equal(scheduled.reason, 'scheduled');
-    assert.equal(scheduled.schemaVersion, 8);
+    assert.equal(scheduled.schemaVersion, 9);
     assert.equal('path' in scheduled, false);
     assert.deepEqual(await service.validateExistingBackup(scheduled.id, 'scheduled'), scheduled);
     assert.deepEqual(await service.pruneScheduledBackups(scheduled.id), {
@@ -690,7 +706,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     const backupPath = join(dataDirectory, 'backups', created.fileName);
     const backup = new DatabaseSync(backupPath, { readOnly: true });
     try {
-      assert.equal(backup.prepare('PRAGMA user_version').get()?.user_version, 8);
+      assert.equal(backup.prepare('PRAGMA user_version').get()?.user_version, 9);
       assert.equal(backup.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
       assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM workspaces').get()?.count, 2);
       assert.equal(
@@ -711,7 +727,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         .get(SECOND_INBOX_ID);
       assert.equal(archivedInboxRow?.category, 'link');
       assert.equal(archivedInboxRow?.archived, 1);
-      assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM tasks').get()?.count, 4);
+      assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM tasks').get()?.count, 5);
       const convertedTaskRow = backup
         .prepare(
           `SELECT title, status, planned_for, source_inbox_entry_id,
@@ -731,7 +747,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       assert.equal(completedTaskRow?.status, 'completed');
       assert.equal(completedTaskRow?.completed_at, FIXED_NOW.toISOString());
       assert.equal(completedTaskRow?.planned_for, FIXED_TODAY);
-      assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM notes').get()?.count, 3);
+      assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM notes').get()?.count, 4);
       const archivedNoteRow = backup
         .prepare(
           `SELECT title, body, revision, source_inbox_entry_id,
@@ -822,6 +838,60 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       assert.equal(terminalPreferenceRow?.native_cwd_path, dataDirectory);
       assert.equal(terminalPreferenceRow?.wsl_distribution_name, 'Ubuntu-开发');
       assert.equal(terminalPreferenceRow?.revision, 4);
+      assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM automations').get()?.count, 2);
+      assert.equal(
+        backup
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM automations
+             WHERE enabled = 1 AND effective_at IS NOT NULL AND archived_at IS NULL`,
+          )
+          .get()?.count,
+        2,
+      );
+      assert.equal(
+        backup
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM automation_run_state
+             WHERE last_success_at IS NOT NULL
+               AND last_success_occurrence IS NOT NULL
+               AND last_error_code IS NULL`,
+          )
+          .get()?.count,
+        2,
+      );
+      assert.equal(
+        backup.prepare('SELECT COUNT(*) AS count FROM automation_occurrences').get()?.count,
+        2,
+      );
+      assert.deepEqual(
+        backup
+          .prepare(
+            `SELECT automation_id AS automationId, occurrence_date AS occurrenceDate,
+                    output_kind AS outputKind, task_id AS taskId, note_id AS noteId
+             FROM automation_occurrences
+             ORDER BY automation_id`,
+          )
+          .all()
+          .map((row) => ({ ...row })),
+        [
+          {
+            automationId: DAILY_AUTOMATION_ID,
+            occurrenceDate: automationOccurrences.daily,
+            outputKind: 'task',
+            taskId: AUTOMATION_TASK_ID,
+            noteId: null,
+          },
+          {
+            automationId: WEEKLY_AUTOMATION_ID,
+            occurrenceDate: automationOccurrences.weekly,
+            outputKind: 'note',
+            taskId: null,
+            noteId: AUTOMATION_NOTE_ID,
+          },
+        ],
+      );
     } finally {
       backup.close();
     }
@@ -829,23 +899,36 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     const scheduledBackupPath = join(dataDirectory, 'backups', scheduled.fileName);
     const scheduledBackup = new DatabaseSync(scheduledBackupPath, { readOnly: true });
     try {
-      assert.equal(scheduledBackup.prepare('PRAGMA user_version').get()?.user_version, 8);
+      assert.equal(scheduledBackup.prepare('PRAGMA user_version').get()?.user_version, 9);
       assert.equal(scheduledBackup.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
-      assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM tasks').get()?.count, 4);
-      assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM notes').get()?.count, 3);
+      assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM tasks').get()?.count, 5);
+      assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM notes').get()?.count, 4);
+      assert.equal(
+        scheduledBackup.prepare('SELECT COUNT(*) AS count FROM automation_occurrences').get()
+          ?.count,
+        2,
+      );
     } finally {
       scheduledBackup.close();
     }
 
     service = new DatabaseService({
       dataDirectory,
+      now: () => serviceNow,
       taskTodayFactory: () => FIXED_TODAY,
       scheduleTodayFactory: () => FIXED_TODAY,
     });
     const reopened = await service.open();
-    assert.equal(reopened.migration.fromVersion, 8);
-    assert.equal(reopened.migration.toVersion, 8);
+    assert.equal(reopened.migration.fromVersion, 9);
+    assert.equal(reopened.migration.toVersion, 9);
     assert.equal(reopened.migration.applied.length, 0);
+    const reopenedAutomationController = createManualAutomationController(
+      service,
+      () => serviceNow,
+    );
+    await reopenedAutomationController.start();
+    await reopenedAutomationController.evaluate();
+    await reopenedAutomationController.stop();
     snapshot = await service.getWorkspaceSnapshot();
     assert.equal(snapshot.currentWorkspaceId, DEFAULT_WORKSPACE_ID);
     assert.equal(snapshot.workspaces.length, 1);
@@ -854,19 +937,31 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.deepEqual(inbox.entries, []);
     tasks = await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(tasks.todayDate, FIXED_TODAY);
-    assert.equal(tasks.tasks.length, 3);
+    assert.equal(tasks.tasks.length, 4);
     assert.equal(tasks.tasks.find(({ id }) => id === FIRST_TASK_ID)?.status, 'completed');
     assert.equal(
       tasks.tasks.find(({ id }) => id === CONVERTED_TASK_ID)?.sourceInboxEntryId,
       FIRST_INBOX_ID,
     );
     assert.equal(tasks.tasks.find(({ id }) => id === SECOND_TASK_ID)?.plannedFor, null);
+    assert.equal(tasks.tasks.find(({ id }) => id === AUTOMATION_TASK_ID)?.status, 'todo');
     notes = await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.deepEqual(
-      notes.notes.map(({ id }) => id),
-      [CONVERTED_NOTE_ID],
+      new Set(notes.notes.map(({ id }) => id)),
+      new Set([CONVERTED_NOTE_ID, AUTOMATION_NOTE_ID]),
     );
-    assert.equal(notes.notes[0]?.sourceInboxEntryId, NOTE_INBOX_ID);
+    assert.equal(
+      notes.notes.find(({ id }) => id === CONVERTED_NOTE_ID)?.sourceInboxEntryId,
+      NOTE_INBOX_ID,
+    );
+    const reopenedAutomations = await service.getAutomationSnapshot({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+    });
+    assert.equal(reopenedAutomations.items.length, 2);
+    assert.equal(
+      reopenedAutomations.items.filter(({ lastRun }) => lastRun.status === 'success').length,
+      2,
+    );
     schedule = await service.getScheduleSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(schedule.todayDate, FIXED_TODAY);
     assert.deepEqual(
@@ -916,6 +1011,139 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
   }
 }
 
+async function smokeScheduledAutomations(
+  service: DatabaseService,
+  setNow: (value: Date) => void,
+): Promise<{ readonly daily: string; readonly weekly: string }> {
+  const fixedLocalMinute = FIXED_NOW.getHours() * 60 + FIXED_NOW.getMinutes();
+  assert.ok(fixedLocalMinute <= 1_436, 'The fixed automation smoke time must leave three minutes.');
+
+  let automations = await service.createAutomation({
+    workspaceId: DEFAULT_WORKSPACE_ID,
+    name: '每日自动创建今日任务',
+    schedule: {
+      cadence: 'daily',
+      localTimeMinute: fixedLocalMinute + 1,
+      weekday: null,
+    },
+    action: {
+      kind: 'create-today-task',
+      title: '自动生成的待办',
+    },
+  });
+  let daily = automations.items.find(({ id }) => id === DAILY_AUTOMATION_ID);
+  assert.ok(daily);
+  assert.equal(daily.enabled, false);
+  assert.equal(daily.revision, 1);
+  assert.deepEqual(daily.lastRun, { status: 'never' });
+
+  automations = await service.createAutomation({
+    workspaceId: DEFAULT_WORKSPACE_ID,
+    name: '每周自动创建笔记',
+    schedule: {
+      cadence: 'weekly',
+      localTimeMinute: fixedLocalMinute + 2,
+      weekday: FIXED_NOW.getDay(),
+    },
+    action: {
+      kind: 'create-note',
+      title: '自动生成的周记',
+      body: '由受控定时自动化创建。',
+    },
+  });
+  const weekly = automations.items.find(({ id }) => id === WEEKLY_AUTOMATION_ID);
+  assert.ok(weekly);
+  assert.equal(weekly.enabled, false);
+  assert.deepEqual(weekly.lastRun, { status: 'never' });
+
+  automations = await service.setAutomationEnabled({
+    workspaceId: DEFAULT_WORKSPACE_ID,
+    automationId: DAILY_AUTOMATION_ID,
+    expectedRevision: daily.revision,
+    enabled: true,
+  });
+  daily = automations.items.find(({ id }) => id === DAILY_AUTOMATION_ID);
+  assert.ok(daily);
+  assert.equal(daily.enabled, true);
+  assert.equal(daily.revision, 2);
+
+  automations = await service.setAutomationEnabled({
+    workspaceId: DEFAULT_WORKSPACE_ID,
+    automationId: WEEKLY_AUTOMATION_ID,
+    expectedRevision: weekly.revision,
+    enabled: true,
+  });
+  assert.equal(automations.items.find(({ id }) => id === WEEKLY_AUTOMATION_ID)?.enabled, true);
+
+  const catchUpNow = new Date(FIXED_NOW);
+  catchUpNow.setDate(catchUpNow.getDate() + 8);
+  catchUpNow.setMinutes(catchUpNow.getMinutes() + 3);
+  setNow(catchUpNow);
+
+  const controller = createManualAutomationController(service, () => catchUpNow);
+  await controller.start();
+  await controller.evaluate();
+
+  automations = await service.getAutomationSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
+  assert.equal(automations.items.filter(({ lastRun }) => lastRun.status === 'success').length, 2);
+  const tasksAfterFirstEvaluation = await service.getTaskSnapshot({
+    workspaceId: DEFAULT_WORKSPACE_ID,
+  });
+  const notesAfterFirstEvaluation = await service.getNoteSnapshot({
+    workspaceId: DEFAULT_WORKSPACE_ID,
+  });
+  assert.equal(
+    tasksAfterFirstEvaluation.tasks.find(({ id }) => id === AUTOMATION_TASK_ID)?.title,
+    '自动生成的待办',
+  );
+  assert.equal(
+    notesAfterFirstEvaluation.notes.find(({ id }) => id === AUTOMATION_NOTE_ID)?.body,
+    '由受控定时自动化创建。',
+  );
+
+  await controller.evaluate();
+  await controller.stop();
+  assert.equal(
+    (await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).tasks.length,
+    tasksAfterFirstEvaluation.tasks.length,
+  );
+  assert.equal(
+    (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes.length,
+    notesAfterFirstEvaluation.notes.length,
+  );
+
+  const weeklyOccurrence = new Date(catchUpNow);
+  weeklyOccurrence.setDate(
+    weeklyOccurrence.getDate() - ((weeklyOccurrence.getDay() - FIXED_NOW.getDay() + 7) % 7),
+  );
+  return {
+    daily: formatLocalCivilDate(catchUpNow),
+    weekly: formatLocalCivilDate(weeklyOccurrence),
+  };
+}
+
+function createManualAutomationController(
+  service: DatabaseService,
+  now: () => Date,
+): AutomationController {
+  return new AutomationController({
+    database: service,
+    now,
+    timer: {
+      set: () => Symbol('automation-smoke-timer'),
+      clear: () => undefined,
+    },
+  });
+}
+
+function formatLocalCivilDate(value: Date): string {
+  return [
+    value.getFullYear().toString().padStart(4, '0'),
+    (value.getMonth() + 1).toString().padStart(2, '0'),
+    value.getDate().toString().padStart(2, '0'),
+  ].join('-');
+}
+
 async function smokePortableRoundTrip(
   directory: string,
   source: DatabaseService,
@@ -928,13 +1156,17 @@ async function smokePortableRoundTrip(
     exportId: PORTABLE_EXPORT_ID,
     exportedAt: FIXED_NOW.toISOString(),
     sourceAppVersion: '0.1.0',
-    sourceSchemaVersion: 8,
+    sourceSchemaVersion: 9,
     records: sourceRecords,
   });
   const parsedPackage = parsePortablePackage(packageBytes);
+  assert.equal(parsedPackage.manifest.formatVersion, 2);
   assert.equal(parsedPackage.manifest.recordCount, sourceRecords.length);
-  assert.equal(parsedPackage.manifest.sourceSchemaVersion, 8);
+  assert.equal(parsedPackage.manifest.sourceSchemaVersion, 9);
+  assert.equal(parsedPackage.manifest.counts.automations, 2);
+  assert.equal(parsedPackage.manifest.counts.enabledAutomations, 2);
   assert.deepEqual(parsedPackage.records, sourceRecords);
+  const pausedRecords = pausePortableAutomationDefinitions(sourceRecords);
 
   const destinationPath = join(directory, `import-${PORTABLE_IMPORT_ID}.sqlite3`);
   const stager = new AtomicImportStager({
@@ -964,11 +1196,23 @@ async function smokePortableRoundTrip(
   try {
     const initialized = await imported.open();
     assert.deepEqual(initialized.migration, {
-      fromVersion: 8,
-      toVersion: 8,
+      fromVersion: 9,
+      toVersion: 9,
       applied: [],
     });
-    assert.deepEqual(await imported.readPortableRecords(), sourceRecords);
+    assert.deepEqual(await imported.readPortableRecords(), pausedRecords);
+    const importedAutomations = await imported.getAutomationSnapshot({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+    });
+    assert.equal(importedAutomations.items.length, 2);
+    assert.equal(
+      importedAutomations.items.every(({ enabled }) => !enabled),
+      true,
+    );
+    assert.equal(
+      importedAutomations.items.every(({ lastRun }) => lastRun.status === 'never'),
+      true,
+    );
     assert.deepEqual((await imported.getBackupSchedulerState()).policy, localBackupPolicy);
     assert.deepEqual(await imported.getTerminalPreferences(DEFAULT_WORKSPACE_ID), {
       workspaceId: DEFAULT_WORKSPACE_ID,
@@ -995,60 +1239,91 @@ async function smokePortableRoundTrip(
     await imported?.close().catch(() => undefined);
   }
 
-  const legacyDirectory = join(directory, 'legacy v7 package');
-  await mkdir(legacyDirectory, { recursive: true });
-  const legacyPackage = parsePortablePackage(
-    serializePortablePackage({
+  const legacyRecords = sourceRecords.filter(({ type }) => type !== 'automation-definition');
+  for (const sourceSchemaVersion of [7, 8] as const) {
+    const legacyDirectory = join(directory, `legacy v${sourceSchemaVersion} package`);
+    await mkdir(legacyDirectory, { recursive: true });
+    const legacyBytes = serializePortablePackage({
       exportId: PORTABLE_EXPORT_ID,
       exportedAt: FIXED_NOW.toISOString(),
       sourceAppVersion: '0.1.0',
-      sourceSchemaVersion: 7,
-      records: sourceRecords,
-    }),
-  );
-  assert.equal(legacyPackage.manifest.sourceSchemaVersion, 7);
-  const legacyDestinationPath = join(legacyDirectory, `import-${PORTABLE_IMPORT_ID}.sqlite3`);
-  const legacyStager = new AtomicImportStager({
-    directory: legacyDirectory,
-    idFactory: () => PORTABLE_STAGING_ID,
-    driver: new DatabaseImportStagingDriver({
-      localBackupPolicy,
-      now: () => FIXED_NOW,
-      idFactory: () => PORTABLE_DATABASE_ID,
-    }),
-  });
-  const legacyStagingContext = {
-    importId: PORTABLE_IMPORT_ID,
-    package: legacyPackage,
-    destinationPath: legacyDestinationPath,
-  };
-  await legacyStager.stage(legacyStagingContext);
-  await legacyStager.validate(legacyStagingContext);
-
-  let legacyImported: DatabaseService | undefined = new DatabaseService({
-    dataDirectory: legacyDirectory,
-    databaseFileName: basename(legacyDestinationPath),
-    now: () => FIXED_NOW,
-    taskTodayFactory: () => FIXED_TODAY,
-    scheduleTodayFactory: () => FIXED_TODAY,
-  });
-  try {
-    const initialized = await legacyImported.open();
-    assert.deepEqual(initialized.migration, {
-      fromVersion: 8,
-      toVersion: 8,
-      applied: [],
+      sourceSchemaVersion,
+      records: legacyRecords,
     });
-    assert.deepEqual(await legacyImported.readPortableRecords(), sourceRecords);
-    assert.equal(
-      (await legacyImported.getTerminalPreferences(DEFAULT_WORKSPACE_ID)).preferredProfileId,
-      'system-default',
-    );
-    await legacyImported.close();
-    legacyImported = undefined;
-  } finally {
-    await legacyImported?.close().catch(() => undefined);
+    const legacyManifestLine = Buffer.from(legacyBytes)
+      .toString('utf8')
+      .slice(0, Buffer.from(legacyBytes).indexOf(0x0a));
+    const rawLegacyManifest = JSON.parse(legacyManifestLine) as {
+      readonly counts: Record<string, unknown>;
+    };
+    assert.equal('automations' in rawLegacyManifest.counts, false);
+    assert.equal('enabledAutomations' in rawLegacyManifest.counts, false);
+    const legacyPackage = parsePortablePackage(legacyBytes);
+    assert.equal(legacyPackage.manifest.formatVersion, 1);
+    assert.equal(legacyPackage.manifest.sourceSchemaVersion, sourceSchemaVersion);
+    const legacyDestinationPath = join(legacyDirectory, `import-${PORTABLE_IMPORT_ID}.sqlite3`);
+    const legacyStager = new AtomicImportStager({
+      directory: legacyDirectory,
+      idFactory: () => PORTABLE_STAGING_ID,
+      driver: new DatabaseImportStagingDriver({
+        localBackupPolicy,
+        now: () => FIXED_NOW,
+        idFactory: () => PORTABLE_DATABASE_ID,
+      }),
+    });
+    const legacyStagingContext = {
+      importId: PORTABLE_IMPORT_ID,
+      package: legacyPackage,
+      destinationPath: legacyDestinationPath,
+    };
+    await legacyStager.stage(legacyStagingContext);
+    await legacyStager.validate(legacyStagingContext);
+
+    let legacyImported: DatabaseService | undefined = new DatabaseService({
+      dataDirectory: legacyDirectory,
+      databaseFileName: basename(legacyDestinationPath),
+      now: () => FIXED_NOW,
+      taskTodayFactory: () => FIXED_TODAY,
+      scheduleTodayFactory: () => FIXED_TODAY,
+    });
+    try {
+      const initialized = await legacyImported.open();
+      assert.deepEqual(initialized.migration, {
+        fromVersion: 9,
+        toVersion: 9,
+        applied: [],
+      });
+      assert.deepEqual(await legacyImported.readPortableRecords(), legacyRecords);
+      assert.deepEqual(
+        (await legacyImported.getAutomationSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).items,
+        [],
+      );
+      assert.equal(
+        (await legacyImported.getTerminalPreferences(DEFAULT_WORKSPACE_ID)).preferredProfileId,
+        'system-default',
+      );
+      await legacyImported.close();
+      legacyImported = undefined;
+    } finally {
+      await legacyImported?.close().catch(() => undefined);
+    }
   }
+}
+
+function pausePortableAutomationDefinitions(
+  records: readonly PortableDataRecord[],
+): readonly PortableDataRecord[] {
+  return records.map((record) =>
+    record.type === 'automation-definition'
+      ? {
+          ...record,
+          data: {
+            ...record.data,
+            enabled: false,
+          },
+        }
+      : record,
+  );
 }
 
 async function smokeVersionOneUpgrade(dataDirectory: string): Promise<void> {
@@ -1074,7 +1349,7 @@ async function smokeVersionOneUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 1);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 1);
     assert.equal((await service.getWorkspaceSnapshot()).currentWorkspaceId, DEFAULT_WORKSPACE_ID);
     assert.deepEqual(
@@ -1142,7 +1417,7 @@ async function smokeVersionTwoUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 2);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 2);
     assert.deepEqual(
       (await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).entries,
@@ -1239,7 +1514,7 @@ async function smokeVersionThreeUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 3);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 3);
     const beforeConversion = await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(beforeConversion.todayDate, FIXED_TODAY);
@@ -1352,7 +1627,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 4);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 4);
     const preservedInbox = await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(preservedInbox.entries.length, 1);
@@ -1425,7 +1700,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
       scheduleTodayFactory: () => FIXED_TODAY,
     });
     const reopened = await service.open();
-    assert.deepEqual(reopened.migration, { fromVersion: 8, toVersion: 8, applied: [] });
+    assert.deepEqual(reopened.migration, { fromVersion: 9, toVersion: 9, applied: [] });
     assert.equal(
       (await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).tasks[0]?.id,
       FIRST_TASK_ID,
@@ -1496,7 +1771,7 @@ async function smokeVersionFiveUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 5);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 5);
     assert.equal(
       (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]?.id,
@@ -1593,7 +1868,7 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 6);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 6);
     assert.equal(
       (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]?.id,
@@ -1629,7 +1904,7 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
     service = undefined;
     const upgradedSnapshot = new DatabaseSync(databasePath, { readOnly: true });
     try {
-      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 8);
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 9);
       assert.equal(
         upgradedSnapshot
           .prepare("SELECT COUNT(*) AS count FROM notes_search WHERE notes_search MATCH '搜索索引'")
@@ -1686,7 +1961,7 @@ async function smokeVersionSevenUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await upgradedService.open();
     assert.equal(upgraded.migration.fromVersion, 7);
-    assert.equal(upgraded.migration.toVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 7);
     assert.equal(
       (await upgradedService.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]
@@ -1728,7 +2003,7 @@ async function smokeVersionSevenUpgrade(dataDirectory: string): Promise<void> {
       readOnly: true,
     });
     try {
-      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 8);
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 9);
       assert.equal(
         upgradedSnapshot
           .prepare('SELECT COUNT(*) AS count FROM workspace_terminal_preferences')
@@ -1740,6 +2015,79 @@ async function smokeVersionSevenUpgrade(dataDirectory: string): Promise<void> {
     }
   } finally {
     await upgradedService?.close().catch(() => undefined);
+  }
+}
+
+async function smokeVersionEightUpgrade(dataDirectory: string): Promise<void> {
+  let legacy: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    migrations: DEFAULT_MIGRATIONS.slice(0, 8),
+    now: () => FIXED_NOW,
+    workspaceIdFactory: () => DEFAULT_WORKSPACE_ID,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+    browserTabIdFactory: () => FIRST_BROWSER_TAB_ID,
+  });
+  try {
+    const initialized = await legacy.open();
+    assert.equal(initialized.migration.toVersion, 8);
+    let preferences = await legacy.getTerminalPreferences(DEFAULT_WORKSPACE_ID);
+    preferences = await legacy.updateTerminalProfilePreference({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      preferredProfileId: 'bash',
+      expectedRevision: preferences.revision,
+    });
+    assert.equal(preferences.revision, 2);
+    await legacy.close();
+    legacy = undefined;
+  } finally {
+    await legacy?.close().catch(() => undefined);
+  }
+
+  const upgradedService = new DatabaseService({
+    dataDirectory,
+    now: () => FIXED_NOW,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+  });
+  try {
+    const upgraded = await upgradedService.open();
+    assert.equal(upgraded.migration.fromVersion, 8);
+    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.preMigrationBackup?.schemaVersion, 8);
+    assert.equal(
+      (await upgradedService.getTerminalPreferences(DEFAULT_WORKSPACE_ID)).preferredProfileId,
+      'bash',
+    );
+    assert.deepEqual(
+      (await upgradedService.getAutomationSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).items,
+      [],
+    );
+
+    const backup = upgraded.preMigrationBackup;
+    assert.ok(backup);
+    const legacySnapshot = new DatabaseSync(join(dataDirectory, 'backups', backup.fileName), {
+      readOnly: true,
+    });
+    try {
+      assert.equal(legacySnapshot.prepare('PRAGMA user_version').get()?.user_version, 8);
+      assert.equal(
+        legacySnapshot
+          .prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'automations'")
+          .get()?.count,
+        0,
+      );
+      assert.equal(
+        legacySnapshot
+          .prepare('SELECT preferred_profile_id FROM workspace_terminal_preferences')
+          .get()?.preferred_profile_id,
+        'bash',
+      );
+    } finally {
+      legacySnapshot.close();
+    }
+  } finally {
+    await upgradedService.close().catch(() => undefined);
   }
 }
 

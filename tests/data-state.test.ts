@@ -252,6 +252,8 @@ function importPreview(): DataImportPreview {
       scheduleItems: 6,
       browserTabs: 7,
       browserBookmarks: 8,
+      automations: 9,
+      enabledAutomations: 2,
     },
     includesArchivedData: true,
     includesBrowserData: true,

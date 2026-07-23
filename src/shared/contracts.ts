@@ -60,6 +60,14 @@ export const IPC_CHANNELS = {
     update: 'schedule:update',
     archive: 'schedule:archive',
   },
+  automation: {
+    getSnapshot: 'automation:get-snapshot',
+    create: 'automation:create',
+    update: 'automation:update',
+    setEnabled: 'automation:set-enabled',
+    archive: 'automation:archive',
+    changed: 'automation:changed',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -331,6 +339,8 @@ export interface DataImportCounts {
   readonly scheduleItems: number;
   readonly browserTabs: number;
   readonly browserBookmarks: number;
+  readonly automations: number;
+  readonly enabledAutomations: number;
 }
 
 export interface DataImportPreview {
@@ -636,6 +646,99 @@ export interface ScheduleUpdateInput extends ScheduleTargetInput {
   readonly endMinute: number;
 }
 
+export const AUTOMATION_CADENCES = ['daily', 'weekly'] as const;
+
+export type AutomationCadence = (typeof AUTOMATION_CADENCES)[number];
+
+export const AUTOMATION_ACTION_KINDS = ['create-today-task', 'create-note'] as const;
+
+export type AutomationActionKind = (typeof AUTOMATION_ACTION_KINDS)[number];
+
+export type AutomationAction =
+  | {
+      readonly kind: 'create-today-task';
+      readonly title: string;
+    }
+  | {
+      readonly kind: 'create-note';
+      readonly title: string;
+      readonly body: string;
+    };
+
+export interface AutomationSchedule {
+  readonly cadence: AutomationCadence;
+  readonly localTimeMinute: number;
+  readonly weekday: number | null;
+}
+
+export type AutomationRunErrorCode =
+  'action-failed' | 'database-unavailable' | 'workspace-unavailable';
+
+export type AutomationLastRun =
+  | {
+      readonly status: 'never';
+    }
+  | {
+      readonly status: 'success';
+      readonly attemptedAt: string;
+      readonly completedAt: string;
+      readonly outputKind: 'task' | 'note';
+    }
+  | {
+      readonly status: 'failed';
+      readonly attemptedAt: string;
+      readonly errorCode: AutomationRunErrorCode;
+      readonly consecutiveFailures: number;
+      readonly nextRetryAt: string;
+    };
+
+export interface AutomationItem {
+  readonly id: string;
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly schedule: AutomationSchedule;
+  readonly action: AutomationAction;
+  readonly revision: number;
+  readonly nextRunAt: string | null;
+  readonly lastRun: AutomationLastRun;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface AutomationSnapshot {
+  readonly workspaceId: string;
+  readonly items: readonly AutomationItem[];
+}
+
+export interface AutomationCreateInput {
+  readonly workspaceId: string;
+  readonly name: string;
+  readonly schedule: AutomationSchedule;
+  readonly action: AutomationAction;
+}
+
+export interface AutomationTargetInput {
+  readonly workspaceId: string;
+  readonly automationId: string;
+  readonly expectedRevision: number;
+}
+
+export interface AutomationUpdateInput extends AutomationTargetInput {
+  readonly name: string;
+  readonly schedule: AutomationSchedule;
+  readonly action: AutomationAction;
+}
+
+export interface AutomationSetEnabledInput extends AutomationTargetInput {
+  readonly enabled: boolean;
+}
+
+export interface AutomationChangedEvent {
+  readonly workspaceId: string;
+  readonly reason: 'definition' | 'run';
+  readonly outputKind: 'task' | 'note' | null;
+}
+
 export const TERMINAL_PROFILE_IDS = [
   'system-default',
   'powershell-7',
@@ -819,6 +922,14 @@ export interface WorkbenchApi {
     create(input: ScheduleCreateInput): Promise<ScheduleSnapshot>;
     update(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archive(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
+  };
+  automation: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;
+    create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
+    update(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
+    setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
+    archive(input: AutomationTargetInput): Promise<AutomationSnapshot>;
+    onChanged(listener: (event: AutomationChangedEvent) => void): Unsubscribe;
   };
   window: {
     minimize(): Promise<void>;

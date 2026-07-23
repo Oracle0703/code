@@ -45,7 +45,7 @@ describe('note service', () => {
       noteIds: [NOTE_A],
     });
     const opened = await service.open();
-    expect(opened.migration).toMatchObject({ fromVersion: 0, toVersion: 8 });
+    expect(opened.migration).toMatchObject({ fromVersion: 0, toVersion: 9 });
 
     let snapshot = await service.createNote({
       workspaceId: WORKSPACE_A,
