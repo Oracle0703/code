@@ -2,20 +2,32 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, type WebContents } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
-import { IPC_CHANNELS } from '../shared/contracts';
+import { IPC_CHANNELS, type WindowCloseReason } from '../shared/contracts';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { BrowserController } from './browser/browser-controller';
 import { DatabaseError, DatabaseService } from './database';
 import { registerIpcHandlers } from './ipc/register-handlers';
 import { isAllowedBrowserUrl } from './security/browser-url';
+import {
+  finishApprovedCloseSurfaces,
+  prepareApprovedCloseSurfaces,
+  runAfterCloseApproval,
+  settleShutdownsBefore,
+} from './shutdown-coordinator';
 import { createTrustedRendererLocation } from './security/trusted-renderer';
 import { TerminalManager } from './terminal/terminal-manager';
+import { WindowCloseCoordinator } from './window-close-coordinator';
+import { createWorkspaceIpcAdapter } from './workspace-ipc-adapter';
 
 let mainWindow: BrowserWindow | null = null;
 let databaseService: DatabaseService | null = null;
 let databaseShutdownPromise: Promise<void> | null = null;
 let allowQuit = false;
 let startupFailureShown = false;
+const browserShutdowns = new Set<() => Promise<void>>();
+const closeApprovalRequests = new Set<(reason: WindowCloseReason) => Promise<boolean>>();
+const approvedCloseSurfaces = new Set<BrowserWindow>();
+let quitApprovalPromise: Promise<void> | null = null;
 
 if (squirrelStartup) {
   app.quit();
@@ -34,6 +46,8 @@ function denyWebviewAttachment(contents: WebContents): void {
 }
 
 async function createMainWindow(database: DatabaseService): Promise<void> {
+  const initialWorkspaceSnapshot = await database.getWorkspaceSnapshot();
+  let rendererWorkspaceId = initialWorkspaceSnapshot.currentWorkspaceId;
   const rendererHtmlPath = join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`);
   const isDevelopmentRenderer = Boolean(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   const rendererEntryUrl = isDevelopmentRenderer
@@ -66,6 +80,7 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     },
   });
   mainWindow = window;
+  approvedCloseSurfaces.add(window);
 
   window.webContents.on('before-input-event', (event, input) => {
     if (
@@ -85,24 +100,44 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     }
   });
 
-  const browser = new BrowserController(
-    window,
-    (state) => {
-      sendToRenderer(IPC_CHANNELS.browser.stateChanged, state);
+  const browser = new BrowserController(window, database, {
+    onStateChange: (snapshot) => {
+      sendToRenderer(IPC_CHANNELS.browser.stateChanged, snapshot);
     },
-    () => {
+    onQuickCapture: () => {
       sendToRenderer(IPC_CHANNELS.inbox.captureRequested, undefined);
     },
-  );
+    onFocusAddress: () => {
+      sendToRenderer(IPC_CHANNELS.browser.focusAddressRequested, undefined);
+    },
+  });
+  const closeCoordinator = new WindowCloseCoordinator({
+    sendRequest: (request) => {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) {
+        throw new Error('The window renderer is unavailable.');
+      }
+      window.webContents.send(IPC_CHANNELS.window.closeRequested, request);
+    },
+  });
+  const requestCloseApproval = (reason: WindowCloseReason): Promise<boolean> =>
+    closeCoordinator.requestApproval(reason);
+  closeApprovalRequests.add(requestCloseApproval);
+  const workspaceForIpc = createWorkspaceIpcAdapter(database, browser, (snapshot) => {
+    rendererWorkspaceId = snapshot.currentWorkspaceId;
+  });
   const terminal = new TerminalManager({
     data: (event) => sendToRenderer(IPC_CHANNELS.terminal.data, event),
     exit: (event) => sendToRenderer(IPC_CHANNELS.terminal.exit, event),
   });
   const unregisterIpc = registerIpcHandlers({
     window,
+    windowLifecycle: {
+      markCloseProtectionReady: () => closeCoordinator.markReady(),
+      respondToCloseRequest: (response) => closeCoordinator.respond(response),
+    },
     browser,
     database,
-    workspace: database,
+    workspace: workspaceForIpc,
     inbox: database,
     task: database,
     note: database,
@@ -117,19 +152,24 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     callback(false);
   });
 
+  const requestTrustedRendererUrl = (url: string): void => {
+    if (!isAllowedBrowserUrl(url)) return;
+    sendToRenderer(IPC_CHANNELS.browser.openUrlRequested, {
+      workspaceId: rendererWorkspaceId,
+      url,
+    });
+  };
+
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (isAllowedBrowserUrl(url)) {
-      browser.navigate(url);
-      browser.setVisible(true);
-    }
+    requestTrustedRendererUrl(url);
     return { action: 'deny' };
   });
   window.webContents.on('will-navigate', (event, url) => {
     event.preventDefault();
-    if (isAllowedBrowserUrl(url)) {
-      browser.navigate(url);
-      browser.setVisible(true);
-    }
+    requestTrustedRendererUrl(url);
+  });
+  window.webContents.on('render-process-gone', () => {
+    closeCoordinator.markUnavailable();
   });
 
   window.once('ready-to-show', () => {
@@ -137,11 +177,21 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
   });
 
   let cleanedUp = false;
+  let closeFlowPromise: Promise<void> | null = null;
+  let browserShutdownPromise: Promise<void> | null = null;
+  const shutdownBrowser = (): Promise<void> => {
+    browserShutdownPromise ??= browser.shutdown();
+    return browserShutdownPromise;
+  };
+  browserShutdowns.add(shutdownBrowser);
   const cleanUp = (): void => {
     if (cleanedUp) {
       return;
     }
     cleanedUp = true;
+    closeCoordinator.dispose();
+    closeApprovalRequests.delete(requestCloseApproval);
+    approvedCloseSurfaces.delete(window);
     unregisterIpc();
     terminal.closeAll();
     browser.destroy();
@@ -149,7 +199,39 @@ async function createMainWindow(database: DatabaseService): Promise<void> {
     rendererSession.setPermissionRequestHandler(null);
   };
 
+  window.on('close', (event) => {
+    if (allowQuit) return;
+    event.preventDefault();
+    if (closeFlowPromise) return;
+    closeFlowPromise = runAfterCloseApproval([() => requestCloseApproval('window')], async () => {
+      prepareApprovedCloseSurfaces([window], (error) => {
+        console.error('Daily Workbench failed to disable its window before closing.', error);
+      });
+      try {
+        await shutdownBrowser();
+      } catch (error) {
+        console.error('Daily Workbench failed to flush browser state before closing.', error);
+      } finally {
+        // The approved window is already disabled and hidden, so force-close it without
+        // reopening a second Renderer beforeunload decision after the asynchronous flush.
+        finishApprovedCloseSurfaces([window], (error) => {
+          console.error('Daily Workbench failed to destroy its approved window.', error);
+        });
+      }
+    })
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        console.error('Daily Workbench could not complete the approved window close.', error);
+      })
+      .finally(() => {
+        closeFlowPromise = null;
+      });
+  });
+
   window.once('closed', () => {
+    browserShutdowns.delete(shutdownBrowser);
+    closeApprovalRequests.delete(requestCloseApproval);
+    approvedCloseSurfaces.delete(window);
     cleanUp();
     if (mainWindow === window) {
       mainWindow = null;
@@ -204,16 +286,44 @@ if (!hasSingleInstanceLock) {
     }
 
     event.preventDefault();
-    if (!databaseShutdownPromise) {
-      databaseShutdownPromise = databaseService
-        .close()
+    if (!databaseShutdownPromise && !quitApprovalPromise) {
+      const activeDatabase = databaseService;
+      quitApprovalPromise = runAfterCloseApproval(
+        [...closeApprovalRequests].map((requestApproval) => () => requestApproval('application')),
+        async () => {
+          prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
+            console.error('Daily Workbench failed to disable a window before quitting.', error);
+          });
+          databaseShutdownPromise = settleShutdownsBefore(
+            browserShutdowns,
+            () => activeDatabase.close(),
+            (error) => {
+              console.error(
+                'Daily Workbench failed to flush browser state before quitting.',
+                error,
+              );
+            },
+          )
+            .catch((error: unknown) => {
+              console.error('Daily Workbench failed to close its database cleanly.', error);
+            })
+            .finally(() => {
+              databaseService = null;
+              allowQuit = true;
+              finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
+                console.error('Daily Workbench failed to destroy an approved window.', error);
+              });
+              app.quit();
+            });
+          await databaseShutdownPromise;
+        },
+      )
+        .then(() => undefined)
         .catch((error: unknown) => {
-          console.error('Daily Workbench failed to close its database cleanly.', error);
+          console.error('Daily Workbench could not complete the approved application quit.', error);
         })
         .finally(() => {
-          databaseService = null;
-          allowQuit = true;
-          app.quit();
+          quitApprovalPromise = null;
         });
     }
   });

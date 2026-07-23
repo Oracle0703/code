@@ -10,7 +10,7 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 export function IconButton({
   label,
   children,
-  active = false,
+  active,
   tooltipSide = 'bottom',
   className = '',
   type = 'button',
@@ -22,7 +22,7 @@ export function IconButton({
       type={type}
       className={`icon-button ${active ? 'is-active' : ''} ${className}`.trim()}
       aria-label={label}
-      aria-pressed={active || undefined}
+      aria-pressed={active === undefined ? buttonProps['aria-pressed'] : active}
       data-tooltip={label}
       data-tooltip-side={tooltipSide}
     >

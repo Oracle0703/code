@@ -33,9 +33,9 @@ afterEach(async () => {
 describe('v5 notes and schedule schema', () => {
   it('registers v5 as a contiguous immutable migration', async () => {
     const database = await createDatabase();
-    const result = new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+    const result = new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 5)).apply(database);
     expect(result).toMatchObject({ fromVersion: 0, toVersion: 5 });
-    expect(DEFAULT_MIGRATIONS.at(-1)).toMatchObject({
+    expect(DEFAULT_MIGRATIONS.at(4)).toMatchObject({
       version: 5,
       name: 'notes_schedule',
     });
@@ -155,7 +155,7 @@ async function createDatabase(): Promise<SqliteAdapter> {
 
 async function createV5Database(): Promise<SqliteAdapter> {
   const database = await createDatabase();
-  new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+  new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 5)).apply(database);
   return database;
 }
 

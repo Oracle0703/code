@@ -62,8 +62,14 @@ import { useNoteController } from './hooks/useNoteController';
 import { useScheduleController } from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
+import { openBrowserUrlInWorkspace } from './browser-state';
 import type { ViewId } from './model';
 import { defaultScheduleRange } from './schedule-state';
+import {
+  approveWindowClose,
+  shouldProtectWindowUnload,
+  synchronizeDirtyDraft,
+} from './window-close';
 
 const viewLabels: Record<ViewId, string> = {
   today: '今日',
@@ -102,6 +108,8 @@ export function App() {
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
   const activeResizeFinishRef = useRef<(() => void) | null>(null);
+  const currentWorkspaceIdRef = useRef<string | null>(null);
+  const noteDraftDirtyRef = useRef(false);
   const snapshot = workspaceController.snapshot;
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
@@ -136,7 +144,29 @@ export function App() {
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
+  useEffect(() => {
+    currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
+  }, [snapshot?.currentWorkspaceId]);
+
+  const updateNoteDraftDirty = useCallback(
+    (dirty: boolean) => synchronizeDirtyDraft(noteDraftDirtyRef, setNoteDraftDirty, dirty),
+    [],
+  );
+
   const updatePreferences = workspaceController.updatePreferences;
+  const openUrlInWorkspace = useCallback(
+    (workspaceId: string, url: string) => {
+      if (currentWorkspaceIdRef.current !== workspaceId) return;
+      updatePreferences({ browserOpen: true }, true, workspaceId);
+      void openBrowserUrlInWorkspace(
+        window.workbench.browser,
+        workspaceId,
+        url,
+        () => currentWorkspaceIdRef.current === workspaceId,
+      ).catch(() => undefined);
+    },
+    [updatePreferences],
+  );
   const confirmLeaveNoteDraft = useCallback(
     () => !noteDraftDirty || window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
     [noteDraftDirty],
@@ -252,15 +282,31 @@ export function App() {
 
   useEffect(() => window.workbench.inbox.onCaptureRequest(openQuickCapture), [openQuickCapture]);
 
+  useEffect(
+    () =>
+      window.workbench.browser.onOpenUrlRequest(({ workspaceId, url }) => {
+        openUrlInWorkspace(workspaceId, url);
+      }),
+    [openUrlInWorkspace],
+  );
+
   useEffect(() => {
-    if (!noteDraftDirty) return;
+    return window.workbench.window.onCloseRequest(() => {
+      return approveWindowClose(noteDraftDirtyRef.current, () =>
+        window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
+      );
+    });
+  }, []);
+
+  useEffect(() => {
     const protectDraft = (event: BeforeUnloadEvent) => {
+      if (!shouldProtectWindowUnload(noteDraftDirtyRef.current)) return;
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', protectDraft);
     return () => window.removeEventListener('beforeunload', protectDraft);
-  }, [noteDraftDirty]);
+  }, []);
 
   useEffect(() => {
     const updateViewport = () => setViewportHeight(window.innerHeight);
@@ -680,9 +726,7 @@ export function App() {
         <WindowControls
           maximized={maximized}
           onToggleMaximize={toggleWindowMaximize}
-          onClose={() => {
-            if (confirmLeaveNoteDraft()) void window.workbench?.window.close();
-          }}
+          onClose={() => void window.workbench?.window.close()}
         />
       </header>
 
@@ -875,14 +919,13 @@ export function App() {
                     pendingCreate={noteController.pendingCreate}
                     requestedNoteId={requestedNoteId}
                     onRequestedNoteHandled={() => setRequestedNoteId(null)}
-                    onDirtyChange={setNoteDraftDirty}
+                    onDirtyChange={updateNoteDraftDirty}
                     onRetry={noteController.retry}
                     onCreate={noteController.create}
                     onUpdate={noteController.update}
                     onArchive={noteController.archive}
                     onOpenLink={(url) => {
-                      updatePreferences({ browserOpen: true });
-                      void window.workbench.browser.navigate(url).catch(() => undefined);
+                      openUrlInWorkspace(snapshot.currentWorkspaceId, url);
                     }}
                   />
                 ) : (
@@ -928,6 +971,7 @@ export function App() {
                     }}
                   />
                   <BrowserPanel
+                    workspaceId={snapshot.currentWorkspaceId}
                     visible={!overlayOpen}
                     onClose={() => updatePreferences({ browserOpen: false })}
                   />

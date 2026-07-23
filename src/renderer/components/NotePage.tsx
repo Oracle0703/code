@@ -8,7 +8,15 @@ import {
   Plus,
   Search,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react';
 import type { Note } from '../../shared/contracts';
 import { NOTE_BODY_MAX_LENGTH, NOTE_TITLE_MAX_LENGTH } from '../../shared/note-domain';
 import { filterNotes, isNoteDraftDirty, noteExcerpt } from '../note-state';
@@ -131,11 +139,11 @@ export function NotePage({
     window.requestAnimationFrame(() => titleInputRef.current?.focus());
   }, [confirmDiscard, onRequestedNoteHandled]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
 
-  useEffect(
+  useLayoutEffect(
     () => () => {
       onDirtyChange(false);
     },
