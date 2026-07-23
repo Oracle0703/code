@@ -7,6 +7,11 @@ import {
   parseInboxCreateInput,
   parseInboxTargetInput,
   parseInboxUndoInput,
+  parseTaskConvertInboxInput,
+  parseTaskCreateInput,
+  parseTaskPlanningInput,
+  parseTaskRenameInput,
+  parseTaskStatusInput,
   parseSessionId,
   parseTerminalCreateOptions,
   parseTerminalSize,
@@ -20,6 +25,7 @@ import { WORKSPACE_COLORS } from '../src/shared/contracts';
 const WORKSPACE_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ENTRY_ID = '223e4567-e89b-42d3-a456-426614174000';
 const UNDO_TOKEN = '323e4567-e89b-42d3-a456-426614174000';
+const TASK_ID = '423e4567-e89b-42d3-a456-426614174000';
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -212,6 +218,83 @@ describe('IPC validation', () => {
         category: 'note',
         id: ENTRY_ID,
         archivedAt: new Date().toISOString(),
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts exact task operations while preserving Unicode title content', () => {
+    expect(
+      parseTaskCreateInput({
+        workspaceId: WORKSPACE_ID,
+        title: '  ＡPI e\u0301 👩‍💻  ',
+        planning: 'today',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      title: 'ＡPI e\u0301 👩‍💻',
+      planning: 'today',
+    });
+    expect(
+      parseTaskRenameInput({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, title: '新的标题' }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, title: '新的标题' });
+    expect(
+      parseTaskStatusInput({
+        workspaceId: WORKSPACE_ID,
+        taskId: TASK_ID,
+        status: 'completed',
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, status: 'completed' });
+    expect(
+      parseTaskPlanningInput({
+        workspaceId: WORKSPACE_ID,
+        taskId: TASK_ID,
+        planning: 'none',
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, planning: 'none' });
+    expect(
+      parseTaskConvertInboxInput({
+        workspaceId: WORKSPACE_ID,
+        entryId: ENTRY_ID,
+        planning: 'today',
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID, planning: 'today' });
+  });
+
+  it('rejects invalid task values and renderer-owned persistence fields', () => {
+    for (const title of ['', '  ', 'line one\nline two', '\u0000', 'x'.repeat(501)]) {
+      expect(() =>
+        parseTaskCreateInput({ workspaceId: WORKSPACE_ID, title, planning: 'today' }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      parseTaskStatusInput({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, status: 'blocked' }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTaskPlanningInput({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, planning: 'tomorrow' }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTaskRenameInput({
+        workspaceId: WORKSPACE_ID,
+        taskId: TASK_ID.toUpperCase(),
+        title: '无效 ID',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTaskCreateInput({
+        workspaceId: WORKSPACE_ID,
+        title: '不能伪造字段',
+        planning: 'today',
+        id: TASK_ID,
+        sourceInboxEntryId: ENTRY_ID,
+        completedAt: new Date().toISOString(),
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTaskConvertInboxInput({
+        workspaceId: WORKSPACE_ID,
+        entryId: ENTRY_ID,
+        planning: 'today',
+        title: '不能覆盖来源正文',
       }),
     ).toThrow(TypeError);
   });

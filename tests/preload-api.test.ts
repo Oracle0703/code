@@ -77,3 +77,39 @@ describe('preload inbox API', () => {
     expect(electron.removeListener).toHaveBeenCalledWith('inbox:capture-requested', wrapped);
   });
 });
+
+describe('preload task API', () => {
+  it('exposes only the declared frozen task methods', () => {
+    expect(Object.keys(api.task).sort()).toEqual([
+      'convertInbox',
+      'create',
+      'getSnapshot',
+      'rename',
+      'updatePlanning',
+      'updateStatus',
+    ]);
+    expect(Object.isFrozen(api.task)).toBe(true);
+  });
+
+  it('forwards exact task inputs through the allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const taskId = '423e4567-e89b-42d3-a456-426614174000';
+    const entryId = '223e4567-e89b-42d3-a456-426614174000';
+
+    await api.task.getSnapshot({ workspaceId });
+    await api.task.create({ workspaceId, title: '真实任务', planning: 'today' });
+    await api.task.rename({ workspaceId, taskId, title: '更新标题' });
+    await api.task.updateStatus({ workspaceId, taskId, status: 'in_progress' });
+    await api.task.updatePlanning({ workspaceId, taskId, planning: 'none' });
+    await api.task.convertInbox({ workspaceId, entryId, planning: 'today' });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['task:get-snapshot', { workspaceId }],
+      ['task:create', { workspaceId, title: '真实任务', planning: 'today' }],
+      ['task:rename', { workspaceId, taskId, title: '更新标题' }],
+      ['task:update-status', { workspaceId, taskId, status: 'in_progress' }],
+      ['task:update-planning', { workspaceId, taskId, planning: 'none' }],
+      ['task:convert-inbox', { workspaceId, entryId, planning: 'today' }],
+    ]);
+  });
+});

@@ -55,7 +55,7 @@ describe('inbox service', () => {
       inboxIds: [ENTRY_A],
     });
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 3 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 4 });
     await expect(service.getInboxSnapshot({ workspaceId: WORKSPACE_A })).resolves.toEqual({
       workspaceId: WORKSPACE_A,
       entries: [],
@@ -86,7 +86,7 @@ describe('inbox service', () => {
 
     const reopened = createService(dataDirectory);
     const result = await reopened.open();
-    expect(result.migration).toEqual({ fromVersion: 3, toVersion: 3, applied: [] });
+    expect(result.migration).toEqual({ fromVersion: 4, toVersion: 4, applied: [] });
     await expect(reopened.getInboxSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
       entries: [{ id: ENTRY_A, content: original.trim(), category: 'task' }],
     });
@@ -364,7 +364,7 @@ describe('inbox service', () => {
     await reopened.close();
   });
 
-  it('backs up active and archived entries without exposing a task conversion', async () => {
+  it('backs up active and archived entries without implicitly converting task categories', async () => {
     const dataDirectory = await createDataDirectory();
     const service = createService(dataDirectory, {
       workspaceIds: [WORKSPACE_A],
@@ -384,7 +384,7 @@ describe('inbox service', () => {
     });
     await service.archiveInboxEntry({ workspaceId: WORKSPACE_A, entryId: ENTRY_A });
     const backup = await service.createBackup();
-    expect(backup.schemaVersion).toBe(3);
+    expect(backup.schemaVersion).toBe(4);
     await service.close();
 
     const snapshot = new DatabaseSync(join(dataDirectory, 'backups', backup.fileName), {
@@ -401,11 +401,7 @@ describe('inbox service', () => {
           )
           .get(ENTRY_A),
       ).toEqual({ category: 'task', archived: 1 });
-      expect(
-        snapshot
-          .prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name LIKE 'task%'")
-          .get(),
-      ).toEqual({ count: 0 });
+      expect(snapshot.prepare('SELECT COUNT(*) AS count FROM tasks').get()).toEqual({ count: 0 });
     } finally {
       snapshot.close();
     }
@@ -443,7 +439,7 @@ describe('inbox service', () => {
 
     const service = createService(dataDirectory, { inboxIds: [ENTRY_A] });
     const result = await service.open();
-    expect(result.migration).toMatchObject({ fromVersion: 2, toVersion: 3 });
+    expect(result.migration).toMatchObject({ fromVersion: 2, toVersion: 4 });
     expect(result.preMigrationBackup).toMatchObject({
       reason: 'pre-migration',
       schemaVersion: 2,

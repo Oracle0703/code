@@ -9,6 +9,13 @@ import {
   type InboxSnapshot,
   type InboxTargetInput,
   type InboxUndoInput,
+  type TaskConversionResult,
+  type TaskConvertInboxInput,
+  type TaskCreateInput,
+  type TaskPlanningInput,
+  type TaskRenameInput,
+  type TaskSnapshot,
+  type TaskStatusInput,
   type WorkspaceCreateInput,
   type WorkspacePreferences,
   type WorkspacePreferencesInput,
@@ -28,6 +35,11 @@ import {
   parseInboxCreateInput,
   parseInboxTargetInput,
   parseInboxUndoInput,
+  parseTaskConvertInboxInput,
+  parseTaskCreateInput,
+  parseTaskPlanningInput,
+  parseTaskRenameInput,
+  parseTaskStatusInput,
   parseSessionId,
   parseTerminalCreateOptions,
   parseTerminalData,
@@ -61,6 +73,14 @@ interface IpcDependencies {
     archiveInboxEntry(input: InboxTargetInput): Promise<InboxArchiveResult>;
     undoInboxArchive(input: InboxUndoInput): Promise<InboxSnapshot>;
   };
+  task: {
+    getTaskSnapshot(input: WorkspaceTargetInput): Promise<TaskSnapshot>;
+    createTask(input: TaskCreateInput): Promise<TaskSnapshot>;
+    renameTask(input: TaskRenameInput): Promise<TaskSnapshot>;
+    updateTaskStatus(input: TaskStatusInput): Promise<TaskSnapshot>;
+    updateTaskPlanning(input: TaskPlanningInput): Promise<TaskSnapshot>;
+    convertInboxToTask(input: TaskConvertInboxInput): Promise<TaskConversionResult>;
+  };
   terminal: TerminalManager;
   trustedRendererLocation: TrustedRendererLocation;
 }
@@ -73,6 +93,7 @@ export function registerIpcHandlers({
   database,
   workspace,
   inbox,
+  task,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -154,6 +175,31 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.inbox.undoArchive, (_event, input, ...args) => {
     assertNoArguments(args, 'Undoing an inbox archive');
     return inbox.undoInboxArchive(parseInboxUndoInput(input));
+  });
+
+  register(IPC_CHANNELS.task.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the task snapshot');
+    return task.getTaskSnapshot(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.task.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating a task');
+    return task.createTask(parseTaskCreateInput(input));
+  });
+  register(IPC_CHANNELS.task.rename, (_event, input, ...args) => {
+    assertNoArguments(args, 'Renaming a task');
+    return task.renameTask(parseTaskRenameInput(input));
+  });
+  register(IPC_CHANNELS.task.updateStatus, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating a task status');
+    return task.updateTaskStatus(parseTaskStatusInput(input));
+  });
+  register(IPC_CHANNELS.task.updatePlanning, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating task planning');
+    return task.updateTaskPlanning(parseTaskPlanningInput(input));
+  });
+  register(IPC_CHANNELS.task.convertInbox, (_event, input, ...args) => {
+    assertNoArguments(args, 'Converting an inbox entry to a task');
+    return task.convertInboxToTask(parseTaskConvertInboxInput(input));
   });
 
   register(IPC_CHANNELS.window.minimize, () => {

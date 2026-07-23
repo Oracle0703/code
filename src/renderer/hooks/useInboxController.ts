@@ -273,9 +273,15 @@ export function useInboxController(workspaceId: string | null) {
     pendingCapture: workspaceId ? pendingCaptureWorkspaces.has(workspaceId) : false,
     pendingUndoTokens,
     undoNotices,
+    refresh: async () => {
+      if (workspaceId) await load(workspaceId);
+    },
     retry: () => {
       if (workspaceId) void load(workspaceId);
     },
+    reserveSnapshotRequest: (targetWorkspaceId: string) => beginRequest(targetWorkspaceId),
+    applyReservedSnapshot: (nextSnapshot: InboxSnapshot, sequence: number) =>
+      applySnapshot(nextSnapshot, sequence),
     clearOperationError: () => setOperationErrorState(null),
     create,
     categorize,

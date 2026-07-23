@@ -29,6 +29,14 @@ export const IPC_CHANNELS = {
     undoArchive: 'inbox:undo-archive',
     captureRequested: 'inbox:capture-requested',
   },
+  task: {
+    getSnapshot: 'task:get-snapshot',
+    create: 'task:create',
+    rename: 'task:rename',
+    updateStatus: 'task:update-status',
+    updatePlanning: 'task:update-planning',
+    convertInbox: 'task:convert-inbox',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -214,6 +222,65 @@ export interface InboxUndoInput {
   readonly undoToken: string;
 }
 
+export const TASK_STATUSES = ['todo', 'in_progress', 'completed'] as const;
+
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+export const TASK_PLANNING = ['today', 'none'] as const;
+
+export type TaskPlanning = (typeof TASK_PLANNING)[number];
+
+export interface Task {
+  readonly id: string;
+  readonly title: string;
+  readonly status: TaskStatus;
+  readonly plannedFor: string | null;
+  readonly sourceInboxEntryId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly completedAt: string | null;
+}
+
+export interface TaskSnapshot {
+  readonly workspaceId: string;
+  readonly todayDate: string;
+  readonly tasks: readonly Task[];
+}
+
+export interface TaskCreateInput {
+  readonly workspaceId: string;
+  readonly title: string;
+  readonly planning: TaskPlanning;
+}
+
+export interface TaskTargetInput {
+  readonly workspaceId: string;
+  readonly taskId: string;
+}
+
+export interface TaskRenameInput extends TaskTargetInput {
+  readonly title: string;
+}
+
+export interface TaskStatusInput extends TaskTargetInput {
+  readonly status: TaskStatus;
+}
+
+export interface TaskPlanningInput extends TaskTargetInput {
+  readonly planning: TaskPlanning;
+}
+
+export interface TaskConvertInboxInput {
+  readonly workspaceId: string;
+  readonly entryId: string;
+  readonly planning: TaskPlanning;
+}
+
+export interface TaskConversionResult {
+  readonly taskSnapshot: TaskSnapshot;
+  readonly inboxSnapshot: InboxSnapshot;
+}
+
 export const TERMINAL_SHELLS = ['default', 'powershell', 'cmd', 'wsl', 'bash', 'zsh'] as const;
 
 export type TerminalShell = (typeof TERMINAL_SHELLS)[number];
@@ -266,6 +333,14 @@ export interface WorkbenchApi {
     archive(input: InboxTargetInput): Promise<InboxArchiveResult>;
     undoArchive(input: InboxUndoInput): Promise<InboxSnapshot>;
     onCaptureRequest(listener: () => void): Unsubscribe;
+  };
+  task: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<TaskSnapshot>;
+    create(input: TaskCreateInput): Promise<TaskSnapshot>;
+    rename(input: TaskRenameInput): Promise<TaskSnapshot>;
+    updateStatus(input: TaskStatusInput): Promise<TaskSnapshot>;
+    updatePlanning(input: TaskPlanningInput): Promise<TaskSnapshot>;
+    convertInbox(input: TaskConvertInboxInput): Promise<TaskConversionResult>;
   };
   window: {
     minimize(): Promise<void>;
