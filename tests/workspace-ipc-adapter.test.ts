@@ -15,8 +15,12 @@ describe('workspace IPC adapter', () => {
     persistence.archiveWorkspace.mockResolvedValue(snapshot);
     const order: string[] = [];
     const browser = { discardWorkspace: vi.fn(() => order.push('discard')) };
+    const terminal = {
+      setActiveWorkspace: vi.fn(() => order.push('activate-terminal')),
+      discardWorkspace: vi.fn(() => order.push('discard-terminal')),
+    };
     const onSnapshot = vi.fn(() => order.push('snapshot'));
-    const adapter = createWorkspaceIpcAdapter(persistence, browser, onSnapshot);
+    const adapter = createWorkspaceIpcAdapter(persistence, browser, terminal, onSnapshot);
 
     await expect(adapter.archiveWorkspace({ workspaceId: WORKSPACE_A })).resolves.toBe(snapshot);
     expect(persistence.archiveWorkspace).toHaveBeenCalledExactlyOnceWith({
@@ -24,7 +28,9 @@ describe('workspace IPC adapter', () => {
     });
     expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(snapshot);
     expect(browser.discardWorkspace).toHaveBeenCalledExactlyOnceWith(WORKSPACE_A);
-    expect(order).toEqual(['discard', 'snapshot']);
+    expect(terminal.setActiveWorkspace).toHaveBeenCalledExactlyOnceWith(WORKSPACE_B);
+    expect(terminal.discardWorkspace).toHaveBeenCalledExactlyOnceWith(WORKSPACE_A);
+    expect(order).toEqual(['activate-terminal', 'discard', 'discard-terminal', 'snapshot']);
   });
 
   it('does not track or discard a workspace when archival fails', async () => {
@@ -32,12 +38,15 @@ describe('workspace IPC adapter', () => {
     const persistence = createPersistence();
     persistence.archiveWorkspace.mockRejectedValue(failure);
     const browser = { discardWorkspace: vi.fn() };
+    const terminal = { setActiveWorkspace: vi.fn(), discardWorkspace: vi.fn() };
     const onSnapshot = vi.fn();
-    const adapter = createWorkspaceIpcAdapter(persistence, browser, onSnapshot);
+    const adapter = createWorkspaceIpcAdapter(persistence, browser, terminal, onSnapshot);
 
     await expect(adapter.archiveWorkspace({ workspaceId: WORKSPACE_A })).rejects.toBe(failure);
     expect(onSnapshot).not.toHaveBeenCalled();
     expect(browser.discardWorkspace).not.toHaveBeenCalled();
+    expect(terminal.setActiveWorkspace).not.toHaveBeenCalled();
+    expect(terminal.discardWorkspace).not.toHaveBeenCalled();
   });
 
   it('does not report a committed archive as failed when native cleanup throws', async () => {
@@ -49,11 +58,19 @@ describe('workspace IPC adapter', () => {
         throw new Error('native view already disappeared');
       }),
     };
+    const terminal = {
+      setActiveWorkspace: vi.fn(),
+      discardWorkspace: vi.fn(() => {
+        throw new Error('terminal process already disappeared');
+      }),
+    };
     const onSnapshot = vi.fn();
-    const adapter = createWorkspaceIpcAdapter(persistence, browser, onSnapshot);
+    const adapter = createWorkspaceIpcAdapter(persistence, browser, terminal, onSnapshot);
 
     await expect(adapter.archiveWorkspace({ workspaceId: WORKSPACE_A })).resolves.toBe(snapshot);
     expect(browser.discardWorkspace).toHaveBeenCalledExactlyOnceWith(WORKSPACE_A);
+    expect(terminal.setActiveWorkspace).toHaveBeenCalledExactlyOnceWith(WORKSPACE_B);
+    expect(terminal.discardWorkspace).toHaveBeenCalledExactlyOnceWith(WORKSPACE_A);
     expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(snapshot);
   });
 
@@ -61,8 +78,9 @@ describe('workspace IPC adapter', () => {
     const snapshot = workspaceSnapshot(WORKSPACE_A);
     const persistence = createPersistence(snapshot);
     const browser = { discardWorkspace: vi.fn() };
+    const terminal = { setActiveWorkspace: vi.fn(), discardWorkspace: vi.fn() };
     const onSnapshot = vi.fn();
-    const adapter = createWorkspaceIpcAdapter(persistence, browser, onSnapshot);
+    const adapter = createWorkspaceIpcAdapter(persistence, browser, terminal, onSnapshot);
 
     await adapter.getWorkspaceSnapshot();
     await adapter.createWorkspace({ name: 'Research', color: '#348bd4' });
@@ -91,6 +109,14 @@ describe('workspace IPC adapter', () => {
     });
     expect(onSnapshot).toHaveBeenCalledTimes(4);
     expect(browser.discardWorkspace).not.toHaveBeenCalled();
+    expect(terminal.setActiveWorkspace).toHaveBeenCalledTimes(4);
+    expect(terminal.setActiveWorkspace).toHaveBeenNthCalledWith(1, WORKSPACE_A);
+    expect(terminal.setActiveWorkspace).toHaveBeenNthCalledWith(2, WORKSPACE_A);
+    expect(terminal.setActiveWorkspace).toHaveBeenNthCalledWith(3, WORKSPACE_A);
+    // The adapter follows the authoritative snapshot returned by persistence,
+    // rather than trusting the requested activation target.
+    expect(terminal.setActiveWorkspace).toHaveBeenNthCalledWith(4, WORKSPACE_A);
+    expect(terminal.discardWorkspace).not.toHaveBeenCalled();
   });
 });
 

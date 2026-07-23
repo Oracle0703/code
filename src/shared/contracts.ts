@@ -83,12 +83,17 @@ export const IPC_CHANNELS = {
     openUrlRequested: 'browser:open-url-requested',
   },
   terminal: {
+    getSnapshot: 'terminal:get-snapshot',
     create: 'terminal:create',
+    activate: 'terminal:activate',
+    restart: 'terminal:restart',
     write: 'terminal:write',
     resize: 'terminal:resize',
+    clear: 'terminal:clear',
     close: 'terminal:close',
     data: 'terminal:data',
     exit: 'terminal:exit',
+    stateChanged: 'terminal:state-changed',
   },
 } as const;
 
@@ -486,30 +491,78 @@ export interface ScheduleUpdateInput extends ScheduleTargetInput {
   readonly endMinute: number;
 }
 
-export const TERMINAL_SHELLS = ['default', 'powershell', 'cmd', 'wsl', 'bash', 'zsh'] as const;
+export const TERMINAL_PROFILE_IDS = [
+  'system-default',
+  'powershell-7',
+  'windows-powershell',
+  'command-prompt',
+  'wsl-default',
+  'bash',
+  'zsh',
+] as const;
 
-export type TerminalShell = (typeof TERMINAL_SHELLS)[number];
+export type TerminalProfileId = (typeof TERMINAL_PROFILE_IDS)[number];
 
-export interface TerminalCreateOptions {
-  cwd?: string;
-  shell?: TerminalShell;
+export type TerminalProfileKind = 'system' | 'powershell' | 'command-prompt' | 'wsl' | 'posix';
+
+export interface TerminalProfile {
+  readonly id: TerminalProfileId;
+  readonly label: string;
+  readonly kind: TerminalProfileKind;
+  readonly isDefault: boolean;
+  readonly available: boolean;
+  readonly unavailableReason?: string;
 }
 
-export interface TerminalSessionInfo {
-  id: string;
-  shell: TerminalShell;
-  cwd: string;
+export type TerminalSessionStatus = 'running' | 'exited';
+
+export interface TerminalSession {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly profileId: TerminalProfileId;
+  readonly label: string;
+  readonly status: TerminalSessionStatus;
+  readonly createdAt: string;
+  readonly exitCode?: number;
 }
 
-export interface TerminalDataEvent {
-  id: string;
-  data: string;
+export interface TerminalSnapshot {
+  readonly workspaceId: string;
+  readonly revision: number;
+  readonly activeSessionId: string | null;
+  readonly sessions: readonly TerminalSession[];
+  readonly profiles: readonly TerminalProfile[];
 }
 
-export interface TerminalExitEvent {
-  id: string;
-  exitCode: number;
-  signal?: number;
+export interface TerminalWorkspaceInput {
+  readonly workspaceId: string;
+}
+
+export interface TerminalCreateInput extends TerminalWorkspaceInput {
+  readonly profileId: TerminalProfileId;
+}
+
+export interface TerminalSessionTargetInput extends TerminalWorkspaceInput {
+  readonly sessionId: string;
+}
+
+export interface TerminalWriteInput extends TerminalSessionTargetInput {
+  readonly data: string;
+}
+
+export interface TerminalResizeInput extends TerminalSessionTargetInput {
+  readonly columns: number;
+  readonly rows: number;
+}
+
+export interface TerminalDataEvent extends TerminalSessionTargetInput {
+  readonly sequence: number;
+  readonly data: string;
+}
+
+export interface TerminalExitEvent extends TerminalSessionTargetInput {
+  readonly exitCode: number;
+  readonly signal?: number;
 }
 
 export type Unsubscribe = () => void;
@@ -593,11 +646,16 @@ export interface WorkbenchApi {
     onOpenUrlRequest(listener: (request: BrowserOpenUrlRequest) => void): Unsubscribe;
   };
   terminal: {
-    create(options?: TerminalCreateOptions): Promise<TerminalSessionInfo>;
-    write(id: string, data: string): Promise<void>;
-    resize(id: string, columns: number, rows: number): Promise<void>;
-    close(id: string): Promise<void>;
+    getSnapshot(input: TerminalWorkspaceInput): Promise<TerminalSnapshot>;
+    create(input: TerminalCreateInput): Promise<TerminalSnapshot>;
+    activate(input: TerminalSessionTargetInput): Promise<TerminalSnapshot>;
+    restart(input: TerminalSessionTargetInput): Promise<TerminalSnapshot>;
+    write(input: TerminalWriteInput): Promise<void>;
+    resize(input: TerminalResizeInput): Promise<void>;
+    clear(input: TerminalSessionTargetInput): Promise<void>;
+    close(input: TerminalSessionTargetInput): Promise<TerminalSnapshot>;
     onData(listener: (event: TerminalDataEvent) => void): Unsubscribe;
     onExit(listener: (event: TerminalExitEvent) => void): Unsubscribe;
+    onStateChange(listener: (snapshot: TerminalSnapshot) => void): Unsubscribe;
   };
 }

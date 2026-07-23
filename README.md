@@ -2,7 +2,7 @@
 
 一个面向个人日常工作的 Electron 桌面工作台。它借鉴 Codex 一类“上下文 + 工具面板”的交互方式，把今日事项、项目、网页与终端放进同一个可恢复的工作空间。
 
-> 当前状态：`v0.5` 工作区浏览闭环。Electron 进程隔离、真实工具面板、可迁移数据库、工作区业务数据，以及浏览器标签、收藏夹和安全下载管理已经打通。
+> 当前状态：`v0.6` 工作区工具闭环。Electron 进程隔离、可迁移数据库、浏览器标签/收藏夹/安全下载，以及工作区隔离的多终端会话已经打通。
 
 ## 已具备的能力
 
@@ -20,8 +20,8 @@
 - 命令面板及常用键盘快捷键
 - 按工作区持久化的多标签浏览器与收藏夹，支持地址跳转、前进、后退、刷新、停止和完整键盘导航
 - Main 独占的安全下载管理，使用系统保存对话框并支持暂停、恢复、取消、清理记录和定位已完成文件
-- 基于 `xterm.js` + `node-pty` 的真实本地终端
-- 适配 Windows 的 PowerShell/CMD 扩展路径，并兼容 macOS/Linux 默认 shell
+- 基于 `xterm.js` + `node-pty` 的工作区多终端标签，支持独立缓冲区、激活、重启、清空和关闭
+- 由 Main 探测并启动固定 Shell Profile：Windows PowerShell 7、Windows PowerShell、CMD、可用的默认 WSL，以及 macOS/Linux 默认 shell、Bash、Zsh 或 PowerShell 7
 - 严格的 preload 白名单 API、IPC 参数校验、远程网页隔离与权限默认拒绝
 - TypeScript、ESLint、Prettier、Vitest 和 GitHub Actions 基础质量链路
 - Electron Forge Windows x64 Squirrel 制品，以及同一 make 作业未打包负载的 ConPTY 与业务数据冒烟测试
@@ -53,8 +53,10 @@ npm start
 npm run lint
 npm run typecheck
 npm test
+npm run test:terminal
 npm run audit:all
 npm run build:electron-download-smoke
+npm run build:terminal-manager-smoke
 npm run smoke:electron-downloads
 npm run package
 ```
@@ -71,11 +73,11 @@ npm run check
 
 ## 构建支持矩阵
 
-| 目标            | 当前验证级别                                                |
-| --------------- | ----------------------------------------------------------- |
-| Windows x64     | Squirrel、fuse、ConPTY、业务数据及真实 DownloadManager 冒烟 |
-| Linux x64       | Electron package、fuse、包体、终端、业务数据及真实下载冒烟  |
-| macOS x64/arm64 | 已配置 ZIP maker，尚未进入 CI 实机验证                      |
+| 目标            | 当前验证级别                                                 |
+| --------------- | ------------------------------------------------------------ |
+| Windows x64     | Squirrel、fuse、ConPTY、多终端、业务数据及真实下载冒烟       |
+| Linux x64       | Electron package、fuse、包体、多终端、业务数据及真实下载冒烟 |
+| macOS x64/arm64 | 已配置 ZIP maker，尚未进入 CI 实机验证                       |
 
 GitHub Actions 的 Windows 作业会保存通过该作业内全部检查的安装包、完整 NuGet 更新包、`RELEASES` 和 `SHA256SUMS.txt`，保留 14 天。当前运行时冒烟针对 Squirrel 构建同时产生的未打包应用负载；最终 NUPKG 负载复验仍由独立的 Issue #9 跟踪。
 
@@ -125,11 +127,11 @@ flowchart TB
 
 ## 开发路线
 
-1. PowerShell、CMD、WSL 多终端配置
-2. 全局搜索、快捷动作、导入导出和定时备份
+1. 全局搜索、快捷动作、导入导出和定时备份
+2. 可恢复的终端 Profile/CWD 偏好与受控 WSL 配置
 3. 定时自动化与 Codex/AI 能力接入
 
-浏览器标签与收藏夹已按工作区隔离；切换工作区会销毁旧的远程页面运行时，并按需恢复新工作区的活动标签。Cookie、登录态和浏览器持久会话仍为应用级共享上下文，下载列表仅保留在本次运行中。终端进程、Shell、CWD 和缓冲区也仍是应用级工具上下文，将在后续阶段接入工作区。
+浏览器标签与收藏夹已按工作区隔离；切换工作区会销毁旧的远程页面运行时，并按需恢复新工作区的活动标签。Cookie、登录态和浏览器持久会话仍为应用级共享上下文，下载列表仅保留在本次运行中。终端会话和缓冲区同样只存在于本次运行，但严格归属于创建它们的工作区：切换工作区会保留后台会话，归档工作区会终止其全部 PTY，退出应用会清理所有会话。当前不会持久化终端、CWD、默认 Profile、自定义可执行文件/参数/环境变量或 WSL 发行版；WSL Profile 只有在 Main 确认存在可用发行版时才会启用。
 
 ## 许可证
 

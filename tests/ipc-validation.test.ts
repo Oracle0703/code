@@ -29,8 +29,11 @@ import {
   parseTaskRenameInput,
   parseTaskStatusInput,
   parseSessionId,
-  parseTerminalCreateOptions,
-  parseTerminalSize,
+  parseTerminalCreateInput,
+  parseTerminalResizeInput,
+  parseTerminalSessionTargetInput,
+  parseTerminalWorkspaceInput,
+  parseTerminalWriteInput,
   parseWindowCloseResponse,
   parseWorkspaceCreateInput,
   parseWorkspacePreferencesInput,
@@ -159,24 +162,98 @@ describe('IPC validation', () => {
     ).toThrow(TypeError);
   });
 
-  it('accepts supported terminal profiles and safe sizes', () => {
-    expect(parseTerminalCreateOptions({ cwd: 'C:\\work', shell: 'powershell' })).toEqual({
-      cwd: 'C:\\work',
-      shell: 'powershell',
+  it('accepts exact workspace-bound terminal operations', () => {
+    const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
+    expect(parseTerminalWorkspaceInput({ workspaceId: WORKSPACE_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
     });
-    expect(parseTerminalSize(120, 32)).toEqual({ columns: 120, rows: 32 });
+    expect(
+      parseTerminalCreateInput({
+        workspaceId: WORKSPACE_ID,
+        profileId: 'powershell-7',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      profileId: 'powershell-7',
+    });
+    expect(parseTerminalSessionTargetInput({ workspaceId: WORKSPACE_ID, sessionId })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      sessionId,
+    });
+    expect(
+      parseTerminalWriteInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId,
+        data: '\u0003echo ok\r',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      sessionId,
+      data: '\u0003echo ok\r',
+    });
+    expect(
+      parseTerminalResizeInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId,
+        columns: 120,
+        rows: 32,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      sessionId,
+      columns: 120,
+      rows: 32,
+    });
   });
 
-  it('rejects unsupported profiles and terminal dimensions', () => {
-    expect(() => parseTerminalCreateOptions({ shell: 'fish' })).toThrow(TypeError);
-    expect(() => parseTerminalSize(0, 32)).toThrow(TypeError);
-    expect(() => parseTerminalSize(120, 1_001)).toThrow(TypeError);
+  it('rejects unsupported terminal profiles, dimensions, and surplus fields', () => {
+    const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
+    expect(() =>
+      parseTerminalCreateInput({ workspaceId: WORKSPACE_ID, profileId: 'fish' }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalCreateInput({
+        workspaceId: WORKSPACE_ID,
+        profileId: 'system-default',
+        cwd: 'C:\\work',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalResizeInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId,
+        columns: 0,
+        rows: 32,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalResizeInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId,
+        columns: 120,
+        rows: 1_001,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalSessionTargetInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId,
+        path: '/tmp/escape',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTerminalWriteInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId,
+        data: 'x'.repeat(1_048_577),
+      }),
+    ).toThrow(TypeError);
   });
 
-  it('accepts only UUID v4 terminal session identifiers', () => {
-    expect(parseSessionId('123e4567-e89b-42d3-a456-426614174000')).toBe(
-      '123e4567-e89b-42d3-a456-426614174000',
-    );
+  it('accepts only lowercase UUID v4 terminal session identifiers', () => {
+    const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
+    expect(parseSessionId(sessionId)).toBe(sessionId);
+    expect(() => parseSessionId(sessionId.toUpperCase())).toThrow(TypeError);
     expect(() => parseSessionId('../../another-session')).toThrow(TypeError);
   });
 

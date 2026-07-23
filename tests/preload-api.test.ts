@@ -454,3 +454,99 @@ describe('preload browser API', () => {
     );
   });
 });
+
+describe('preload terminal API', () => {
+  it('exposes only the declared frozen terminal methods and events', () => {
+    expect(Object.keys(api.terminal).sort()).toEqual([
+      'activate',
+      'clear',
+      'close',
+      'create',
+      'getSnapshot',
+      'onData',
+      'onExit',
+      'onStateChange',
+      'resize',
+      'restart',
+      'write',
+    ]);
+    expect(Object.isFrozen(api.terminal)).toBe(true);
+  });
+
+  it('forwards exact terminal input objects through allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
+    const target = { workspaceId, sessionId };
+
+    await api.terminal.getSnapshot({ workspaceId });
+    await api.terminal.create({ workspaceId, profileId: 'powershell-7' });
+    await api.terminal.activate(target);
+    await api.terminal.restart(target);
+    await api.terminal.write({ ...target, data: 'echo ok\r' });
+    await api.terminal.resize({ ...target, columns: 120, rows: 32 });
+    await api.terminal.clear(target);
+    await api.terminal.close(target);
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['terminal:get-snapshot', { workspaceId }],
+      ['terminal:create', { workspaceId, profileId: 'powershell-7' }],
+      ['terminal:activate', target],
+      ['terminal:restart', target],
+      ['terminal:write', { ...target, data: 'echo ok\r' }],
+      ['terminal:resize', { ...target, columns: 120, rows: 32 }],
+      ['terminal:clear', target],
+      ['terminal:close', target],
+    ]);
+  });
+
+  it('subscribes and removes terminal data, exit, and state listeners', () => {
+    const dataListener = vi.fn();
+    const exitListener = vi.fn();
+    const stateListener = vi.fn();
+    const unsubscribeData = api.terminal.onData(dataListener);
+    const unsubscribeExit = api.terminal.onExit(exitListener);
+    const unsubscribeState = api.terminal.onStateChange(stateListener);
+
+    expect(electron.on).toHaveBeenNthCalledWith(1, 'terminal:data', expect.any(Function));
+    expect(electron.on).toHaveBeenNthCalledWith(2, 'terminal:exit', expect.any(Function));
+    expect(electron.on).toHaveBeenNthCalledWith(3, 'terminal:state-changed', expect.any(Function));
+
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const sessionId = 'a23e4567-e89b-42d3-a456-426614174000';
+    const data = { workspaceId, sessionId, sequence: 7, data: 'output' };
+    const exit = { workspaceId, sessionId, exitCode: 0 };
+    const snapshot = {
+      workspaceId,
+      revision: 2,
+      activeSessionId: sessionId,
+      sessions: [],
+      profiles: [],
+    };
+    const wrappedData = electron.on.mock.calls[0]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+    const wrappedExit = electron.on.mock.calls[1]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+    const wrappedState = electron.on.mock.calls[2]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+
+    wrappedData({}, data);
+    wrappedExit({}, exit);
+    wrappedState({}, snapshot);
+    expect(dataListener).toHaveBeenCalledExactlyOnceWith(data);
+    expect(exitListener).toHaveBeenCalledExactlyOnceWith(exit);
+    expect(stateListener).toHaveBeenCalledExactlyOnceWith(snapshot);
+
+    unsubscribeData();
+    unsubscribeExit();
+    unsubscribeState();
+    expect(electron.removeListener).toHaveBeenCalledWith('terminal:data', wrappedData);
+    expect(electron.removeListener).toHaveBeenCalledWith('terminal:exit', wrappedExit);
+    expect(electron.removeListener).toHaveBeenCalledWith('terminal:state-changed', wrappedState);
+  });
+});
