@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Archive,
+  CheckSquare2,
   ChevronDown,
   Clock3,
   FileText,
@@ -10,7 +11,6 @@ import {
   Pencil,
   Plus,
   Star,
-  Users,
 } from 'lucide-react';
 import type { WorkspaceInfo } from '../../shared/contracts';
 import { createWorkspaceMark } from '../../shared/workspace-domain';
@@ -27,6 +27,8 @@ interface WorkspaceSidebarProps {
   saveError: string | null;
   saveStatus: WorkspaceSaveStatus;
   inboxCount: number | null;
+  taskCount: number | null;
+  todayCount: number | null;
   onRetrySave: () => void;
   onSelectView: (view: ViewId) => void;
   onSelectWorkspace: (workspaceId: string) => void;
@@ -39,18 +41,11 @@ const sidebarLinks: Array<{
   id: ViewId;
   label: string;
   icon: typeof Clock3;
-  count?: number;
 }> = [
   { id: 'today', label: '今天', icon: Clock3 },
   { id: 'inbox', label: '稍后处理', icon: Star },
+  { id: 'tasks', label: '所有任务', icon: CheckSquare2 },
   { id: 'notes', label: '所有笔记', icon: FileText },
-];
-
-const projects = [
-  { name: 'Daily Workbench', color: '#8b7cf6', count: 8 },
-  { name: '个人网站', color: '#4ca5ff', count: 4 },
-  { name: '服务器运维', color: '#38c79a', count: 2 },
-  { name: '灵感与探索', color: '#f3a956', count: 6 },
 ];
 
 export function WorkspaceSidebar({
@@ -62,6 +57,8 @@ export function WorkspaceSidebar({
   saveError,
   saveStatus,
   inboxCount,
+  taskCount,
+  todayCount,
   onRetrySave,
   onSelectView,
   onSelectWorkspace,
@@ -196,8 +193,15 @@ export function WorkspaceSidebar({
 
       <div className="sidebar-scroll">
         <div className="sidebar-section sidebar-section--compact">
-          {sidebarLinks.map(({ id, label, icon: Icon, count }) => {
-            const effectiveCount = id === 'inbox' ? inboxCount : count;
+          {sidebarLinks.map(({ id, label, icon: Icon }) => {
+            const effectiveCount =
+              id === 'inbox'
+                ? inboxCount
+                : id === 'tasks'
+                  ? taskCount
+                  : id === 'today'
+                    ? todayCount
+                    : null;
             return (
               <button
                 type="button"
@@ -218,29 +222,6 @@ export function WorkspaceSidebar({
 
         <div className="sidebar-section">
           <div className="sidebar-section__heading">
-            <span>项目</span>
-            <IconButton label="新建项目" tooltipSide="right">
-              <Plus size={15} aria-hidden="true" />
-            </IconButton>
-          </div>
-          <div className="project-list">
-            {projects.map((project, index) => (
-              <button
-                type="button"
-                className={`project-link ${index === 0 ? 'is-selected' : ''}`}
-                key={project.name}
-                onClick={() => onSelectView('tasks')}
-              >
-                <span className="project-link__dot" style={{ background: project.color }} />
-                <span>{project.name}</span>
-                <small>{project.count}</small>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="sidebar-section">
-          <div className="sidebar-section__heading">
             <span>常用</span>
             <IconButton label="更多选项" tooltipSide="right">
               <MoreHorizontal size={15} aria-hidden="true" />
@@ -249,10 +230,6 @@ export function WorkspaceSidebar({
           <button type="button" className="sidebar-link" onClick={() => onSelectView('notes')}>
             <Hash size={16} strokeWidth={1.8} aria-hidden="true" />
             <span>快速记录</span>
-          </button>
-          <button type="button" className="sidebar-link" onClick={() => onSelectView('tasks')}>
-            <Users size={16} strokeWidth={1.8} aria-hidden="true" />
-            <span>等待中</span>
           </button>
           <button type="button" className="sidebar-link" onClick={() => onSelectView('notes')}>
             <Folder size={16} strokeWidth={1.8} aria-hidden="true" />

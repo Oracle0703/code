@@ -5,6 +5,11 @@ import {
   type InboxCreateInput,
   type InboxTargetInput,
   type InboxUndoInput,
+  type TaskConvertInboxInput,
+  type TaskCreateInput,
+  type TaskPlanningInput,
+  type TaskRenameInput,
+  type TaskStatusInput,
   type TerminalCreateOptions,
   type TerminalShell,
   type WorkspaceCreateInput,
@@ -18,6 +23,12 @@ import {
   normalizeInboxId,
   normalizeInboxUndoToken,
 } from '../../shared/inbox-domain';
+import {
+  normalizeTaskId,
+  normalizeTaskPlanning,
+  normalizeTaskStatus,
+  normalizeTaskTitle,
+} from '../../shared/task-domain';
 import {
   normalizeWorkspaceColor,
   normalizeWorkspaceId,
@@ -187,6 +198,56 @@ export function parseInboxUndoInput(value: unknown): InboxUndoInput {
   return {
     workspaceId: normalizeWorkspaceId(value.workspaceId),
     undoToken: normalizeInboxUndoToken(value.undoToken),
+  };
+}
+
+export function parseTaskCreateInput(value: unknown): TaskCreateInput {
+  if (!isRecord(value)) throw new TypeError('Task creation input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'title', 'planning']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    title: normalizeTaskTitle(value.title),
+    planning: normalizeTaskPlanning(value.planning),
+  };
+}
+
+export function parseTaskRenameInput(value: unknown): TaskRenameInput {
+  if (!isRecord(value)) throw new TypeError('Task rename input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'taskId', 'title']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    taskId: normalizeTaskId(value.taskId),
+    title: normalizeTaskTitle(value.title),
+  };
+}
+
+export function parseTaskStatusInput(value: unknown): TaskStatusInput {
+  if (!isRecord(value)) throw new TypeError('Task status input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'taskId', 'status']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    taskId: normalizeTaskId(value.taskId),
+    status: normalizeTaskStatus(value.status),
+  };
+}
+
+export function parseTaskPlanningInput(value: unknown): TaskPlanningInput {
+  if (!isRecord(value)) throw new TypeError('Task planning input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'taskId', 'planning']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    taskId: normalizeTaskId(value.taskId),
+    planning: normalizeTaskPlanning(value.planning),
+  };
+}
+
+export function parseTaskConvertInboxInput(value: unknown): TaskConvertInboxInput {
+  if (!isRecord(value)) throw new TypeError('Task conversion input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'entryId', 'planning']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    entryId: normalizeInboxId(value.entryId),
+    planning: normalizeTaskPlanning(value.planning),
   };
 }
 

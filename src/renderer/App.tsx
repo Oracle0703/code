@@ -49,11 +49,14 @@ import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
 import { SectionPage } from './components/SectionPage';
+import { TaskDialog, type TaskDialogState } from './components/TaskDialog';
+import { TaskPage } from './components/TaskPage';
 import { TerminalPanel } from './components/TerminalPanel';
 import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { useInboxController } from './hooks/useInboxController';
+import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import type { ViewId } from './model';
 
@@ -86,12 +89,14 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [workspaceDialog, setWorkspaceDialog] = useState<WorkspaceDialogState | null>(null);
   const [quickCaptureTarget, setQuickCaptureTarget] = useState<QuickCaptureTarget | null>(null);
+  const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
   const activeResizeFinishRef = useRef<(() => void) | null>(null);
   const snapshot = workspaceController.snapshot;
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
+  const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const activeWorkspace = snapshot ? findCurrentWorkspace(snapshot) : null;
   const visibleUndoNotices = useMemo(
     () =>
@@ -112,7 +117,8 @@ export function App() {
     terminalOpen,
     theme,
   } = preferences;
-  const overlayOpen = paletteOpen || workspaceDialog !== null || quickCaptureTarget !== null;
+  const overlayOpen =
+    paletteOpen || workspaceDialog !== null || quickCaptureTarget !== null || taskDialog !== null;
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
@@ -121,6 +127,7 @@ export function App() {
     if (
       !activeWorkspace ||
       workspaceDialog !== null ||
+      taskDialog !== null ||
       workspaceController.pendingOperation !== null
     ) {
       return;
@@ -130,7 +137,28 @@ export function App() {
       (current) =>
         current ?? { workspaceId: activeWorkspace.id, workspaceName: activeWorkspace.name },
     );
-  }, [activeWorkspace, workspaceController.pendingOperation, workspaceDialog]);
+  }, [activeWorkspace, taskDialog, workspaceController.pendingOperation, workspaceDialog]);
+
+  const openTaskCreate = useCallback(
+    (planning: 'today' | 'none') => {
+      if (
+        !activeWorkspace ||
+        workspaceDialog !== null ||
+        quickCaptureTarget !== null ||
+        workspaceController.pendingOperation !== null
+      ) {
+        return;
+      }
+      setPaletteOpen(false);
+      setTaskDialog({
+        mode: 'create',
+        workspaceId: activeWorkspace.id,
+        workspaceName: activeWorkspace.name,
+        planning,
+      });
+    },
+    [activeWorkspace, quickCaptureTarget, workspaceController.pendingOperation, workspaceDialog],
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -162,7 +190,11 @@ export function App() {
   useEffect(() => {
     if (!snapshot) return;
     const handleShortcut = (event: KeyboardEvent) => {
-      if (workspaceDialog !== null || workspaceController.pendingOperation !== null) {
+      if (
+        workspaceDialog !== null ||
+        taskDialog !== null ||
+        workspaceController.pendingOperation !== null
+      ) {
         return;
       }
       const commandKey = event.ctrlKey || event.metaKey;
@@ -225,6 +257,7 @@ export function App() {
     openQuickCapture,
     workspaceController.pendingOperation,
     workspaceDialog,
+    taskDialog,
   ]);
 
   const commands = useMemo<PaletteCommand[]>(() => {
@@ -255,6 +288,15 @@ export function App() {
         action: () => {
           openQuickCapture();
         },
+      },
+      {
+        id: 'task:create',
+        label: '新建任务',
+        description: '创建一项真实任务，稍后安排时间',
+        group: '操作',
+        icon: CheckSquare2,
+        keywords: '任务 新建 创建 todo',
+        action: () => openTaskCreate('none'),
       },
       {
         id: 'workspace:create',
@@ -371,6 +413,7 @@ export function App() {
     activeWorkspace,
     browserOpen,
     openQuickCapture,
+    openTaskCreate,
     snapshot,
     terminalOpen,
     theme,
@@ -546,6 +589,8 @@ export function App() {
         <ActivityRail
           activeView={activeView}
           inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
+          taskCount={taskController.counts?.active ?? null}
+          todayCount={taskController.counts?.today ?? null}
           onSelect={setActiveView}
         />
         <div
@@ -562,6 +607,8 @@ export function App() {
             saveError={workspaceController.saveError}
             saveStatus={workspaceController.saveStatus}
             inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
+            taskCount={taskController.counts?.active ?? null}
+            todayCount={taskController.counts?.today ?? null}
             onRetrySave={workspaceController.retryPreferences}
             onSelectView={setActiveView}
             onSelectWorkspace={(workspaceId) => {
@@ -620,12 +667,27 @@ export function App() {
                       inboxController.snapshot ? inboxController.counts.uncategorized : null
                     }
                     capturePending={inboxController.pendingCapture}
+                    taskSnapshot={taskController.snapshot}
+                    taskStatus={taskController.status}
+                    taskLoadError={taskController.loadError}
+                    taskOperationError={taskController.operationError}
+                    pendingTaskIds={taskController.pendingTaskIds}
+                    taskCreatePending={taskController.pendingCreate}
                     onCapture={(content) =>
                       inboxController.create(snapshot.currentWorkspaceId, content, 'uncategorized')
                     }
                     onOpenInbox={() => setActiveView('inbox')}
                     onOpenTasks={() => setActiveView('tasks')}
-                    onOpenNotes={() => setActiveView('notes')}
+                    onCreateToday={() => openTaskCreate('today')}
+                    onOpenTask={(task) =>
+                      setTaskDialog({
+                        mode: 'rename',
+                        workspaceId: snapshot.currentWorkspaceId,
+                        workspaceName: activeWorkspace.name,
+                        task,
+                      })
+                    }
+                    onUpdateTaskStatus={taskController.updateStatus}
                   />
                 ) : activeView === 'inbox' ? (
                   <InboxPage
@@ -634,10 +696,41 @@ export function App() {
                     loadError={inboxController.loadError}
                     operationError={inboxController.operationError}
                     pendingEntryIds={inboxController.pendingEntryIds}
+                    pendingConversionEntryIds={taskController.pendingConversionEntryIds}
                     onRetry={inboxController.retry}
                     onOpenCapture={openQuickCapture}
                     onCategorize={inboxController.categorize}
                     onArchive={inboxController.archive}
+                    onOpenConvert={(entry) =>
+                      setTaskDialog({
+                        mode: 'convert',
+                        workspaceId: snapshot.currentWorkspaceId,
+                        workspaceName: activeWorkspace.name,
+                        entry,
+                        planning: 'today',
+                      })
+                    }
+                  />
+                ) : activeView === 'tasks' ? (
+                  <TaskPage
+                    snapshot={taskController.snapshot}
+                    tasks={taskController.tasks}
+                    status={taskController.status}
+                    loadError={taskController.loadError}
+                    operationError={taskController.operationError}
+                    pendingTaskIds={taskController.pendingTaskIds}
+                    onRetry={taskController.retry}
+                    onOpenCreate={() => openTaskCreate('none')}
+                    onOpenRename={(task) =>
+                      setTaskDialog({
+                        mode: 'rename',
+                        workspaceId: snapshot.currentWorkspaceId,
+                        workspaceName: activeWorkspace.name,
+                        task,
+                      })
+                    }
+                    onUpdateStatus={taskController.updateStatus}
+                    onUpdatePlanning={taskController.updatePlanning}
                   />
                 ) : (
                   <SectionPage
@@ -735,12 +828,17 @@ export function App() {
               <span className="status-dot" />
               <span
                 role={
-                  workspaceController.operationError || inboxController.operationError
+                  workspaceController.operationError ||
+                  inboxController.operationError ||
+                  taskController.operationError
                     ? 'alert'
                     : undefined
                 }
               >
-                {workspaceController.operationError ?? inboxController.operationError ?? '已就绪'}
+                {workspaceController.operationError ??
+                  inboxController.operationError ??
+                  taskController.operationError ??
+                  '已就绪'}
               </span>
             </div>
             <div className="statusbar__context">
@@ -785,6 +883,32 @@ export function App() {
           target={quickCaptureTarget}
           onClose={() => setQuickCaptureTarget(null)}
           onSubmit={inboxController.create}
+        />
+      ) : null}
+      {taskDialog ? (
+        <TaskDialog
+          state={taskDialog}
+          onClose={() => setTaskDialog(null)}
+          onCreate={async (title, planning) => {
+            if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开任务窗口。');
+            }
+            await taskController.create(title, planning);
+          }}
+          onRename={async (taskId, title) => {
+            if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开任务窗口。');
+            }
+            await taskController.rename(taskId, title);
+          }}
+          onConvert={async (entryId, planning) => {
+            if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开任务窗口。');
+            }
+            const sequence = inboxController.reserveSnapshotRequest(taskDialog.workspaceId);
+            const result = await taskController.convertInbox(entryId, planning);
+            inboxController.applyReservedSnapshot(result.inboxSnapshot, sequence);
+          }}
         />
       ) : null}
       <InboxUndoStack

@@ -6,11 +6,8 @@ import {
   ChevronRight,
   Circle,
   Clock3,
-  Coffee,
-  FileText,
-  Flame,
   Inbox,
-  MoreHorizontal,
+  LoaderCircle,
   Pause,
   Play,
   Plus,
@@ -18,76 +15,27 @@ import {
   Target,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
-import { usePersistentState } from '../hooks/usePersistentState';
+import type { Task, TaskSnapshot, TaskStatus } from '../../shared/contracts';
 import { INBOX_CONTENT_MAX_LENGTH } from '../../shared/inbox-domain';
-import { IconButton } from './IconButton';
+import { toLocalDateKey } from '../task-state';
 
 interface TodayDashboardProps {
   inboxStatus: 'loading' | 'ready' | 'error';
   inboxCount: number | null;
   uncategorizedCount: number | null;
   capturePending: boolean;
+  taskSnapshot: TaskSnapshot | null;
+  taskStatus: 'loading' | 'ready' | 'error';
+  taskLoadError: string | null;
+  taskOperationError: string | null;
+  pendingTaskIds: ReadonlySet<string>;
+  taskCreatePending: boolean;
   onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
   onOpenTasks: () => void;
-  onOpenNotes: () => void;
-}
-
-interface Task {
-  id: string;
-  title: string;
-  project: string;
-  accent: string;
-  due?: string;
-  done: boolean;
-}
-
-const initialTasks: Task[] = [
-  {
-    id: 'task-workbench-shell',
-    title: '完成 Daily Workbench 基础框架',
-    project: 'Daily Workbench',
-    accent: '#8b7cf6',
-    due: '18:00',
-    done: false,
-  },
-  {
-    id: 'task-review-wiki',
-    title: '整理公司 Wiki 试点反馈',
-    project: '工作',
-    accent: '#4ca5ff',
-    due: '今天',
-    done: false,
-  },
-  {
-    id: 'task-backup-server',
-    title: '检查服务器自动备份状态',
-    project: '服务器运维',
-    accent: '#38c79a',
-    done: true,
-  },
-  {
-    id: 'task-site-copy',
-    title: '更新个人网站项目介绍',
-    project: '个人网站',
-    accent: '#f3a956',
-    done: false,
-  },
-];
-
-const agenda = [
-  { time: '09:30', end: '10:00', title: '整理今日计划', type: 'focus' },
-  { time: '11:00', end: '11:30', title: 'Wiki 试点沟通', type: 'meeting' },
-  { time: '14:00', end: '15:30', title: 'Workbench 开发', type: 'focus' },
-  { time: '17:30', end: '18:00', title: '回顾与收尾', type: 'review' },
-];
-
-function formatDate() {
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: 'long',
-    day: 'numeric',
-    weekday: 'long',
-  }).format(new Date());
+  onCreateToday: () => void;
+  onOpenTask: (task: Task) => void;
+  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<void>;
 }
 
 function formatTimer(seconds: number) {
@@ -103,12 +51,19 @@ export function TodayDashboard({
   inboxCount,
   uncategorizedCount,
   capturePending,
+  taskSnapshot,
+  taskStatus,
+  taskLoadError,
+  taskOperationError,
+  pendingTaskIds,
+  taskCreatePending,
   onCapture,
   onOpenInbox,
   onOpenTasks,
-  onOpenNotes,
+  onCreateToday,
+  onOpenTask,
+  onUpdateTaskStatus,
 }: TodayDashboardProps) {
-  const [tasks, setTasks] = usePersistentState<Task[]>('daily.today.tasks', initialTasks);
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
@@ -116,8 +71,15 @@ export function TodayDashboard({
   const [focusSeconds, setFocusSeconds] = useState(25 * 60);
   const captureLength = Array.from(capture.trim()).length;
   const captureTooLong = captureLength > INBOX_CONTENT_MAX_LENGTH;
-
-  const remainingTasks = useMemo(() => tasks.filter((task) => !task.done).length, [tasks]);
+  const todayDate = taskSnapshot?.todayDate ?? toLocalDateKey(new Date());
+  const todayTasks = useMemo(
+    () => taskSnapshot?.tasks.filter((task) => task.plannedFor === taskSnapshot.todayDate) ?? [],
+    [taskSnapshot],
+  );
+  const remainingTasks = todayTasks.filter(({ status }) => status !== 'completed').length;
+  const completedTasks = todayTasks.length - remainingTasks;
+  const progress = todayTasks.length === 0 ? 0 : (completedTasks / todayTasks.length) * 100;
+  const taskReady = taskSnapshot !== null;
 
   useEffect(() => {
     if (!focusRunning || focusSeconds <= 0) return;
@@ -146,15 +108,28 @@ export function TodayDashboard({
       <header className="dashboard-hero">
         <div>
           <p className="eyebrow">
-            <CalendarDays size={14} aria-hidden="true" /> {formatDate()}
+            <CalendarDays size={14} aria-hidden="true" /> {formatLocalDate(todayDate)}
           </p>
-          <h1>下午好，Justin</h1>
-          <p>你今天还有 {remainingTasks} 项任务。先完成最重要的一件事。</p>
+          <h1>今天，从下一步开始</h1>
+          <p>
+            {taskReady
+              ? remainingTasks > 0
+                ? `还有 ${remainingTasks} 项今日任务，先完成最重要的一件事。`
+                : todayTasks.length > 0
+                  ? '今日任务已经完成，可以安心收尾。'
+                  : '还没有安排任务，先选一件今天要推进的事。'
+              : taskStatus === 'error'
+                ? '任务暂时不可用，收件箱仍可继续记录。'
+                : '正在同步今天的任务…'}
+          </p>
         </div>
-        <div className="streak-pill" aria-label="连续规划 6 天">
-          <Flame size={16} aria-hidden="true" />
+        <div
+          className="streak-pill"
+          aria-label={`今日已完成 ${completedTasks} 项，共 ${todayTasks.length} 项`}
+        >
+          <CheckCircle2 size={16} aria-hidden="true" />
           <span>
-            <strong>6 天</strong> 连续规划
+            <strong>{taskReady ? `${completedTasks} / ${todayTasks.length}` : '—'}</strong> 今日完成
           </span>
         </div>
       </header>
@@ -207,12 +182,12 @@ export function TodayDashboard({
           <span className="metric-card__copy">
             <small>今日任务</small>
             <strong>
-              {remainingTasks}
-              <em> / {tasks.length}</em>
+              {taskReady ? remainingTasks : '—'}{' '}
+              <em>{taskReady ? `/ ${todayTasks.length}` : ''}</em>
             </strong>
           </span>
           <span className="mini-progress">
-            <i style={{ width: `${((tasks.length - remainingTasks) / tasks.length) * 100}%` }} />
+            <i style={{ width: `${progress}%` }} />
           </span>
           <ChevronRight size={16} aria-hidden="true" />
         </button>
@@ -237,17 +212,25 @@ export function TodayDashboard({
           </span>
           <ChevronRight size={16} aria-hidden="true" />
         </button>
-        <button type="button" className="metric-card" onClick={onOpenNotes}>
+        <button type="button" className="metric-card" onClick={onOpenTasks}>
           <span className="metric-card__icon metric-card__icon--green">
-            <FileText size={18} />
+            <CheckCircle2 size={18} />
           </span>
           <span className="metric-card__copy">
-            <small>本周笔记</small>
+            <small>今日完成</small>
             <strong>
-              12 <em>篇</em>
+              {taskReady ? completedTasks : '—'} <em>{taskReady ? '项' : ''}</em>
             </strong>
           </span>
-          <span className="metric-card__meta">最近 14:32</span>
+          <span className="metric-card__meta">
+            {taskReady
+              ? todayTasks.length === 0
+                ? '尚未安排任务'
+                : `${Math.round(progress)}% 已完成`
+              : taskStatus === 'error'
+                ? '暂时不可用'
+                : '正在同步…'}
+          </span>
           <ChevronRight size={16} aria-hidden="true" />
         </button>
       </section>
@@ -265,42 +248,88 @@ export function TodayDashboard({
               查看全部 <ArrowRight size={14} />
             </button>
           </div>
-          <div className="task-list">
-            {tasks.slice(0, 5).map((task) => (
-              <label className={`task-row ${task.done ? 'is-done' : ''}`} key={task.id}>
-                <input
-                  type="checkbox"
-                  checked={task.done}
-                  onChange={() => {
-                    setTasks((currentTasks) =>
-                      currentTasks.map((item) =>
-                        item.id === task.id ? { ...item, done: !item.done } : item,
-                      ),
-                    );
-                  }}
-                />
-                <span className="task-row__check" aria-hidden="true">
-                  {task.done ? <CheckCircle2 size={19} /> : <Circle size={19} />}
-                </span>
-                <span className="task-row__body">
-                  <strong>{task.title}</strong>
-                  <small>
-                    <i style={{ background: task.accent }} /> {task.project}
-                  </small>
-                </span>
-                {task.due ? (
-                  <time>
-                    <Clock3 size={12} /> {task.due}
-                  </time>
-                ) : null}
-                <IconButton label="任务选项" tooltipSide="left" tabIndex={-1}>
-                  <MoreHorizontal size={16} />
-                </IconButton>
-              </label>
-            ))}
-          </div>
-          <button type="button" className="add-row" onClick={onOpenTasks}>
-            <Plus size={15} /> 添加任务
+
+          {taskOperationError ? (
+            <p className="today-task-error" role="alert">
+              {taskOperationError}
+            </p>
+          ) : null}
+          {taskStatus === 'loading' && !taskSnapshot ? (
+            <div className="today-task-state" aria-live="polite">
+              <LoaderCircle className="is-spinning" size={18} /> 正在同步今日任务…
+            </div>
+          ) : taskStatus === 'error' && !taskSnapshot ? (
+            <div className="today-task-state is-error" role="alert">
+              {taskLoadError ?? '今日任务暂时无法读取。'}
+              <button type="button" onClick={onOpenTasks}>
+                查看详情
+              </button>
+            </div>
+          ) : todayTasks.length > 0 ? (
+            <div className="task-list">
+              {todayTasks.slice(0, 6).map((task) => {
+                const pending = pendingTaskIds.has(task.id);
+                const completed = task.status === 'completed';
+                return (
+                  <div className={`task-row ${completed ? 'is-done' : ''}`} key={task.id}>
+                    <button
+                      type="button"
+                      className="task-row__toggle"
+                      aria-label={completed ? `重新打开：${task.title}` : `完成：${task.title}`}
+                      disabled={pending}
+                      onClick={() =>
+                        void onUpdateTaskStatus(task.id, completed ? 'todo' : 'completed').catch(
+                          () => undefined,
+                        )
+                      }
+                    >
+                      {pending ? (
+                        <LoaderCircle className="is-spinning" size={19} />
+                      ) : completed ? (
+                        <CheckCircle2 size={19} />
+                      ) : (
+                        <Circle size={19} />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      className="task-row__body"
+                      disabled={pending}
+                      onClick={() => onOpenTask(task)}
+                    >
+                      <strong>{task.title}</strong>
+                      <small>
+                        <i className={`task-status-dot is-${task.status}`} />{' '}
+                        {taskStatusLabel(task.status)}
+                        {task.sourceInboxEntryId ? ' · 来自收件箱' : ''}
+                      </small>
+                    </button>
+                    <time dateTime={task.plannedFor ?? undefined}>
+                      <Clock3 size={12} /> 今天
+                    </time>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="today-task-empty">
+              <CheckCircle2 size={21} />
+              <strong>今天还没有任务</strong>
+              <span>把一项任务安排到今天，形成清晰的下一步。</span>
+            </div>
+          )}
+          <button
+            type="button"
+            className="add-row"
+            onClick={onCreateToday}
+            disabled={taskCreatePending}
+          >
+            {taskCreatePending ? (
+              <LoaderCircle className="is-spinning" size={15} />
+            ) : (
+              <Plus size={15} />
+            )}
+            {taskCreatePending ? '正在创建…' : '添加今日任务'}
           </button>
         </section>
 
@@ -316,7 +345,9 @@ export function TodayDashboard({
             <p>
               {focusRunning && focusSeconds > 0
                 ? '保持节奏，暂时忽略其他事情。'
-                : '准备好完成今天最重要的任务了吗？'}
+                : remainingTasks > 0
+                  ? `从 ${remainingTasks} 项今日任务中选一项开始。`
+                  : '安排一项今日任务，再开始专注。'}
             </p>
             <button
               type="button"
@@ -343,33 +374,52 @@ export function TodayDashboard({
             <div className="focus-card__glow" aria-hidden="true" />
           </section>
 
-          <section className="panel-card agenda-card" aria-labelledby="agenda-heading">
+          <section className="panel-card today-plan-card" aria-labelledby="today-plan-heading">
             <div className="panel-card__header">
               <div>
-                <h2 id="agenda-heading">今日日程</h2>
+                <h2 id="today-plan-heading">今日进度</h2>
               </div>
-              <IconButton label="日程选项" tooltipSide="left">
-                <MoreHorizontal size={16} />
-              </IconButton>
             </div>
-            <div className="agenda-list">
-              {agenda.map((item) => (
-                <div className="agenda-row" key={`${item.time}-${item.title}`}>
-                  <div className="agenda-row__time">
-                    <strong>{item.time}</strong>
-                    <small>{item.end}</small>
-                  </div>
-                  <span className={`agenda-row__line agenda-row__line--${item.type}`} />
-                  <p>{item.title}</p>
-                </div>
-              ))}
+            <div className="today-plan-card__progress" aria-hidden="true">
+              <i style={{ width: `${progress}%` }} />
             </div>
-            <div className="agenda-footer">
-              <Coffee size={14} /> 下一段空闲时间：15:30
-            </div>
+            <dl>
+              <div>
+                <dt>待完成</dt>
+                <dd>{taskReady ? remainingTasks : '—'}</dd>
+              </div>
+              <div>
+                <dt>已完成</dt>
+                <dd>{taskReady ? completedTasks : '—'}</dd>
+              </div>
+              <div>
+                <dt>总计</dt>
+                <dd>{taskReady ? todayTasks.length : '—'}</dd>
+              </div>
+            </dl>
+            <button type="button" className="secondary-button" onClick={onCreateToday}>
+              <CalendarDays size={14} /> 安排任务到今天
+            </button>
           </section>
         </div>
       </div>
     </div>
   );
+}
+
+function formatLocalDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!match) return value;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  }).format(date);
+}
+
+function taskStatusLabel(status: TaskStatus): string {
+  if (status === 'completed') return '已完成';
+  if (status === 'in_progress') return '进行中';
+  return '待办';
 }

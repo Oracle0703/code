@@ -11,6 +11,13 @@ import {
   type InboxSnapshot,
   type InboxTargetInput,
   type InboxUndoInput,
+  type TaskConversionResult,
+  type TaskConvertInboxInput,
+  type TaskCreateInput,
+  type TaskPlanningInput,
+  type TaskRenameInput,
+  type TaskSnapshot,
+  type TaskStatusInput,
   type TerminalCreateOptions,
   type TerminalDataEvent,
   type TerminalExitEvent,
@@ -74,6 +81,18 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<InboxSnapshot>(IPC_CHANNELS.inbox.undoArchive, input),
     onCaptureRequest: (listener: () => void) =>
       subscribe(IPC_CHANNELS.inbox.captureRequested, listener),
+  }),
+  task: Object.freeze({
+    getSnapshot: (input: WorkspaceTargetInput) =>
+      invoke<TaskSnapshot>(IPC_CHANNELS.task.getSnapshot, input),
+    create: (input: TaskCreateInput) => invoke<TaskSnapshot>(IPC_CHANNELS.task.create, input),
+    rename: (input: TaskRenameInput) => invoke<TaskSnapshot>(IPC_CHANNELS.task.rename, input),
+    updateStatus: (input: TaskStatusInput) =>
+      invoke<TaskSnapshot>(IPC_CHANNELS.task.updateStatus, input),
+    updatePlanning: (input: TaskPlanningInput) =>
+      invoke<TaskSnapshot>(IPC_CHANNELS.task.updatePlanning, input),
+    convertInbox: (input: TaskConvertInboxInput) =>
+      invoke<TaskConversionResult>(IPC_CHANNELS.task.convertInbox, input),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),

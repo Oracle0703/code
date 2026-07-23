@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { mkdir, mkdtemp, readFile, rm, stat } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, readdir, rm, stat } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync, backup, constants } = require('node:sqlite');
@@ -249,6 +249,22 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'inbox:archive',
     'inbox:undo-archive',
     'inbox:capture-requested',
+    'task:get-snapshot',
+    'task:create',
+    'task:rename',
+    'task:update-status',
+    'task:update-planning',
+    'task:convert-inbox',
+    'CREATE TABLE tasks',
+    'source_inbox_entry_id',
+    'date(planned_for) IS NOT NULL',
+    'tasks_require_active_workspace_insert',
+    'tasks_require_archived_inbox_source_insert',
+    'tasks_prevent_archived_workspace_mutation',
+    'tasks_prevent_archived_workspace_delete',
+    'task requires an active workspace',
+    'task inbox source must be archived',
+    'archived workspace tasks are immutable',
     'before-input-event',
     'isComposing',
     'current workspace must be switched before archive',
@@ -277,12 +293,49 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'inbox:archive',
     'inbox:undo-archive',
     'inbox:capture-requested',
+    'task:get-snapshot',
+    'task:create',
+    'task:rename',
+    'task:update-status',
+    'task:update-planning',
+    'task:convert-inbox',
   ]) {
     assert.ok(
       preloadBundle.includes(requiredToken),
-      `Packaged preload bundle does not contain the workspace IPC token ${requiredToken}.`,
+      `Packaged preload bundle does not contain the required IPC token ${requiredToken}.`,
     );
   }
+
+  const rendererBundle = await readRendererText(
+    path.join(asarPath, '.vite', 'renderer', 'main_window'),
+  );
+  for (const forbiddenToken of [
+    'daily.today.tasks',
+    'task-workbench-shell',
+    'task-review-wiki',
+    'task-backup-server',
+    'task-site-copy',
+  ]) {
+    assert.equal(
+      rendererBundle.includes(forbiddenToken),
+      false,
+      `Packaged renderer still contains the legacy demo-task token ${forbiddenToken}.`,
+    );
+  }
+}
+
+async function readRendererText(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const content = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      content.push(await readRendererText(entryPath));
+    } else if (entry.isFile() && /\.(?:css|html|js)$/u.test(entry.name)) {
+      content.push(await readFile(entryPath, 'utf8'));
+    }
+  }
+  return content.join('\n');
 }
 
 function countOccurrences(value, token) {

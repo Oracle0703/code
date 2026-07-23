@@ -2,7 +2,7 @@
 
 一个面向个人日常工作的 Electron 桌面工作台。它借鉴 Codex 一类“上下文 + 工具面板”的交互方式，把今日事项、项目、网页与终端放进同一个可恢复的工作空间。
 
-> 当前状态：`v0.2` 个人事务入口。Electron 进程隔离、真实工具面板、可迁移数据库、工作区生命周期以及快速记录/收件箱闭环已经打通，下一步接入真实任务。
+> 当前状态：`v0.3` 个人任务闭环。Electron 进程隔离、真实工具面板、可迁移数据库、工作区、收件箱、任务与今日计划已经打通；笔记模块仍为界面原型，日程尚未接入真实数据或界面。
 
 ## 已具备的能力
 
@@ -11,16 +11,19 @@
 - 按工作区恢复页面、主题、侧栏以及浏览器/终端面板开关和尺寸
 - 任意页面可用的 `Ctrl/Cmd + N` 快速记录，以及按工作区隔离的真实 SQLite 收件箱
 - 收件箱搜索、受控分类、软归档和 Main 签发的一次性短期撤销
+- 按工作区隔离的真实 SQLite 任务，可创建、重命名、更新状态并加入或移出今日计划
+- Today 的任务列表、完成进度与状态操作使用真实任务数据；笔记模块仍为界面原型，日程尚未接入真实数据或界面
+- 将收件箱线索原子转换为带唯一来源关系的任务，失败时不会留下半完成状态
 - 命令面板及常用键盘快捷键
 - 独立 `WebContentsView` 浏览器，支持地址跳转、前进、后退、刷新和加载状态
 - 基于 `xterm.js` + `node-pty` 的真实本地终端
 - 适配 Windows 的 PowerShell/CMD 扩展路径，并兼容 macOS/Linux 默认 shell
 - 严格的 preload 白名单 API、IPC 参数校验、远程网页隔离与权限默认拒绝
 - TypeScript、ESLint、Prettier、Vitest 和 GitHub Actions 基础质量链路
-- Electron Forge Windows x64 Squirrel 制品，以及生成制品前对未打包负载的 ConPTY 冒烟测试
+- Electron Forge Windows x64 Squirrel 制品，以及同一 make 作业未打包负载的 ConPTY 与业务数据冒烟测试
 - 完整依赖审计报告、开发期风险基线和打包后 Electron fuse 状态校验
 - Electron 内置 `node:sqlite` 数据库、事务迁移、迁移校验和与迁移前自动备份
-- 受控手动备份 API，以及 Linux/Windows 打包后 SQLite、工作区、收件箱、迁移、备份和重开验证
+- 受控手动备份 API，以及 Linux/Windows 打包后 SQLite、工作区、收件箱、任务、迁移、备份和重开验证
 
 ## 快速开始
 
@@ -66,7 +69,7 @@ npm run check
 | Linux x64       | Electron package、fuse、包体、终端与业务数据冒烟                   |
 | macOS x64/arm64 | 已配置 ZIP maker，尚未进入 CI 实机验证                             |
 
-GitHub Actions 的 Windows 作业会保存通过该作业内全部检查的安装包、完整 NuGet 更新包、`RELEASES` 和 `SHA256SUMS.txt`，保留 14 天。
+GitHub Actions 的 Windows 作业会保存通过该作业内全部检查的安装包、完整 NuGet 更新包、`RELEASES` 和 `SHA256SUMS.txt`，保留 14 天。当前运行时冒烟针对 Squirrel 构建同时产生的未打包应用负载；最终 NUPKG 负载复验仍由独立的 Issue #9 跟踪。
 
 ## 快捷键
 
@@ -106,7 +109,7 @@ flowchart TB
 
 ## 开发路线
 
-1. 真实任务、今日同步和 Markdown 笔记闭环
+1. Markdown 笔记闭环与真实今日日程
 2. 浏览器多标签、收藏夹和下载管理
 3. PowerShell、CMD、WSL 多终端配置
 4. 全局搜索、快捷动作、导入导出和定时备份

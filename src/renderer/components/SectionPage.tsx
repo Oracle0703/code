@@ -1,6 +1,5 @@
 import {
   Bot,
-  CheckSquare2,
   ChevronRight,
   Clock3,
   FileText,
@@ -10,7 +9,6 @@ import {
   Plus,
   Search,
   Settings2,
-  SlidersHorizontal,
   SquareTerminal,
   Zap,
 } from 'lucide-react';
@@ -19,48 +17,19 @@ import type { ViewId } from '../model';
 import { IconButton } from './IconButton';
 
 interface SectionPageProps {
-  view: Exclude<ViewId, 'today' | 'inbox'>;
+  view: Exclude<ViewId, 'today' | 'inbox' | 'tasks'>;
   onOpenBrowser: () => void;
   onOpenTerminal: () => void;
 }
 
 const pageMeta: Record<
-  Exclude<ViewId, 'today' | 'inbox'>,
+  Exclude<ViewId, 'today' | 'inbox' | 'tasks'>,
   { title: string; description: string; icon: LucideIcon }
 > = {
-  tasks: { title: '任务', description: '按状态推进你的所有项目。', icon: CheckSquare2 },
   notes: { title: '笔记', description: '把想法、资料与项目上下文放在一起。', icon: NotebookPen },
   automations: { title: '自动化', description: '让重复事务在后台按计划完成。', icon: Bot },
   settings: { title: '设置', description: '调整工作台、数据与工具偏好。', icon: Settings2 },
 };
-
-const taskColumns = [
-  {
-    title: '待开始',
-    count: 3,
-    tasks: [
-      ['设计数据备份流程', '服务器运维'],
-      ['整理应用图标规范', 'Daily Workbench'],
-      ['补充网站项目案例', '个人网站'],
-    ],
-  },
-  {
-    title: '进行中',
-    count: 2,
-    tasks: [
-      ['搭建 Electron 项目框架', 'Daily Workbench'],
-      ['验证 Wiki 内网部署', '工作'],
-    ],
-  },
-  {
-    title: '已完成',
-    count: 2,
-    tasks: [
-      ['确定第一版功能范围', 'Daily Workbench'],
-      ['配置代码仓库', 'Daily Workbench'],
-    ],
-  },
-];
 
 const notes = [
   {
@@ -111,51 +80,6 @@ export function SectionPage({ view, onOpenBrowser, onOpenTerminal }: SectionPage
           </button>
         ) : null}
       </header>
-
-      {view === 'tasks' ? (
-        <section className="board-view">
-          <div className="page-toolbar">
-            <div className="segmented-control">
-              <button className="is-active" type="button">
-                看板
-              </button>
-              <button type="button">列表</button>
-              <button type="button">日历</button>
-            </div>
-            <button type="button" className="secondary-button">
-              <SlidersHorizontal size={14} /> 筛选
-            </button>
-          </div>
-          <div className="task-board">
-            {taskColumns.map((column, columnIndex) => (
-              <div className="board-column" key={column.title}>
-                <div className="board-column__header">
-                  <span>
-                    <i className={`board-dot board-dot--${columnIndex}`} />
-                    {column.title}
-                    <small>{column.count}</small>
-                  </span>
-                  <IconButton label="列表选项">
-                    <MoreHorizontal size={15} />
-                  </IconButton>
-                </div>
-                {column.tasks.map(([title, project]) => (
-                  <button type="button" className="board-task" key={title}>
-                    <strong>{title}</strong>
-                    <span>{project}</span>
-                    <small>
-                      <Clock3 size={12} /> {columnIndex === 2 ? '已完成' : '本周'}
-                    </small>
-                  </button>
-                ))}
-                <button type="button" className="board-add">
-                  <Plus size={14} /> 添加任务
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
 
       {view === 'notes' ? (
         <section className="notes-view">

@@ -21,10 +21,12 @@ interface InboxPageProps {
   loadError: string | null;
   operationError: string | null;
   pendingEntryIds: ReadonlySet<string>;
+  pendingConversionEntryIds: ReadonlySet<string>;
   onRetry: () => void;
   onOpenCapture: () => void;
   onCategorize: (entryId: string, category: InboxCategory) => Promise<void>;
   onArchive: (entry: InboxEntry) => Promise<void>;
+  onOpenConvert: (entry: InboxEntry) => void;
 }
 
 const categoryLabels: Record<InboxCategory, string> = {
@@ -48,10 +50,12 @@ export function InboxPage({
   loadError,
   operationError,
   pendingEntryIds,
+  pendingConversionEntryIds,
   onRetry,
   onOpenCapture,
   onCategorize,
   onArchive,
+  onOpenConvert,
 }: InboxPageProps) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<InboxFilter>('all');
@@ -142,7 +146,8 @@ export function InboxPage({
           {visibleEntries.length > 0 ? (
             <ul className="inbox-list" aria-label="收件箱记录">
               {visibleEntries.map((entry) => {
-                const pending = pendingEntryIds.has(entry.id);
+                const pending =
+                  pendingEntryIds.has(entry.id) || pendingConversionEntryIds.has(entry.id);
                 const Icon = categoryIcon(entry.category);
                 return (
                   <li className="inbox-entry" key={entry.id}>
@@ -173,6 +178,20 @@ export function InboxPage({
                         <option value="link">链接</option>
                       </select>
                     </label>
+                    <button
+                      type="button"
+                      className="inbox-entry__convert"
+                      aria-label={`转为任务：${entry.content}`}
+                      disabled={pending}
+                      onClick={() => onOpenConvert(entry)}
+                    >
+                      {pendingConversionEntryIds.has(entry.id) ? (
+                        <LoaderCircle className="is-spinning" size={14} />
+                      ) : (
+                        <CheckSquare2 size={14} />
+                      )}
+                      {pendingConversionEntryIds.has(entry.id) ? '转换中…' : '转为任务'}
+                    </button>
                     <button
                       type="button"
                       className="inbox-entry__archive"
@@ -212,7 +231,8 @@ export function InboxPage({
           )}
 
           <div className="inbox-conversion-note">
-            <CheckSquare2 size={15} /> “任务线索”目前只是分类；真实任务转换将在任务模块中原子完成。
+            <CheckSquare2 size={15} />{' '}
+            转换会在同一事务中创建任务并归档来源记录；失败时不会留下半成品。
           </div>
         </section>
       )}

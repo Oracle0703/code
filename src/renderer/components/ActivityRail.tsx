@@ -14,6 +14,8 @@ import { IconButton } from './IconButton';
 interface ActivityRailProps {
   activeView: ViewId;
   inboxCount: number | null;
+  taskCount: number | null;
+  todayCount: number | null;
   onSelect: (view: ViewId) => void;
 }
 
@@ -32,7 +34,13 @@ const primaryItems: RailItem[] = [
   { id: 'automations', label: '自动化', icon: Bot },
 ];
 
-export function ActivityRail({ activeView, inboxCount, onSelect }: ActivityRailProps) {
+export function ActivityRail({
+  activeView,
+  inboxCount,
+  taskCount,
+  todayCount,
+  onSelect,
+}: ActivityRailProps) {
   return (
     <nav className="activity-rail" aria-label="主导航">
       <div className="activity-rail__brand" aria-label="Daily Workbench">
@@ -41,7 +49,14 @@ export function ActivityRail({ activeView, inboxCount, onSelect }: ActivityRailP
 
       <div className="activity-rail__items">
         {primaryItems.map(({ id, label, icon: Icon, badge }) => {
-          const effectiveBadge = id === 'inbox' ? inboxCount : badge;
+          const effectiveBadge =
+            id === 'inbox'
+              ? inboxCount
+              : id === 'tasks'
+                ? taskCount
+                : id === 'today'
+                  ? todayCount
+                  : badge;
           return (
             <div className="activity-rail__item" key={id}>
               <IconButton

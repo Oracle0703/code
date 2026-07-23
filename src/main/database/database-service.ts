@@ -10,6 +10,13 @@ import type {
   InboxSnapshot,
   InboxTargetInput,
   InboxUndoInput,
+  TaskConversionResult,
+  TaskConvertInboxInput,
+  TaskCreateInput,
+  TaskPlanningInput,
+  TaskRenameInput,
+  TaskSnapshot,
+  TaskStatusInput,
   WorkspaceCreateInput,
   WorkspacePreferences,
   WorkspacePreferencesInput,
@@ -18,6 +25,7 @@ import type {
   WorkspaceTargetInput,
 } from '../../shared/contracts';
 import { InboxService } from '../inbox';
+import { TaskService } from '../tasks';
 import { WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
 import { DEFAULT_MIGRATIONS } from './default-migrations';
@@ -82,6 +90,8 @@ export interface DatabaseServiceOptions {
   readonly inboxIdFactory?: () => string;
   readonly inboxUndoTokenFactory?: () => string;
   readonly inboxMonotonicNowMs?: () => number;
+  readonly taskIdFactory?: () => string;
+  readonly taskTodayFactory?: () => string;
 }
 
 type ServiceState = 'closed' | 'opening' | 'open' | 'closing' | 'poisoned';
@@ -94,6 +104,7 @@ export class DatabaseService {
   readonly #idFactory: () => string;
   readonly #workspaceService: WorkspaceService;
   readonly #inboxService: InboxService;
+  readonly #taskService: TaskService;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
   #backupManager: BackupManager | undefined;
@@ -114,6 +125,8 @@ export class DatabaseService {
     inboxIdFactory = randomUUID,
     inboxUndoTokenFactory = randomUUID,
     inboxMonotonicNowMs,
+    taskIdFactory = randomUUID,
+    taskTodayFactory,
   }: DatabaseServiceOptions) {
     this.#paths = resolveDatabasePaths(dataDirectory, databaseFileName);
     this.#adapterFactory = adapterFactory;
@@ -132,6 +145,13 @@ export class DatabaseService {
       idFactory: inboxIdFactory,
       undoTokenFactory: inboxUndoTokenFactory,
       monotonicNowMs: inboxMonotonicNowMs,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#taskService = new TaskService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      idFactory: taskIdFactory,
+      todayFactory: taskTodayFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
     });
   }
@@ -309,6 +329,30 @@ export class DatabaseService {
     return this.#inboxService.undoArchive(input);
   }
 
+  getTaskSnapshot(input: WorkspaceTargetInput): Promise<TaskSnapshot> {
+    return this.#taskService.getSnapshot(input);
+  }
+
+  createTask(input: TaskCreateInput): Promise<TaskSnapshot> {
+    return this.#taskService.create(input);
+  }
+
+  renameTask(input: TaskRenameInput): Promise<TaskSnapshot> {
+    return this.#taskService.rename(input);
+  }
+
+  updateTaskStatus(input: TaskStatusInput): Promise<TaskSnapshot> {
+    return this.#taskService.updateStatus(input);
+  }
+
+  updateTaskPlanning(input: TaskPlanningInput): Promise<TaskSnapshot> {
+    return this.#taskService.updatePlanning(input);
+  }
+
+  convertInboxToTask(input: TaskConvertInboxInput): Promise<TaskConversionResult> {
+    return this.#taskService.convertInbox(input);
+  }
+
   async #initialize(): Promise<DatabaseInitializationResult> {
     await prepareDatabaseDirectories(this.#paths);
     const existed = await databaseFileExists(this.#paths.databasePath);
@@ -346,6 +390,7 @@ export class DatabaseService {
         new MetadataRepository(database).initializeWithinTransaction(openedAt, this.#idFactory());
         this.#workspaceService.initializeWithinTransaction(database, openedAt);
         this.#inboxService.validateSnapshot(database);
+        this.#taskService.validateSnapshot(database);
         health = this.#readHealth(database);
         database.exec('COMMIT');
       } catch (error) {
@@ -422,6 +467,9 @@ export class DatabaseService {
     }
     if (expectedVersion >= 3) {
       this.#inboxService.validateSnapshot(database);
+    }
+    if (expectedVersion >= 4) {
+      this.#taskService.validateSnapshot(database);
     }
   }
 
