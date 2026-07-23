@@ -12,6 +12,16 @@ export const IPC_CHANNELS = {
     getStatus: 'database:get-status',
     createBackup: 'database:create-backup',
     listBackups: 'database:list-backups',
+    getManagementSnapshot: 'database:get-management-snapshot',
+    updateBackupPolicy: 'database:update-backup-policy',
+    exportData: 'database:export-data',
+    chooseImport: 'database:choose-import',
+    commitImport: 'database:commit-import',
+    cancelImport: 'database:cancel-import',
+    backupStateChanged: 'database:backup-state-changed',
+  },
+  search: {
+    query: 'search:query',
   },
   workspace: {
     getSnapshot: 'workspace:get-snapshot',
@@ -185,7 +195,7 @@ export interface BrowserOpenUrlRequest extends BrowserWorkspaceInput {
   readonly url: string;
 }
 
-export type WindowCloseReason = 'window' | 'application';
+export type WindowCloseReason = 'window' | 'application' | 'data-replacement';
 
 export interface WindowCloseRequest {
   readonly requestId: string;
@@ -197,7 +207,7 @@ export interface WindowCloseResponse {
   readonly approved: boolean;
 }
 
-export type DatabaseBackupReason = 'manual' | 'pre-migration';
+export type DatabaseBackupReason = 'manual' | 'scheduled' | 'pre-migration' | 'pre-import';
 
 export interface DatabaseBackupInfo {
   id: string;
@@ -215,6 +225,136 @@ export interface DatabaseStatus {
   journalMode: 'wal';
   integrityCheck: 'ok';
   backupCount: number;
+}
+
+export const SEARCH_SCOPES = ['workspace', 'all'] as const;
+
+export type SearchScope = (typeof SEARCH_SCOPES)[number];
+
+export const SEARCH_RESULT_KINDS = [
+  'inbox',
+  'task',
+  'note',
+  'schedule',
+  'browser-tab',
+  'browser-bookmark',
+] as const;
+
+export type SearchResultKind = (typeof SEARCH_RESULT_KINDS)[number];
+
+export interface SearchQueryInput {
+  readonly workspaceId: string;
+  readonly query: string;
+  readonly scope: SearchScope;
+}
+
+export interface SearchResult {
+  readonly kind: SearchResultKind;
+  readonly entityId: string;
+  readonly workspaceId: string;
+  readonly workspaceName: string;
+  readonly title: string;
+  readonly excerpt: string | null;
+  readonly matchField: 'title' | 'content' | 'url';
+  readonly sortAt: string;
+}
+
+export interface SearchSnapshot {
+  readonly workspaceId: string;
+  readonly query: string;
+  readonly scope: SearchScope;
+  readonly results: readonly SearchResult[];
+  readonly truncated: boolean;
+  readonly truncatedKinds: readonly SearchResultKind[];
+}
+
+export const BACKUP_CADENCES = ['daily', 'weekly'] as const;
+
+export type BackupCadence = (typeof BACKUP_CADENCES)[number];
+
+export interface BackupPolicy {
+  readonly enabled: boolean;
+  readonly cadence: BackupCadence;
+  readonly localTimeMinute: number;
+  readonly weekday: number | null;
+  readonly retentionCount: number;
+  readonly revision: number;
+  readonly updatedAt: string;
+}
+
+export interface BackupPolicyUpdateInput {
+  readonly enabled: boolean;
+  readonly cadence: BackupCadence;
+  readonly localTimeMinute: number;
+  readonly weekday: number | null;
+  readonly retentionCount: number;
+  readonly expectedRevision: number;
+}
+
+export type BackupRunErrorCode = 'backup-failed' | 'retention-failed' | 'database-unavailable';
+
+export interface BackupScheduleState {
+  readonly policy: BackupPolicy;
+  readonly lastAttemptAt: string | null;
+  readonly lastSuccessAt: string | null;
+  readonly lastErrorCode: BackupRunErrorCode | null;
+  readonly consecutiveFailures: number;
+  readonly nextRunAt: string | null;
+  readonly running: boolean;
+}
+
+export interface DataManagementSnapshot {
+  readonly database: DatabaseStatus;
+  readonly backups: readonly DatabaseBackupInfo[];
+  readonly schedule: BackupScheduleState;
+}
+
+export interface DataExportResult {
+  readonly status: 'cancelled' | 'exported';
+  readonly fileName?: string;
+  readonly exportedAt?: string;
+  readonly sizeBytes?: number;
+  readonly recordCount?: number;
+}
+
+export interface DataImportCounts {
+  readonly workspaces: number;
+  readonly archivedWorkspaces: number;
+  readonly inboxEntries: number;
+  readonly tasks: number;
+  readonly notes: number;
+  readonly scheduleItems: number;
+  readonly browserTabs: number;
+  readonly browserBookmarks: number;
+}
+
+export interface DataImportPreview {
+  readonly importId: string;
+  readonly previewDigest: string;
+  readonly expiresAt: string;
+  readonly exportedAt: string;
+  readonly sourceAppVersion: string;
+  readonly sourceSchemaVersion: number;
+  readonly currentWorkspaceName: string;
+  readonly counts: DataImportCounts;
+  readonly includesArchivedData: boolean;
+  readonly includesBrowserData: boolean;
+}
+
+export type DataImportSelection =
+  | { readonly status: 'cancelled' }
+  | { readonly status: 'ready'; readonly preview: DataImportPreview };
+
+export interface DataImportTargetInput {
+  readonly importId: string;
+}
+
+export interface DataImportCommitInput extends DataImportTargetInput {
+  readonly previewDigest: string;
+}
+
+export interface DataImportCommitResult {
+  readonly restarting: true;
 }
 
 export const WORKSPACE_VIEW_IDS = [
@@ -575,6 +715,16 @@ export interface WorkbenchApi {
     getStatus(): Promise<DatabaseStatus>;
     createBackup(): Promise<DatabaseBackupInfo>;
     listBackups(): Promise<DatabaseBackupInfo[]>;
+    getManagementSnapshot(): Promise<DataManagementSnapshot>;
+    updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<DataManagementSnapshot>;
+    exportData(): Promise<DataExportResult>;
+    chooseImport(): Promise<DataImportSelection>;
+    commitImport(input: DataImportCommitInput): Promise<DataImportCommitResult>;
+    cancelImport(input: DataImportTargetInput): Promise<void>;
+    onBackupStateChange(listener: (snapshot: DataManagementSnapshot) => void): Unsubscribe;
+  };
+  search: {
+    query(input: SearchQueryInput): Promise<SearchSnapshot>;
   };
   workspace: {
     getSnapshot(): Promise<WorkspaceSnapshot>;

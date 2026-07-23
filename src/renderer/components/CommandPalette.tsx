@@ -1,6 +1,31 @@
+import {
+  ArrowDown,
+  ArrowUp,
+  Bookmark,
+  CalendarDays,
+  CheckSquare2,
+  Command as CommandIcon,
+  CornerDownLeft,
+  Globe2,
+  Inbox,
+  LoaderCircle,
+  NotebookPen,
+  Search,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import type { SearchResult, SearchResultKind, SearchScope } from '../../shared/contracts';
+import { SEARCH_QUERY_MIN_LENGTH, searchQueryLength } from '../../shared/search-domain';
+import type { GlobalSearchController } from '../hooks/useGlobalSearchController';
+import {
+  commandPaletteKey,
+  filterPaletteCommands,
+  movePaletteSelection,
+  reconcilePaletteSelection,
+  searchResultGroup,
+  searchResultPaletteKey,
+  searchStatusMessage,
+} from '../search-state';
 
 export interface PaletteCommand {
   id: string;
@@ -10,187 +35,472 @@ export interface PaletteCommand {
   icon: LucideIcon;
   shortcut?: string;
   keywords?: string;
-  action: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
+  restoreFocus?: boolean;
+  action: () => void | Promise<void>;
 }
 
 interface CommandPaletteProps {
   open: boolean;
-  commands: PaletteCommand[];
+  commands: readonly PaletteCommand[];
   onClose: () => void;
+  searchController?: GlobalSearchController;
+  currentWorkspaceId?: string;
+  onSelectSearchResult?: (result: SearchResult) => void | Promise<void>;
 }
 
-export function CommandPalette({ open, commands, onClose }: CommandPaletteProps) {
-  const [query, setQuery] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLElement>(null);
-  const returnFocusRef = useRef<HTMLElement | null>(null);
+interface PaletteItem {
+  readonly key: string;
+  readonly group: string;
+  readonly label: string;
+  readonly description?: string;
+  readonly meta?: string;
+  readonly shortcut?: string;
+  readonly icon: LucideIcon;
+  readonly disabled: boolean;
+  readonly disabledReason?: string;
+  readonly restoreFocusAfterInvoke: boolean;
+  readonly invoke: () => void | Promise<void>;
+}
 
-  const filteredCommands = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    if (!normalizedQuery) return commands;
-    return commands.filter((command) =>
-      `${command.label} ${command.description ?? ''} ${command.keywords ?? ''}`
-        .toLocaleLowerCase()
-        .includes(normalizedQuery),
-    );
-  }, [commands, query]);
-  const effectiveSelectedIndex =
-    filteredCommands.length === 0 ? 0 : Math.min(selectedIndex, filteredCommands.length - 1);
+const RESULT_ICONS: Record<SearchResultKind, LucideIcon> = {
+  inbox: Inbox,
+  task: CheckSquare2,
+  note: NotebookPen,
+  schedule: CalendarDays,
+  'browser-tab': Globe2,
+  'browser-bookmark': Bookmark,
+};
+
+const RESULT_KIND_LABELS: Record<SearchResultKind, string> = {
+  inbox: '收件箱',
+  task: '任务',
+  note: '笔记',
+  schedule: '日程',
+  'browser-tab': '浏览器标签',
+  'browser-bookmark': '浏览器收藏',
+};
+
+export function CommandPalette({
+  open,
+  commands,
+  onClose,
+  searchController,
+  currentWorkspaceId = '',
+  onSelectSearchResult,
+}: CommandPaletteProps) {
+  const [localQuery, setLocalQuery] = useState('');
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [invokingKey, setInvokingKey] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const restoreFocusRef = useRef(true);
+  const invocationInFlightRef = useRef(false);
+  const optionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const query = searchController?.query ?? localQuery;
+  const setQuery = searchController?.setQuery ?? setLocalQuery;
+  const filteredCommands = useMemo(() => filterPaletteCommands(commands, query), [commands, query]);
+
+  const items = useMemo<readonly PaletteItem[]>(() => {
+    const commandItems: PaletteItem[] = filteredCommands.map((command) => ({
+      key: commandPaletteKey(command.id),
+      group: command.group,
+      label: command.label,
+      description: command.description,
+      shortcut: command.shortcut,
+      icon: command.icon,
+      disabled: command.disabled === true,
+      disabledReason: command.disabledReason,
+      restoreFocusAfterInvoke: command.restoreFocus ?? true,
+      invoke: command.action,
+    }));
+    const resultItems: PaletteItem[] = (searchController?.results ?? []).map((result) => ({
+      key: searchResultPaletteKey(result),
+      group: searchResultGroup(result, currentWorkspaceId),
+      label: result.title,
+      description: result.excerpt ?? undefined,
+      meta: `${RESULT_KIND_LABELS[result.kind]} · ${result.workspaceName}`,
+      icon: RESULT_ICONS[result.kind],
+      disabled: !onSelectSearchResult,
+      disabledReason: onSelectSearchResult ? undefined : '搜索结果导航尚未连接',
+      restoreFocusAfterInvoke: false,
+      invoke: () => onSelectSearchResult?.(result),
+    }));
+    return [...commandItems, ...resultItems];
+  }, [currentWorkspaceId, filteredCommands, onSelectSearchResult, searchController?.results]);
+
+  const selectableKeys = useMemo(
+    () => items.filter(({ disabled }) => !disabled).map(({ key }) => key),
+    [items],
+  );
+  const effectiveSelectedKey = reconcilePaletteSelection(selectedKey, selectableKeys);
+  const selectedItem = items.find(({ key }) => key === effectiveSelectedKey);
+  const optionIds = useMemo(
+    () => new Map(items.map(({ key }, index) => [key, `command-option-${index}`])),
+    [items],
+  );
+  const groupedItems = useMemo(() => {
+    const groups = new Map<string, PaletteItem[]>();
+    for (const item of items) {
+      const group = groups.get(item.group);
+      if (group) group.push(item);
+      else groups.set(item.group, [item]);
+    }
+    return [...groups.entries()];
+  }, [items]);
+  const status = searchController?.status ?? 'idle';
+  const liveMessage = searchStatusMessage({
+    query,
+    status,
+    commandCount: filteredCommands.length,
+    resultCount: searchController?.results.length ?? 0,
+    truncated: searchController?.truncated ?? false,
+    error: searchController?.error ?? actionError,
+  });
+  const invoking = invokingKey !== null;
+  const queryTooShort =
+    query.trim().length > 0 && searchQueryLength(query.trim()) < SEARCH_QUERY_MIN_LENGTH;
+  const truncatedKindLabels = (searchController?.truncatedKinds ?? [])
+    .map((kind) => RESULT_KIND_LABELS[kind])
+    .join('、');
 
   useEffect(() => {
     if (!open) return;
+    const dialog = dialogRef.current;
     returnFocusRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    restoreFocusRef.current = true;
+    if (dialog && !dialog.open) dialog.showModal();
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
     return () => {
       window.cancelAnimationFrame(frame);
-      returnFocusRef.current?.focus();
+      if (dialog?.open) dialog.close();
+      if (restoreFocusRef.current && returnFocusRef.current?.isConnected) {
+        returnFocusRef.current.focus();
+      }
       returnFocusRef.current = null;
     };
   }, [open]);
 
+  useEffect(() => {
+    if (!open || !effectiveSelectedKey) return;
+    optionRefs.current.get(effectiveSelectedKey)?.scrollIntoView({ block: 'nearest' });
+  }, [effectiveSelectedKey, open]);
+
   if (!open) return null;
 
-  const closePalette = () => {
-    setQuery('');
-    setSelectedIndex(0);
+  const resetPalette = () => {
+    setLocalQuery('');
+    searchController?.reset();
+    setSelectedKey(null);
+    setInvokingKey(null);
+    setActionError(null);
+    invocationInFlightRef.current = false;
+  };
+
+  const closePalette = (restoreFocus: boolean) => {
+    if (invocationInFlightRef.current) return;
+    restoreFocusRef.current = restoreFocus;
+    resetPalette();
     onClose();
   };
 
-  const runCommand = (command: PaletteCommand | undefined) => {
-    if (!command) return;
-    closePalette();
-    command.action();
+  const runItem = async (item: PaletteItem | undefined) => {
+    if (!item || item.disabled || invocationInFlightRef.current) return;
+    invocationInFlightRef.current = true;
+    setInvokingKey(item.key);
+    setActionError(null);
+    try {
+      await item.invoke();
+      restoreFocusRef.current = item.restoreFocusAfterInvoke;
+      resetPalette();
+      onClose();
+    } catch (error) {
+      invocationInFlightRef.current = false;
+      setActionError(toActionErrorMessage(error));
+      setInvokingKey(null);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  };
+
+  const moveSelection = (move: 'next' | 'previous' | 'first' | 'last') => {
+    setSelectedKey(movePaletteSelection(effectiveSelectedKey, selectableKeys, move));
   };
 
   return (
-    <div
-      className="command-palette-backdrop"
-      role="presentation"
+    <dialog
+      ref={dialogRef}
+      className="command-palette"
+      aria-labelledby="command-palette-title"
+      aria-describedby="command-palette-status"
+      onCancel={(event) => {
+        event.preventDefault();
+        closePalette(true);
+      }}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) closePalette();
+        if (event.target === event.currentTarget) closePalette(true);
+      }}
+      onKeyDown={(event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') {
+          event.preventDefault();
+          closePalette(true);
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closePalette(true);
+          return;
+        }
+        if (document.activeElement !== inputRef.current || invoking) return;
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          moveSelection('next');
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveSelection('previous');
+        } else if (event.key === 'Home') {
+          event.preventDefault();
+          moveSelection('first');
+        } else if (event.key === 'End') {
+          event.preventDefault();
+          moveSelection('last');
+        } else if (event.key === 'Enter') {
+          event.preventDefault();
+          void runItem(selectedItem);
+        }
       }}
     >
-      <section
-        ref={dialogRef}
-        className="command-palette"
-        role="dialog"
-        aria-modal="true"
-        aria-label="命令中心"
-        onKeyDown={(event) => {
-          if (event.key === 'Tab') {
-            const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-              'input, button:not(:disabled), [tabindex]:not([tabindex="-1"])',
-            );
-            const first = focusable?.[0];
-            const last = focusable?.[focusable.length - 1];
-            if (first && last) {
-              if (event.shiftKey && document.activeElement === first) {
-                event.preventDefault();
-                last.focus();
-              } else if (!event.shiftKey && document.activeElement === last) {
-                event.preventDefault();
-                first.focus();
-              }
-            }
-          } else if (event.key === 'Escape') {
-            event.preventDefault();
-            closePalette();
-          } else if (event.key === 'ArrowDown') {
-            event.preventDefault();
-            if (filteredCommands.length > 0) {
-              setSelectedIndex(Math.min(effectiveSelectedIndex + 1, filteredCommands.length - 1));
-            }
-          } else if (event.key === 'ArrowUp') {
-            event.preventDefault();
-            if (filteredCommands.length > 0) {
-              setSelectedIndex(Math.max(effectiveSelectedIndex - 1, 0));
-            }
-          } else if (event.key === 'Enter') {
-            event.preventDefault();
-            runCommand(filteredCommands[effectiveSelectedIndex]);
-          }
-        }}
-      >
-        <div className="command-palette__search">
+      <h2 id="command-palette-title" className="sr-only">
+        搜索或运行命令
+      </h2>
+      <div className="command-palette__search">
+        {status === 'searching' ? (
+          <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+        ) : (
           <Search size={18} aria-hidden="true" />
-          <label htmlFor="command-search" className="sr-only">
-            搜索命令
-          </label>
-          <input
-            id="command-search"
-            ref={inputRef}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setSelectedIndex(0);
-            }}
-            placeholder="搜索页面、操作或设置…"
-            autoComplete="off"
-            role="combobox"
-            aria-expanded="true"
-            aria-controls="command-results"
-            aria-activedescendant={
-              filteredCommands[effectiveSelectedIndex]
-                ? `command-option-${filteredCommands[effectiveSelectedIndex].id}`
-                : undefined
-            }
-          />
-          <span className="key-hint">Esc</span>
-        </div>
+        )}
+        <label htmlFor="command-search" className="sr-only">
+          搜索内容或命令
+        </label>
+        <input
+          id="command-search"
+          ref={inputRef}
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setSelectedKey(null);
+            setActionError(null);
+          }}
+          placeholder="搜索页面、内容、操作或设置…"
+          autoComplete="off"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="true"
+          aria-controls="command-results"
+          aria-activedescendant={
+            effectiveSelectedKey ? optionIds.get(effectiveSelectedKey) : undefined
+          }
+          aria-keyshortcuts="Control+K Meta+K"
+          disabled={invoking}
+        />
+        <span className="key-hint">Esc</span>
+      </div>
 
-        <div className="command-palette__results" id="command-results" role="listbox">
-          {filteredCommands.length ? (
-            filteredCommands.map((command, index) => {
-              const Icon = command.icon;
-              const showGroup = index === 0 || filteredCommands[index - 1].group !== command.group;
-              return (
-                <div className="command-result-group" key={command.id}>
-                  {showGroup ? <p>{command.group}</p> : null}
+      {searchController ? (
+        <div className="command-palette__scope" role="radiogroup" aria-label="搜索范围">
+          <ScopeButton
+            scope="all"
+            selected={searchController.scope === 'all'}
+            disabled={invoking}
+            onSelect={searchController.setScope}
+          >
+            全部工作区
+          </ScopeButton>
+          <ScopeButton
+            scope="workspace"
+            selected={searchController.scope === 'workspace'}
+            disabled={invoking}
+            onSelect={searchController.setScope}
+          >
+            当前工作区
+          </ScopeButton>
+        </div>
+      ) : null}
+
+      <div className="command-palette__results">
+        <div
+          id="command-results"
+          role="listbox"
+          aria-label="搜索与命令结果"
+          aria-busy={status === 'searching'}
+        >
+          {groupedItems.map(([group, groupItems], groupIndex) => (
+            <div
+              className="command-result-group"
+              role="group"
+              aria-labelledby={`command-result-group-${groupIndex}`}
+              key={group}
+            >
+              <p id={`command-result-group-${groupIndex}`}>{group}</p>
+              {groupItems.map((item) => {
+                const Icon = item.icon;
+                const selected = effectiveSelectedKey === item.key;
+                const itemInvoking = invokingKey === item.key;
+                return (
                   <button
-                    id={`command-option-${command.id}`}
+                    ref={(element) => {
+                      if (element) optionRefs.current.set(item.key, element);
+                      else optionRefs.current.delete(item.key);
+                    }}
+                    id={optionIds.get(item.key)}
                     type="button"
                     role="option"
-                    aria-selected={effectiveSelectedIndex === index}
-                    className={`command-result ${effectiveSelectedIndex === index ? 'is-selected' : ''}`}
-                    onMouseMove={() => setSelectedIndex(index)}
-                    onClick={() => runCommand(command)}
+                    tabIndex={-1}
+                    aria-selected={selected}
+                    aria-disabled={item.disabled}
+                    className={`command-result ${selected ? 'is-selected' : ''}`}
+                    key={item.key}
+                    onPointerMove={() => {
+                      if (!item.disabled && !invoking) setSelectedKey(item.key);
+                    }}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => void runItem(item)}
                   >
                     <span className="command-result__icon">
-                      <Icon size={17} />
+                      {itemInvoking ? (
+                        <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
+                      ) : (
+                        <Icon size={17} aria-hidden="true" />
+                      )}
                     </span>
                     <span className="command-result__copy">
-                      <strong>{command.label}</strong>
-                      {command.description ? <small>{command.description}</small> : null}
+                      <strong>{item.label}</strong>
+                      {item.meta ? <span className="command-result__meta">{item.meta}</span> : null}
+                      {item.description || item.disabledReason ? (
+                        <small>{item.disabledReason ?? item.description}</small>
+                      ) : null}
                     </span>
-                    {command.shortcut ? <kbd>{command.shortcut}</kbd> : null}
+                    {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}
                   </button>
-                </div>
-              );
-            })
-          ) : (
-            <div className="command-empty">
-              <CommandIcon size={24} />
-              <strong>没有找到命令</strong>
-              <p>试试“浏览器”“任务”或“主题”。</p>
+                );
+              })}
             </div>
-          )}
+          ))}
         </div>
 
-        <footer className="command-palette__footer">
-          <span>
-            <ArrowUp size={12} />
-            <ArrowDown size={12} /> 选择
-          </span>
-          <span>
-            <CornerDownLeft size={12} /> 执行
-          </span>
-          <span>
-            <CommandIcon size={12} /> K 随时打开
-          </span>
-        </footer>
-      </section>
-    </div>
+        {items.length === 0 && status !== 'searching' && status !== 'error' ? (
+          <div className="command-empty">
+            <CommandIcon size={24} aria-hidden="true" />
+            <strong>{queryTooShort ? '继续输入以搜索内容' : '没有找到结果'}</strong>
+            <p>
+              {queryTooShort
+                ? `至少输入 ${SEARCH_QUERY_MIN_LENGTH} 个字符。`
+                : '试试更短的关键词，或切换搜索范围。'}
+            </p>
+          </div>
+        ) : null}
+        {status === 'searching' && items.length === 0 ? (
+          <div className="command-search-state">
+            <LoaderCircle className="is-spinning" size={22} aria-hidden="true" />
+            <span>正在搜索…</span>
+          </div>
+        ) : null}
+        {searchController?.error || actionError ? (
+          <div className="command-search-error" role="alert">
+            <span>{actionError ?? searchController?.error}</span>
+            {searchController?.error && searchController.canRetry ? (
+              <button type="button" onClick={searchController.retry} disabled={invoking}>
+                重试
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {searchController?.truncated ? (
+          <p className="command-search-truncated" role="status">
+            {truncatedKindLabels ? `${truncatedKindLabels}结果过多，` : '结果过多，'}
+            仅显示最相关内容。请缩小关键词或搜索范围。
+          </p>
+        ) : null}
+      </div>
+
+      <p
+        id="command-palette-status"
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {liveMessage}
+      </p>
+
+      <footer className="command-palette__footer">
+        <span>
+          <ArrowUp size={12} aria-hidden="true" />
+          <ArrowDown size={12} aria-hidden="true" /> 选择
+        </span>
+        <span>
+          <CornerDownLeft size={12} aria-hidden="true" /> 执行
+        </span>
+        <span>
+          <CommandIcon size={12} aria-hidden="true" /> K 随时打开
+        </span>
+      </footer>
+    </dialog>
   );
+}
+
+interface ScopeButtonProps {
+  readonly scope: SearchScope;
+  readonly selected: boolean;
+  readonly disabled: boolean;
+  readonly onSelect: (scope: SearchScope) => void;
+  readonly children: string;
+}
+
+function ScopeButton({ scope, selected, disabled, onSelect, children }: ScopeButtonProps) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      tabIndex={selected ? 0 : -1}
+      data-search-scope={scope}
+      className={selected ? 'is-selected' : ''}
+      disabled={disabled}
+      onClick={() => onSelect(scope)}
+      onKeyDown={(event) => {
+        if (
+          !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)
+        ) {
+          return;
+        }
+        event.preventDefault();
+        const scopeGroup = event.currentTarget.parentElement;
+        const nextScope =
+          event.key === 'Home'
+            ? 'all'
+            : event.key === 'End'
+              ? 'workspace'
+              : scope === 'all'
+                ? 'workspace'
+                : 'all';
+        onSelect(nextScope);
+        window.requestAnimationFrame(() => {
+          scopeGroup
+            ?.querySelector<HTMLButtonElement>(`[data-search-scope="${nextScope}"]`)
+            ?.focus();
+        });
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function toActionErrorMessage(error: unknown): string {
+  if (!(error instanceof Error) || !error.message.trim()) return '操作失败，请重试。';
+  return error.message.trim();
 }

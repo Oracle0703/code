@@ -36,6 +36,79 @@ afterEach(() => {
   electron.invoke.mockImplementation(() => Promise.resolve(undefined));
 });
 
+describe('preload data and search API', () => {
+  it('exposes only the declared frozen data and search methods', () => {
+    expect(Object.keys(api.database).sort()).toEqual([
+      'cancelImport',
+      'chooseImport',
+      'commitImport',
+      'createBackup',
+      'exportData',
+      'getManagementSnapshot',
+      'getStatus',
+      'listBackups',
+      'onBackupStateChange',
+      'updateBackupPolicy',
+    ]);
+    expect(Object.keys(api.search)).toEqual(['query']);
+    expect(Object.isFrozen(api.database)).toBe(true);
+    expect(Object.isFrozen(api.search)).toBe(true);
+  });
+
+  it('forwards exact data-management and search inputs through allowlisted channels', async () => {
+    const importId = '123e4567-e89b-42d3-a456-426614174000';
+    const policy = {
+      enabled: true,
+      cadence: 'weekly' as const,
+      localTimeMinute: 180,
+      weekday: 4,
+      retentionCount: 21,
+      expectedRevision: 2,
+    };
+    const search = {
+      workspaceId: '223e4567-e89b-42d3-a456-426614174000',
+      query: '项目 搜索',
+      scope: 'all' as const,
+    };
+
+    await api.database.getManagementSnapshot();
+    await api.database.updateBackupPolicy(policy);
+    await api.database.exportData();
+    await api.database.chooseImport();
+    await api.database.commitImport({ importId, previewDigest: 'a'.repeat(64) });
+    await api.database.cancelImport({ importId });
+    await api.search.query(search);
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['database:get-management-snapshot'],
+      ['database:update-backup-policy', policy],
+      ['database:export-data'],
+      ['database:choose-import'],
+      ['database:commit-import', { importId, previewDigest: 'a'.repeat(64) }],
+      ['database:cancel-import', { importId }],
+      ['search:query', search],
+    ]);
+  });
+
+  it('subscribes and removes data-management state listeners', () => {
+    const listener = vi.fn();
+    const unsubscribe = api.database.onBackupStateChange(listener);
+    expect(electron.on).toHaveBeenCalledExactlyOnceWith(
+      'database:backup-state-changed',
+      expect.any(Function),
+    );
+    const wrapped = electron.on.mock.calls[0]?.[1] as (event: unknown, payload: unknown) => void;
+    const snapshot = { database: {}, backups: [], schedule: {} };
+    wrapped({}, snapshot);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(snapshot);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledExactlyOnceWith(
+      'database:backup-state-changed',
+      wrapped,
+    );
+  });
+});
+
 describe('preload inbox API', () => {
   it('exposes only the declared inbox methods and capture event', () => {
     expect(Object.keys(api.inbox).sort()).toEqual([

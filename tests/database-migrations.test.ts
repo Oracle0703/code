@@ -190,6 +190,38 @@ describe('database migrations', () => {
     database.close();
   });
 
+  it('allows only the read-only data_version probe required by FTS5 migrations', async () => {
+    const readable = await createDatabase();
+    const readOnlyProbe = new MigrationRunner([
+      {
+        version: 1,
+        name: 'fts_data_version_probe',
+        sql: `
+          PRAGMA data_version;
+          CREATE VIRTUAL TABLE searchable USING fts5(content, tokenize = 'trigram');
+        `,
+      },
+    ]);
+    expect(readOnlyProbe.apply(readable)).toMatchObject({ fromVersion: 0, toVersion: 1 });
+    readable.close();
+
+    const writable = await createDatabase();
+    const assignment = new MigrationRunner([
+      {
+        version: 1,
+        name: 'data_version_assignment',
+        sql: 'CREATE TABLE escaped (id INTEGER PRIMARY KEY) STRICT; PRAGMA data_version = 1;',
+      },
+    ]);
+    expect(() => assignment.apply(writable)).toThrow(DatabaseMigrationError);
+    expect(
+      writable.get<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'escaped'",
+      ),
+    ).toEqual({ count: 0 });
+    writable.close();
+  });
+
   it('denies migration-owned database attachments outside the controlled path', async () => {
     const database = await createDatabase();
     const externalDirectory = await createTemporaryDirectory('daily-workbench-attachment-');

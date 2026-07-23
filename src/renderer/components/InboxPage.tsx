@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   CheckSquare2,
@@ -12,8 +12,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import type { InboxCategory, InboxEntry } from '../../shared/contracts';
-
-type InboxFilter = 'all' | InboxCategory;
+import { filterInboxEntries, type InboxFilter } from '../inbox-state';
 
 interface InboxPageProps {
   entries: readonly InboxEntry[];
@@ -23,6 +22,8 @@ interface InboxPageProps {
   pendingEntryIds: ReadonlySet<string>;
   pendingConversionEntryIds: ReadonlySet<string>;
   pendingNoteConversionEntryIds: ReadonlySet<string>;
+  requestedEntryId?: string | null;
+  onRequestedEntryHandled?: () => void;
   onRetry: () => void;
   onOpenCapture: () => void;
   onCategorize: (entryId: string, category: InboxCategory) => Promise<void>;
@@ -54,6 +55,8 @@ export function InboxPage({
   pendingEntryIds,
   pendingConversionEntryIds,
   pendingNoteConversionEntryIds,
+  requestedEntryId = null,
+  onRequestedEntryHandled,
   onRetry,
   onOpenCapture,
   onCategorize,
@@ -63,14 +66,27 @@ export function InboxPage({
 }: InboxPageProps) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<InboxFilter>('all');
-  const visibleEntries = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    return entries.filter(
-      (entry) =>
-        (filter === 'all' || entry.category === filter) &&
-        (!normalizedQuery || entry.content.toLocaleLowerCase().includes(normalizedQuery)),
-    );
-  }, [entries, filter, query]);
+  const entryRefs = useRef(new Map<string, HTMLLIElement>());
+  const visibleEntries = useMemo(
+    () => filterInboxEntries(entries, query, filter, requestedEntryId),
+    [entries, filter, query, requestedEntryId],
+  );
+
+  useEffect(() => {
+    if (!requestedEntryId) return;
+    let handledTimer: number | null = null;
+    const frame = window.requestAnimationFrame(() => {
+      const entry = entryRefs.current.get(requestedEntryId);
+      if (!entry) return;
+      entry.scrollIntoView({ block: 'center' });
+      entry.focus({ preventScroll: true });
+      handledTimer = window.setTimeout(() => onRequestedEntryHandled?.(), 1_600);
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (handledTimer !== null) window.clearTimeout(handledTimer);
+    };
+  }, [entries, onRequestedEntryHandled, requestedEntryId]);
 
   return (
     <div className="section-page inbox-page" aria-busy={status === 'loading'}>
@@ -156,7 +172,18 @@ export function InboxPage({
                   pendingNoteConversionEntryIds.has(entry.id);
                 const Icon = categoryIcon(entry.category);
                 return (
-                  <li className="inbox-entry" key={entry.id}>
+                  <li
+                    ref={(element) => {
+                      if (element) entryRefs.current.set(entry.id, element);
+                      else entryRefs.current.delete(entry.id);
+                    }}
+                    className={`inbox-entry ${
+                      requestedEntryId === entry.id ? 'is-search-target' : ''
+                    }`}
+                    tabIndex={-1}
+                    aria-current={requestedEntryId === entry.id ? 'true' : undefined}
+                    key={entry.id}
+                  >
                     <span className={`inbox-entry__icon is-${entry.category}`}>
                       <Icon size={16} aria-hidden="true" />
                     </span>

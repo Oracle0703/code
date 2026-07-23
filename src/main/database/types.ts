@@ -28,7 +28,7 @@ export interface MigrationResult {
   readonly applied: readonly AppliedMigration[];
 }
 
-export type BackupReason = 'manual' | 'pre-migration';
+export type BackupReason = 'manual' | 'scheduled' | 'pre-migration' | 'pre-import';
 
 export interface BackupResult {
   readonly id: string;
@@ -39,6 +39,11 @@ export interface BackupResult {
   readonly sizeBytes: number;
   readonly schemaVersion: number;
   readonly pages: number;
+}
+
+export interface BackupRetentionResult {
+  readonly deleted: number;
+  readonly retained: number;
 }
 
 export interface DatabaseMetadata {

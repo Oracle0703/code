@@ -12,6 +12,13 @@ import {
   type BrowserTabTargetInput,
   type BrowserVisibilityInput,
   type BrowserWorkspaceInput,
+  type BackupPolicyUpdateInput,
+  type DataExportResult,
+  type DataImportCommitInput,
+  type DataImportCommitResult,
+  type DataImportSelection,
+  type DataImportTargetInput,
+  type DataManagementSnapshot,
   type DatabaseBackupInfo,
   type DatabaseStatus,
   type InboxArchiveResult,
@@ -30,6 +37,8 @@ import {
   type ScheduleSnapshot,
   type ScheduleTargetInput,
   type ScheduleUpdateInput,
+  type SearchQueryInput,
+  type SearchSnapshot,
   type TaskConversionResult,
   type TaskConvertInboxInput,
   type TaskCreateInput,
@@ -150,6 +159,21 @@ const workbenchApi: WorkbenchApi = Object.freeze({
     getStatus: () => invoke<DatabaseStatus>(IPC_CHANNELS.database.getStatus),
     createBackup: () => invoke<DatabaseBackupInfo>(IPC_CHANNELS.database.createBackup),
     listBackups: () => invoke<DatabaseBackupInfo[]>(IPC_CHANNELS.database.listBackups),
+    getManagementSnapshot: () =>
+      invoke<DataManagementSnapshot>(IPC_CHANNELS.database.getManagementSnapshot),
+    updateBackupPolicy: (input: BackupPolicyUpdateInput) =>
+      invoke<DataManagementSnapshot>(IPC_CHANNELS.database.updateBackupPolicy, input),
+    exportData: () => invoke<DataExportResult>(IPC_CHANNELS.database.exportData),
+    chooseImport: () => invoke<DataImportSelection>(IPC_CHANNELS.database.chooseImport),
+    commitImport: (input: DataImportCommitInput) =>
+      invoke<DataImportCommitResult>(IPC_CHANNELS.database.commitImport, input),
+    cancelImport: (input: DataImportTargetInput) =>
+      invoke<void>(IPC_CHANNELS.database.cancelImport, input),
+    onBackupStateChange: (listener: (snapshot: DataManagementSnapshot) => void) =>
+      subscribe(IPC_CHANNELS.database.backupStateChanged, listener),
+  }),
+  search: Object.freeze({
+    query: (input: SearchQueryInput) => invoke<SearchSnapshot>(IPC_CHANNELS.search.query, input),
   }),
   workspace: Object.freeze({
     getSnapshot: () => invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.getSnapshot),

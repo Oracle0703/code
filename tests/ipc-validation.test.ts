@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertNoArguments,
+  parseBackupPolicyUpdateInput,
   parseBoolean,
   parseBrowserBookmarkTargetInput,
   parseBrowserBounds,
@@ -12,6 +13,8 @@ import {
   parseBrowserTabTargetInput,
   parseBrowserVisibilityInput,
   parseBrowserWorkspaceInput,
+  parseDataImportCommitInput,
+  parseDataImportTargetInput,
   parseInboxCategorizeInput,
   parseInboxCreateInput,
   parseInboxTargetInput,
@@ -23,6 +26,7 @@ import {
   parseScheduleCreateInput,
   parseScheduleTargetInput,
   parseScheduleUpdateInput,
+  parseSearchQueryInput,
   parseTaskConvertInboxInput,
   parseTaskCreateInput,
   parseTaskPlanningInput,
@@ -51,6 +55,7 @@ const SCHEDULE_ID = '623e4567-e89b-42d3-a456-426614174000';
 const TAB_ID = '723e4567-e89b-42d3-a456-426614174000';
 const BOOKMARK_ID = '823e4567-e89b-42d3-a456-426614174000';
 const DOWNLOAD_ID = '923e4567-e89b-42d3-a456-426614174000';
+const IMPORT_ID = 'a23e4567-e89b-42d3-a456-426614174000';
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -158,6 +163,120 @@ describe('IPC validation', () => {
         workspaceId: WORKSPACE_ID,
         bounds: { x: 0, y: 0, width: 430, height: 640 },
         tabId: TAB_ID,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('normalizes bounded search requests without accepting query controls', () => {
+    expect(
+      parseSearchQueryInput({
+        workspaceId: WORKSPACE_ID,
+        query: '  ＡPI 搜索  ',
+        scope: 'all',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      query: 'API 搜索',
+      scope: 'all',
+    });
+    expect(() =>
+      parseSearchQueryInput({
+        workspaceId: WORKSPACE_ID,
+        query: 'x',
+        scope: 'workspace',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseSearchQueryInput({
+        workspaceId: WORKSPACE_ID,
+        query: '搜索',
+        scope: 'everywhere',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseSearchQueryInput({
+        workspaceId: WORKSPACE_ID,
+        query: '搜索',
+        scope: 'all',
+        limit: 10_000,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts exact backup policies and rejects ambiguous schedule fields', () => {
+    expect(
+      parseBackupPolicyUpdateInput({
+        enabled: true,
+        cadence: 'weekly',
+        localTimeMinute: 120,
+        weekday: 1,
+        retentionCount: 14,
+        expectedRevision: 2,
+      }),
+    ).toEqual({
+      enabled: true,
+      cadence: 'weekly',
+      localTimeMinute: 120,
+      weekday: 1,
+      retentionCount: 14,
+      expectedRevision: 2,
+    });
+    expect(() =>
+      parseBackupPolicyUpdateInput({
+        enabled: true,
+        cadence: 'daily',
+        localTimeMinute: 120,
+        weekday: 1,
+        retentionCount: 14,
+        expectedRevision: 2,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseBackupPolicyUpdateInput({
+        enabled: true,
+        cadence: 'weekly',
+        localTimeMinute: 120,
+        weekday: null,
+        retentionCount: 14,
+        expectedRevision: 2,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseBackupPolicyUpdateInput({
+        enabled: true,
+        cadence: 'daily',
+        localTimeMinute: 1_440,
+        weekday: null,
+        retentionCount: 14,
+        expectedRevision: 2,
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts only opaque import ids and matching lowercase digests', () => {
+    expect(parseDataImportTargetInput({ importId: IMPORT_ID })).toEqual({
+      importId: IMPORT_ID,
+    });
+    expect(
+      parseDataImportCommitInput({
+        importId: IMPORT_ID,
+        previewDigest: 'a'.repeat(64),
+      }),
+    ).toEqual({
+      importId: IMPORT_ID,
+      previewDigest: 'a'.repeat(64),
+    });
+    expect(() =>
+      parseDataImportCommitInput({
+        importId: IMPORT_ID,
+        previewDigest: 'A'.repeat(64),
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseDataImportCommitInput({
+        importId: IMPORT_ID,
+        previewDigest: 'a'.repeat(64),
+        path: '/tmp/import.dwbx',
       }),
     ).toThrow(TypeError);
   });

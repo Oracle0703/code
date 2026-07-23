@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { constants, type Stats } from 'node:fs';
+import { chmod, lstat, open, rename, rm } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import type {
+  BackupPolicy,
+  BackupPolicyUpdateInput,
+  BackupRunErrorCode,
   DatabaseBackupInfo,
   DatabaseStatus,
   InboxArchiveResult,
@@ -20,6 +24,8 @@ import type {
   ScheduleSnapshot,
   ScheduleTargetInput,
   ScheduleUpdateInput,
+  SearchQueryInput,
+  SearchSnapshot,
   TaskConversionResult,
   TaskConvertInboxInput,
   TaskCreateInput,
@@ -43,12 +49,16 @@ import {
   type BrowserTabMetadataInput,
   type BrowserWorkspaceDataInput,
 } from '../browser';
+import { readPortableDatabaseRecords, type PortableDataRecord } from '../data-portability';
 import { InboxService } from '../inbox';
 import { NoteService } from '../notes';
 import { ScheduleService } from '../schedule';
+import { SearchService } from '../search';
 import { TaskService } from '../tasks';
 import { WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
+import { BackupPolicyRepository } from './backup-policy-repository';
+import type { BackupSchedulerPersistentState } from './backup-scheduler';
 import { DEFAULT_MIGRATIONS } from './default-migrations';
 import {
   DatabaseError,
@@ -59,7 +69,12 @@ import {
 } from './errors';
 import { MetadataRepository } from './metadata-repository';
 import { MigrationRunner } from './migration-runner';
-import { databaseFileExists, prepareDatabaseDirectories, resolveDatabasePaths } from './paths';
+import {
+  databaseFileExists,
+  prepareDatabaseBackupDirectory,
+  prepareDatabaseDataDirectory,
+  resolveDatabasePaths,
+} from './paths';
 import {
   configureDesktopPragmas,
   createNodeSqliteAdapter,
@@ -67,11 +82,18 @@ import {
   type SqliteAdapterFactory,
 } from './sqlite-adapter';
 import type {
+  BackupReason,
   BackupResult,
+  BackupRetentionResult,
   DatabaseHealth,
   DatabaseInitializationResult,
   Migration,
 } from './types';
+
+const DATABASE_INITIALIZATION_INTENT = 'database-initializing-v1';
+const DATABASE_INITIALIZATION_INTENT_CONTENT = 'daily-workbench-database-initializing-v1\n';
+const DATABASE_INITIALIZATION_SENTINEL = 'database-initialized-v1';
+const DATABASE_INITIALIZATION_SENTINEL_CONTENT = 'daily-workbench-database-initialized-v1\n';
 
 interface TextRow {
   value: string;
@@ -133,6 +155,7 @@ export class DatabaseService {
   readonly #taskService: TaskService;
   readonly #noteService: NoteService;
   readonly #scheduleService: ScheduleService;
+  readonly #searchService: SearchService;
   readonly #browserService: BrowserService;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
@@ -200,6 +223,10 @@ export class DatabaseService {
       idFactory: scheduleIdFactory,
       todayFactory: scheduleTodayFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#searchService = new SearchService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      todayFactory: scheduleTodayFactory,
     });
     this.#browserService = new BrowserService({
       execute: (operation) => this.#enqueue((database) => operation(database)),
@@ -313,6 +340,48 @@ export class DatabaseService {
     return this.#closePromise;
   }
 
+  async validateExistingFile(): Promise<void> {
+    if (this.#state !== 'closed') {
+      throw new DatabaseStateError(
+        'An existing database file can only be validated by a closed service.',
+      );
+    }
+    if (!(await databaseFileExists(this.#paths.databasePath))) {
+      throw new DatabasePathError('The database file is missing.');
+    }
+    const before = await lstat(this.#paths.databasePath);
+
+    const snapshot = this.#adapterFactory(this.#paths.databasePath, {
+      readOnly: true,
+      timeoutMs: 5_000,
+    });
+    try {
+      snapshot.open();
+      const opened = await assertOpenedDatabasePath(snapshot, this.#paths.databasePath);
+      if (!samePreOpenFile(before, opened)) {
+        throw new DatabasePathError('The existing database changed before it could be opened.');
+      }
+      snapshot.exec(`
+        PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = 5000;
+        PRAGMA trusted_schema = OFF;
+        PRAGMA query_only = ON;
+      `);
+      this.#validateSnapshot(snapshot, this.#migrationRunner.latestVersion);
+      const after = await assertOpenedDatabasePath(snapshot, this.#paths.databasePath);
+      if (!samePreOpenFile(opened, after)) {
+        throw new DatabasePathError('The existing database changed while it was validated.');
+      }
+    } catch (error) {
+      if (error instanceof DatabaseError) throw error;
+      throw new DatabaseOpenError('The existing database file could not be validated.', {
+        cause: error,
+      });
+    } finally {
+      snapshot.close();
+    }
+  }
+
   getStatus(): Promise<DatabaseStatus> {
     return this.#enqueue(async (database, backups) => {
       const health = this.#readHealth(database);
@@ -328,15 +397,88 @@ export class DatabaseService {
   }
 
   createBackup(): Promise<DatabaseBackupInfo> {
-    return this.#enqueue(async (database, backups) => {
-      const schemaVersion = this.#migrationRunner.validateApplied(database).length;
-      const result = await backups.create(database, 'manual', schemaVersion);
-      return toDatabaseBackupInfo(result);
-    });
+    return this.#createBackup('manual');
   }
 
   listBackups(): Promise<DatabaseBackupInfo[]> {
     return this.#enqueue((_database, backups) => backups.list());
+  }
+
+  validateExistingBackup(
+    backupId: string,
+    expectedReason: BackupReason,
+  ): Promise<DatabaseBackupInfo> {
+    if (this.#state === 'open') {
+      return this.#enqueue((_database, backups) =>
+        backups.validateReference(backupId, expectedReason),
+      );
+    }
+    if (this.#state === 'closed') {
+      return this.#createBackupManager().validateReference(backupId, expectedReason);
+    }
+    return Promise.reject(
+      new DatabaseStateError(
+        'A database backup cannot be validated while the database is changing state.',
+      ),
+    );
+  }
+
+  readPortableRecords(): Promise<readonly PortableDataRecord[]> {
+    return this.#enqueue((database) => readPortableDatabaseRecords(database));
+  }
+
+  getBackupSchedulerState(): Promise<BackupSchedulerPersistentState> {
+    return this.#enqueue((database) => {
+      const repository = new BackupPolicyRepository(database);
+      const policy = repository.readPolicy();
+      const runState = repository.readRunState();
+      return {
+        policy,
+        lastAttemptAt: runState.lastAttemptAt,
+        lastSuccessAt: runState.lastSuccessAt,
+        lastSuccessBucket: runState.lastSuccessBucket,
+        lastErrorCode: runState.lastErrorCode,
+        consecutiveFailures: runState.consecutiveFailures,
+      };
+    });
+  }
+
+  updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<BackupPolicy> {
+    return this.#enqueue((database) =>
+      new BackupPolicyRepository(database).updatePolicy(input, this.#now().toISOString()),
+    );
+  }
+
+  recordBackupAttempt(timestamp: string): Promise<void> {
+    return this.#enqueue((database) => {
+      new BackupPolicyRepository(database).recordAttempt(timestamp);
+    });
+  }
+
+  recordBackupResult(input: {
+    readonly attemptedAt: string;
+    readonly completedAt: string;
+    readonly successfulBucket?: string;
+    readonly errorCode?: BackupRunErrorCode;
+  }): Promise<void> {
+    return this.#enqueue((database) => {
+      new BackupPolicyRepository(database).recordResult(input);
+    });
+  }
+
+  createScheduledBackup(): Promise<DatabaseBackupInfo> {
+    return this.#createBackup('scheduled');
+  }
+
+  createPreImportBackup(): Promise<DatabaseBackupInfo> {
+    return this.#createBackup('pre-import');
+  }
+
+  pruneScheduledBackups(protectedBackupId: string): Promise<BackupRetentionResult> {
+    return this.#enqueue((database, backups) => {
+      const policy = new BackupPolicyRepository(database).readPolicy();
+      return backups.pruneScheduled(policy.retentionCount, protectedBackupId);
+    });
   }
 
   getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
@@ -443,6 +585,10 @@ export class DatabaseService {
     return this.#scheduleService.archive(input);
   }
 
+  search(input: SearchQueryInput): Promise<SearchSnapshot> {
+    return this.#searchService.query(input);
+  }
+
   getBrowserData(input: BrowserWorkspaceDataInput): Promise<BrowserData> {
     return this.#browserService.getData(input);
   }
@@ -472,30 +618,66 @@ export class DatabaseService {
   }
 
   async #initialize(): Promise<DatabaseInitializationResult> {
-    await prepareDatabaseDirectories(this.#paths);
+    await prepareDatabaseDataDirectory(this.#paths);
+    const legacyBackupDirectoryExisted = await inspectLegacyBackupDirectory(
+      this.#paths.backupDirectory,
+    );
+    const initializedBefore = await inspectDatabaseInitializationSentinel(
+      this.#paths.dataDirectory,
+    );
+    const initializationIntentBefore = await inspectDatabaseInitializationIntent(
+      this.#paths.dataDirectory,
+    );
     const existed = await databaseFileExists(this.#paths.databasePath);
-    const existingSize = existed ? (await lstat(this.#paths.databasePath)).size : 0;
+    const existingEntry = existed ? await lstat(this.#paths.databasePath) : undefined;
+    const existingSize = existingEntry?.size ?? 0;
+    const backups = this.#createBackupManager();
+    const recognizedBackupCount = legacyBackupDirectoryExisted ? await backups.count() : 0;
+    const retryingInitialization =
+      initializationIntentBefore && !initializedBefore && recognizedBackupCount === 0;
+    if (existingEntry && existingEntry.size === 0 && !retryingInitialization) {
+      throw new DatabaseOpenError(
+        'The existing database file is empty; refusing to initialize it as a new database.',
+      );
+    }
+    if (
+      !existed &&
+      (initializedBefore ||
+        recognizedBackupCount > 0 ||
+        (legacyBackupDirectoryExisted && !retryingInitialization))
+    ) {
+      throw new DatabaseOpenError(
+        'The main database is missing while prior application data still exists; refusing to create an empty database.',
+      );
+    }
+    if (!existed && !retryingInitialization) {
+      await ensureDatabaseInitializationIntent(this.#paths.dataDirectory);
+    }
+    await prepareDatabaseBackupDirectory(this.#paths);
     const database = this.#adapterFactory(this.#paths.databasePath, { timeoutMs: 5_000 });
     this.#database = database;
 
     try {
       database.open();
-      await assertOpenedDatabasePath(database, this.#paths.databasePath);
+      const openedEntry = await assertOpenedDatabasePath(database, this.#paths.databasePath);
+      if (
+        existingEntry &&
+        !(existingEntry.size === 0 && retryingInitialization
+          ? sameInitializingFileIdentity(existingEntry, openedEntry)
+          : samePreOpenFile(existingEntry, openedEntry))
+      ) {
+        throw new DatabasePathError(
+          'The database changed before its existing file could be opened.',
+        );
+      }
       await chmod(this.#paths.databasePath, 0o600);
       configureDesktopPragmas(database);
 
-      const backups = new BackupManager({
-        paths: this.#paths,
-        adapterFactory: this.#adapterFactory,
-        validateSnapshot: (snapshot, version) => this.#validateSnapshot(snapshot, version),
-        now: this.#now,
-        idFactory: this.#idFactory,
-      });
       this.#backupManager = backups;
 
       const plan = this.#migrationRunner.plan(database);
       let preMigrationBackup: BackupResult | undefined;
-      if (existingSize > 0 && plan.pending.length > 0) {
+      if (existingSize > 0 && plan.pending.length > 0 && !retryingInitialization) {
         preMigrationBackup = await backups.create(database, 'pre-migration', plan.currentVersion);
       }
 
@@ -507,11 +689,14 @@ export class DatabaseService {
       try {
         new MetadataRepository(database).initializeWithinTransaction(openedAt, this.#idFactory());
         this.#workspaceService.initializeWithinTransaction(database, openedAt);
+        new BackupPolicyRepository(database).initializeWithinTransaction(openedAt);
         this.#inboxService.validateSnapshot(database);
         this.#taskService.validateSnapshot(database);
         this.#noteService.validateSnapshot(database);
         this.#scheduleService.validateSnapshot(database);
         this.#browserService.validateSnapshot(database);
+        this.#searchService.validateSnapshot(database);
+        this.#searchService.validateContentIntegrity(database);
         health = this.#readHealth(database);
         database.exec('COMMIT');
       } catch (error) {
@@ -525,6 +710,12 @@ export class DatabaseService {
         throw error;
       }
 
+      const finalEntry = await assertOpenedDatabasePath(database, this.#paths.databasePath);
+      if (finalEntry.size < 1 || !sameFileIdentity(openedEntry, finalEntry)) {
+        throw new DatabasePathError('The database path changed while it was initialized.');
+      }
+      await ensureDatabaseInitializationSentinel(this.#paths.dataDirectory);
+      await removeDatabaseInitializationIntent(this.#paths.dataDirectory);
       return { health, migration, preMigrationBackup };
     } catch (error) {
       database.close();
@@ -533,6 +724,24 @@ export class DatabaseService {
       }
       throw new DatabaseOpenError('The database could not be initialized.', { cause: error });
     }
+  }
+
+  #createBackup(reason: 'manual' | 'scheduled' | 'pre-import'): Promise<DatabaseBackupInfo> {
+    return this.#enqueue(async (database, backups) => {
+      const schemaVersion = this.#migrationRunner.validateApplied(database).length;
+      const result = await backups.create(database, reason, schemaVersion);
+      return toDatabaseBackupInfo(result);
+    });
+  }
+
+  #createBackupManager(): BackupManager {
+    return new BackupManager({
+      paths: this.#paths,
+      adapterFactory: this.#adapterFactory,
+      validateSnapshot: (snapshot, version) => this.#validateSnapshot(snapshot, version),
+      now: this.#now,
+      idFactory: this.#idFactory,
+    });
   }
 
   #enqueue<T>(
@@ -599,6 +808,11 @@ export class DatabaseService {
     if (expectedVersion >= 6) {
       this.#browserService.validateSnapshot(database);
     }
+    if (expectedVersion >= 7) {
+      new BackupPolicyRepository(database).readPolicy();
+      new BackupPolicyRepository(database).readRunState();
+      this.#searchService.validateSnapshot(database);
+    }
   }
 
   #readHealth(database: SqliteAdapter): DatabaseHealth {
@@ -650,7 +864,7 @@ export class DatabaseService {
 async function assertOpenedDatabasePath(
   database: SqliteAdapter,
   expectedPath: string,
-): Promise<void> {
+): Promise<Stats> {
   const location = database.location;
   if (!location || resolve(location) !== expectedPath) {
     throw new DatabasePathError('The opened database resolved outside its controlled path.');
@@ -662,6 +876,230 @@ async function assertOpenedDatabasePath(
   });
   if (!entry.isFile() || entry.isSymbolicLink()) {
     throw new DatabasePathError('The opened database path must remain a regular file.');
+  }
+  return entry;
+}
+
+function sameFileIdentity(left: Stats, right: Stats): boolean {
+  if (left.dev !== 0 && left.ino !== 0 && right.dev !== 0 && right.ino !== 0) {
+    return left.dev === right.dev && left.ino === right.ino;
+  }
+  return (
+    left.birthtimeMs !== 0 && right.birthtimeMs !== 0 && left.birthtimeMs === right.birthtimeMs
+  );
+}
+
+function samePreOpenFile(left: Stats, right: Stats): boolean {
+  return (
+    left.isFile() &&
+    !left.isSymbolicLink() &&
+    right.isFile() &&
+    !right.isSymbolicLink() &&
+    right.size > 0 &&
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs
+  );
+}
+
+function sameInitializingFileIdentity(left: Stats, right: Stats): boolean {
+  return (
+    left.isFile() &&
+    !left.isSymbolicLink() &&
+    left.size === 0 &&
+    right.isFile() &&
+    !right.isSymbolicLink() &&
+    sameFileIdentity(left, right) &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs
+  );
+}
+
+function sameStableFile(left: Stats, right: Stats): boolean {
+  return samePreOpenFile(left, right) && left.ctimeMs === right.ctimeMs;
+}
+
+async function inspectLegacyBackupDirectory(backupDirectory: string): Promise<boolean> {
+  const entry = await lstat(backupDirectory).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new DatabasePathError('The legacy backup directory could not be inspected.', {
+      cause: error,
+    });
+  });
+  if (!entry) return false;
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new DatabasePathError(
+      'The backup path must be a real directory, not a file or symbolic link.',
+    );
+  }
+  return true;
+}
+
+async function inspectDatabaseInitializationSentinel(dataDirectory: string): Promise<boolean> {
+  return (
+    (await inspectDatabaseMarker(
+      dataDirectory,
+      DATABASE_INITIALIZATION_SENTINEL,
+      DATABASE_INITIALIZATION_SENTINEL_CONTENT,
+      'initialization sentinel',
+    )) !== undefined
+  );
+}
+
+async function inspectDatabaseInitializationIntent(dataDirectory: string): Promise<boolean> {
+  return (
+    (await inspectDatabaseMarker(
+      dataDirectory,
+      DATABASE_INITIALIZATION_INTENT,
+      DATABASE_INITIALIZATION_INTENT_CONTENT,
+      'initialization intent',
+    )) !== undefined
+  );
+}
+
+async function inspectDatabaseMarker(
+  dataDirectory: string,
+  fileName: string,
+  content: string,
+  label: string,
+): Promise<Stats | undefined> {
+  const markerPath = databaseMarkerPath(dataDirectory, fileName, label);
+  const before = await lstat(markerPath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw new DatabasePathError(`The database ${label} could not be inspected.`, { cause: error });
+  });
+  if (!before) return undefined;
+  const expected = Buffer.from(content, 'utf8');
+  if (!before.isFile() || before.isSymbolicLink() || before.size !== expected.byteLength) {
+    throw new DatabasePathError(`The database ${label} is invalid.`);
+  }
+
+  const flags = constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
+  const handle = await open(markerPath, flags).catch((error: unknown) => {
+    throw new DatabasePathError(`The database ${label} could not be opened.`, {
+      cause: error,
+    });
+  });
+  try {
+    const opened = await handle.stat();
+    if (!sameStableFile(before, opened)) {
+      throw new DatabasePathError(`The database ${label} changed before it was opened.`);
+    }
+    const contents = await handle.readFile();
+    const [afterHandle, afterPath] = await Promise.all([handle.stat(), lstat(markerPath)]);
+    if (
+      !contents.equals(expected) ||
+      !sameStableFile(opened, afterHandle) ||
+      !sameStableFile(opened, afterPath)
+    ) {
+      throw new DatabasePathError(`The database ${label} changed while it was read.`);
+    }
+    return afterPath;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+async function ensureDatabaseInitializationSentinel(dataDirectory: string): Promise<void> {
+  await ensureDatabaseMarker(
+    dataDirectory,
+    DATABASE_INITIALIZATION_SENTINEL,
+    DATABASE_INITIALIZATION_SENTINEL_CONTENT,
+    'initialization sentinel',
+  );
+}
+
+async function ensureDatabaseInitializationIntent(dataDirectory: string): Promise<void> {
+  await ensureDatabaseMarker(
+    dataDirectory,
+    DATABASE_INITIALIZATION_INTENT,
+    DATABASE_INITIALIZATION_INTENT_CONTENT,
+    'initialization intent',
+  );
+}
+
+async function ensureDatabaseMarker(
+  dataDirectory: string,
+  fileName: string,
+  content: string,
+  label: string,
+): Promise<void> {
+  if ((await inspectDatabaseMarker(dataDirectory, fileName, content, label)) !== undefined) {
+    await syncDirectory(dataDirectory);
+    return;
+  }
+
+  const markerPath = databaseMarkerPath(dataDirectory, fileName, label);
+  const temporaryPath = resolve(dataDirectory, `.${fileName}.${randomUUID()}.partial`);
+  if (dirname(temporaryPath) !== dataDirectory) {
+    throw new DatabasePathError(`The database ${label} escaped its data directory.`);
+  }
+  let handle;
+  try {
+    handle = await open(temporaryPath, 'wx', 0o600);
+    await handle.writeFile(content, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, markerPath);
+    await syncDirectory(dataDirectory);
+    if ((await inspectDatabaseMarker(dataDirectory, fileName, content, label)) === undefined) {
+      throw new DatabasePathError(`The database ${label} was not published.`);
+    }
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    if (error instanceof DatabaseError) throw error;
+    throw new DatabasePathError(`The database ${label} could not be published.`, {
+      cause: error,
+    });
+  }
+}
+
+async function removeDatabaseInitializationIntent(dataDirectory: string): Promise<void> {
+  const intentPath = databaseMarkerPath(
+    dataDirectory,
+    DATABASE_INITIALIZATION_INTENT,
+    'initialization intent',
+  );
+  const inspected = await inspectDatabaseMarker(
+    dataDirectory,
+    DATABASE_INITIALIZATION_INTENT,
+    DATABASE_INITIALIZATION_INTENT_CONTENT,
+    'initialization intent',
+  );
+  if (!inspected) return;
+  const beforeRemoval = await lstat(intentPath).catch((error: unknown) => {
+    throw new DatabasePathError(
+      'The database initialization intent could not be revalidated before removal.',
+      { cause: error },
+    );
+  });
+  if (!sameStableFile(inspected, beforeRemoval)) {
+    throw new DatabasePathError(
+      'The database initialization intent changed before it could be removed.',
+    );
+  }
+  await rm(intentPath);
+  await syncDirectory(dataDirectory);
+}
+
+function databaseMarkerPath(dataDirectory: string, fileName: string, label: string): string {
+  const path = resolve(dataDirectory, fileName);
+  if (dirname(path) !== dataDirectory) {
+    throw new DatabasePathError(`The database ${label} escaped its data directory.`);
+  }
+  return path;
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const handle = await open(path, constants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close().catch(() => undefined);
   }
 }
 
