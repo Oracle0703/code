@@ -1,6 +1,15 @@
 import {
   TERMINAL_SHELLS,
   type BrowserBounds,
+  type BrowserBoundsInput,
+  type BrowserBookmarkTargetInput,
+  type BrowserCreateTabInput,
+  type BrowserDownloadTargetInput,
+  type BrowserNavigateInput,
+  type BrowserOpenBookmarkInput,
+  type BrowserTabTargetInput,
+  type BrowserVisibilityInput,
+  type BrowserWorkspaceInput,
   type InboxCategorizeInput,
   type InboxCreateInput,
   type InboxTargetInput,
@@ -19,6 +28,7 @@ import {
   type TaskStatusInput,
   type TerminalCreateOptions,
   type TerminalShell,
+  type WindowCloseResponse,
   type WorkspaceCreateInput,
   type WorkspacePreferencesInput,
   type WorkspaceRenameInput,
@@ -121,11 +131,131 @@ export function parseBrowserUrl(value: unknown): string {
   return input;
 }
 
+export function parseBrowserWorkspaceInput(value: unknown): BrowserWorkspaceInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser workspace input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId']);
+  return { workspaceId: normalizeWorkspaceId(value.workspaceId) };
+}
+
+export function parseBrowserCreateTabInput(value: unknown): BrowserCreateTabInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser tab creation input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'url']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    ...(value.url === undefined ? {} : { url: parseBrowserUrl(value.url) }),
+  };
+}
+
+export function parseBrowserTabTargetInput(value: unknown): BrowserTabTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser tab target must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'tabId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    tabId: parseUuidV4(value.tabId, 'Browser tab id'),
+  };
+}
+
+export function parseBrowserNavigateInput(value: unknown): BrowserNavigateInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser navigation input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'tabId', 'url']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    tabId: parseUuidV4(value.tabId, 'Browser tab id'),
+    url: parseBrowserUrl(value.url),
+  };
+}
+
+export function parseBrowserBookmarkTargetInput(value: unknown): BrowserBookmarkTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser bookmark target must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'bookmarkId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    bookmarkId: parseUuidV4(value.bookmarkId, 'Browser bookmark id'),
+  };
+}
+
+export function parseBrowserOpenBookmarkInput(value: unknown): BrowserOpenBookmarkInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser bookmark open input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'bookmarkId', 'newTab']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    bookmarkId: parseUuidV4(value.bookmarkId, 'Browser bookmark id'),
+    newTab: parseBoolean(value.newTab, 'newTab'),
+  };
+}
+
+export function parseBrowserDownloadTargetInput(value: unknown): BrowserDownloadTargetInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser download target must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'downloadId']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    downloadId: parseUuidV4(value.downloadId, 'Browser download id'),
+  };
+}
+
+export function parseBrowserBoundsInput(value: unknown): BrowserBoundsInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser bounds input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'bounds']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    bounds: parseBrowserBounds(value.bounds),
+  };
+}
+
+export function parseBrowserVisibilityInput(value: unknown): BrowserVisibilityInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Browser visibility input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'visible']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    visible: parseBoolean(value.visible, 'visible'),
+  };
+}
+
 export function parseBoolean(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') {
     throw new TypeError(`${name} must be a boolean`);
   }
 
+  return value;
+}
+
+export function parseWindowCloseResponse(value: unknown): WindowCloseResponse {
+  if (!isRecord(value)) {
+    throw new TypeError('Window close response must be an object');
+  }
+  assertOnlyKeys(value, ['requestId', 'approved']);
+  return {
+    requestId: parseUuidV4(value.requestId, 'Window close request id'),
+    approved: parseBoolean(value.approved, 'approved'),
+  };
+}
+
+function parseUuidV4(value: unknown, name: string): string {
+  if (
+    typeof value !== 'string' ||
+    value !== value.toLowerCase() ||
+    !SESSION_ID_PATTERN.test(value)
+  ) {
+    throw new TypeError(`${name} must be a lowercase UUID v4`);
+  }
   return value;
 }
 

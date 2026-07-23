@@ -236,6 +236,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'workspaces',
     'inbox',
     'notes_schedule',
+    'browser_tabs_bookmarks',
     'schema_migrations',
     'CREATE TABLE app_metadata',
     'CREATE TABLE workspaces',
@@ -265,6 +266,34 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'schedule:create',
     'schedule:update',
     'schedule:archive',
+    'browser:get-snapshot',
+    'browser:create-tab',
+    'browser:activate-tab',
+    'browser:close-tab',
+    'browser:navigate',
+    'browser:back',
+    'browser:forward',
+    'browser:reload',
+    'browser:stop',
+    'browser:toggle-bookmark',
+    'browser:remove-bookmark',
+    'browser:open-bookmark',
+    'browser:pause-download',
+    'browser:resume-download',
+    'browser:cancel-download',
+    'browser:dismiss-download',
+    'browser:reveal-download',
+    'browser:set-bounds',
+    'browser:set-visible',
+    'browser:state-changed',
+    'browser:focus-address-requested',
+    'browser:open-url-requested',
+    'window:close-protection-ready',
+    'window:respond-close-request',
+    'window:close-requested',
+    'discardWorkspace',
+    'clearWorkspace',
+    'pendingNavigationUrl',
     'CREATE TABLE tasks',
     'source_inbox_entry_id',
     'date(planned_for) IS NOT NULL',
@@ -300,6 +329,30 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'schedule item requires an active workspace',
     'archived workspace schedule is immutable',
     'schedule items cannot be permanently deleted',
+    'CREATE TABLE browser_tabs',
+    'CREATE TABLE browser_workspace_state',
+    'CREATE TABLE browser_bookmarks',
+    'browser_tabs_require_active_workspace_insert',
+    'browser_tabs_limit_per_workspace',
+    'browser_tabs_created_at_is_immutable',
+    'browser_tabs_updated_at_must_not_rewind',
+    'browser_tabs_prevent_archived_workspace_mutation',
+    'browser_state_revision_must_advance',
+    'browser_state_updated_at_must_not_rewind',
+    'browser_state_prevent_delete',
+    'browser_bookmarks_require_active_workspace_insert',
+    'browser_bookmarks_limit_per_workspace',
+    'browser_bookmarks_row_is_immutable',
+    'browser_bookmarks_prevent_archived_workspace_mutation',
+    'will-download',
+    'hasUserGesture',
+    'setSaveDialogOptions',
+    'showItemInFolder',
+    'persist:workbench-browser',
+    'focus-address',
+    'toggle-bookmark',
+    'next-tab',
+    'previous-tab',
     'before-input-event',
     'isComposing',
     'current workspace must be switched before archive',
@@ -308,13 +361,42 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
   ]) {
     assert.ok(
       mainBundle.includes(requiredToken),
-      `Packaged main bundle does not contain the database runtime token ${requiredToken}.`,
+      `Packaged main bundle does not contain the required runtime token ${requiredToken}.`,
     );
   }
+  assert.equal(
+    mainBundle.includes('browser:get-state'),
+    false,
+    'Packaged main bundle still contains the removed browser:get-state IPC channel.',
+  );
   for (const shortcutToken of ['before-input-event', 'isComposing']) {
     assert.ok(
       countOccurrences(mainBundle, shortcutToken) >= 2,
       `Packaged main bundle does not contain both quick-capture interception paths for ${shortcutToken}.`,
+    );
+  }
+  for (const permissionToken of ['setPermissionCheckHandler', 'setPermissionRequestHandler']) {
+    assert.ok(
+      countOccurrences(mainBundle, permissionToken) >= 2,
+      `Packaged main bundle does not contain both permission-denial paths for ${permissionToken}.`,
+    );
+  }
+  for (const navigationToken of ['setWindowOpenHandler', 'will-redirect']) {
+    assert.ok(
+      mainBundle.includes(navigationToken),
+      `Packaged main bundle does not contain remote navigation protection ${navigationToken}.`,
+    );
+  }
+  for (const isolationToken of [
+    'contextIsolation',
+    'nodeIntegration',
+    'sandbox',
+    'webSecurity',
+    'webviewTag',
+  ]) {
+    assert.ok(
+      countOccurrences(mainBundle, isolationToken) >= 2,
+      `Packaged main bundle does not contain both renderer and remote-view isolation settings for ${isolationToken}.`,
     );
   }
 
@@ -343,15 +425,53 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'schedule:create',
     'schedule:update',
     'schedule:archive',
+    'browser:get-snapshot',
+    'browser:create-tab',
+    'browser:activate-tab',
+    'browser:close-tab',
+    'browser:navigate',
+    'browser:back',
+    'browser:forward',
+    'browser:reload',
+    'browser:stop',
+    'browser:toggle-bookmark',
+    'browser:remove-bookmark',
+    'browser:open-bookmark',
+    'browser:pause-download',
+    'browser:resume-download',
+    'browser:cancel-download',
+    'browser:dismiss-download',
+    'browser:reveal-download',
+    'browser:set-bounds',
+    'browser:set-visible',
+    'browser:state-changed',
+    'browser:focus-address-requested',
+    'browser:open-url-requested',
+    'window:close-protection-ready',
+    'window:respond-close-request',
+    'window:close-requested',
   ]) {
     assert.ok(
       preloadBundle.includes(requiredToken),
       `Packaged preload bundle does not contain the required IPC token ${requiredToken}.`,
     );
   }
+  assert.equal(
+    preloadBundle.includes('browser:get-state'),
+    false,
+    'Packaged preload bundle still contains the removed browser:get-state IPC channel.',
+  );
 
   const rendererBundle = await readRendererText(
     path.join(asarPath, '.vite', 'renderer', 'main_window'),
+  );
+  assert.ok(
+    rendererBundle.includes('onOpenUrlRequest'),
+    'Packaged renderer does not subscribe to trusted browser URL requests.',
+  );
+  assert.ok(
+    rendererBundle.includes('onCloseRequest'),
+    'Packaged renderer does not participate in the close-approval handshake.',
   );
   for (const forbiddenToken of [
     'daily.today.tasks',

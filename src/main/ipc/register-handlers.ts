@@ -26,6 +26,7 @@ import {
   type TaskRenameInput,
   type TaskSnapshot,
   type TaskStatusInput,
+  type WindowCloseResponse,
   type WorkspaceCreateInput,
   type WorkspacePreferences,
   type WorkspacePreferencesInput,
@@ -38,9 +39,15 @@ import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/
 import type { TerminalManager } from '../terminal/terminal-manager';
 import {
   assertNoArguments,
-  parseBoolean,
-  parseBrowserBounds,
-  parseBrowserUrl,
+  parseBrowserBookmarkTargetInput,
+  parseBrowserBoundsInput,
+  parseBrowserCreateTabInput,
+  parseBrowserDownloadTargetInput,
+  parseBrowserNavigateInput,
+  parseBrowserOpenBookmarkInput,
+  parseBrowserTabTargetInput,
+  parseBrowserVisibilityInput,
+  parseBrowserWorkspaceInput,
   parseInboxCategorizeInput,
   parseInboxCreateInput,
   parseInboxTargetInput,
@@ -61,6 +68,7 @@ import {
   parseTerminalCreateOptions,
   parseTerminalData,
   parseTerminalSize,
+  parseWindowCloseResponse,
   parseWorkspaceCreateInput,
   parseWorkspacePreferencesInput,
   parseWorkspaceRenameInput,
@@ -69,6 +77,10 @@ import {
 
 interface IpcDependencies {
   window: BrowserWindow;
+  windowLifecycle: {
+    markCloseProtectionReady(): void;
+    respondToCloseRequest(input: WindowCloseResponse): void;
+  };
   browser: BrowserController;
   database: {
     getStatus(): Promise<DatabaseStatus>;
@@ -119,6 +131,7 @@ type InvokeHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
 export function registerIpcHandlers({
   window,
+  windowLifecycle,
   browser,
   database,
   workspace,
@@ -291,20 +304,90 @@ export function registerIpcHandlers({
       }
     });
   });
+  register(IPC_CHANNELS.window.closeProtectionReady, (_event, ...args) => {
+    assertNoArguments(args, 'Enabling window close protection');
+    windowLifecycle.markCloseProtectionReady();
+  });
+  register(IPC_CHANNELS.window.respondCloseRequest, (_event, input, ...args) => {
+    assertNoArguments(args, 'Responding to a window close request');
+    windowLifecycle.respondToCloseRequest(parseWindowCloseResponse(input));
+  });
 
-  register(IPC_CHANNELS.browser.getState, () => browser.getState());
-  register(IPC_CHANNELS.browser.navigate, (_event, url) => {
-    return browser.navigate(parseBrowserUrl(url));
+  register(IPC_CHANNELS.browser.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the browser snapshot');
+    return browser.getSnapshot(parseBrowserWorkspaceInput(input));
   });
-  register(IPC_CHANNELS.browser.back, () => browser.back());
-  register(IPC_CHANNELS.browser.forward, () => browser.forward());
-  register(IPC_CHANNELS.browser.reload, () => browser.reload());
-  register(IPC_CHANNELS.browser.stop, () => browser.stop());
-  register(IPC_CHANNELS.browser.setBounds, (_event, bounds) => {
-    browser.setBounds(parseBrowserBounds(bounds));
+  register(IPC_CHANNELS.browser.createTab, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating a browser tab');
+    return browser.createTab(parseBrowserCreateTabInput(input));
   });
-  register(IPC_CHANNELS.browser.setVisible, (_event, visible) => {
-    browser.setVisible(parseBoolean(visible, 'visible'));
+  register(IPC_CHANNELS.browser.activateTab, (_event, input, ...args) => {
+    assertNoArguments(args, 'Activating a browser tab');
+    return browser.activateTab(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.closeTab, (_event, input, ...args) => {
+    assertNoArguments(args, 'Closing a browser tab');
+    return browser.closeTab(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.navigate, (_event, input, ...args) => {
+    assertNoArguments(args, 'Navigating a browser tab');
+    return browser.navigate(parseBrowserNavigateInput(input));
+  });
+  register(IPC_CHANNELS.browser.back, (_event, input, ...args) => {
+    assertNoArguments(args, 'Navigating a browser tab backward');
+    return browser.back(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.forward, (_event, input, ...args) => {
+    assertNoArguments(args, 'Navigating a browser tab forward');
+    return browser.forward(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.reload, (_event, input, ...args) => {
+    assertNoArguments(args, 'Reloading a browser tab');
+    return browser.reload(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.stop, (_event, input, ...args) => {
+    assertNoArguments(args, 'Stopping a browser tab');
+    return browser.stop(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.toggleBookmark, (_event, input, ...args) => {
+    assertNoArguments(args, 'Toggling a browser bookmark');
+    return browser.toggleBookmark(parseBrowserTabTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.removeBookmark, (_event, input, ...args) => {
+    assertNoArguments(args, 'Removing a browser bookmark');
+    return browser.removeBookmark(parseBrowserBookmarkTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.openBookmark, (_event, input, ...args) => {
+    assertNoArguments(args, 'Opening a browser bookmark');
+    return browser.openBookmark(parseBrowserOpenBookmarkInput(input));
+  });
+  register(IPC_CHANNELS.browser.pauseDownload, (_event, input, ...args) => {
+    assertNoArguments(args, 'Pausing a browser download');
+    return browser.pauseDownload(parseBrowserDownloadTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.resumeDownload, (_event, input, ...args) => {
+    assertNoArguments(args, 'Resuming a browser download');
+    return browser.resumeDownload(parseBrowserDownloadTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.cancelDownload, (_event, input, ...args) => {
+    assertNoArguments(args, 'Cancelling a browser download');
+    return browser.cancelDownload(parseBrowserDownloadTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.dismissDownload, (_event, input, ...args) => {
+    assertNoArguments(args, 'Dismissing a browser download');
+    return browser.dismissDownload(parseBrowserDownloadTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.revealDownload, (_event, input, ...args) => {
+    assertNoArguments(args, 'Revealing a browser download');
+    return browser.revealDownload(parseBrowserDownloadTargetInput(input));
+  });
+  register(IPC_CHANNELS.browser.setBounds, (_event, input, ...args) => {
+    assertNoArguments(args, 'Setting browser bounds');
+    return browser.setBounds(parseBrowserBoundsInput(input));
+  });
+  register(IPC_CHANNELS.browser.setVisible, (_event, input, ...args) => {
+    assertNoArguments(args, 'Setting browser visibility');
+    return browser.setVisible(parseBrowserVisibilityInput(input));
   });
 
   register(IPC_CHANNELS.terminal.create, (_event, options) => {

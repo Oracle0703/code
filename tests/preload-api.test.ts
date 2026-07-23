@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkbenchApi } from '../src/shared/contracts';
 
 const electron = vi.hoisted(() => ({
@@ -29,6 +29,11 @@ beforeEach(() => {
   electron.invoke.mockClear();
   electron.on.mockClear();
   electron.removeListener.mockClear();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  electron.invoke.mockImplementation(() => Promise.resolve(undefined));
 });
 
 describe('preload inbox API', () => {
@@ -223,5 +228,229 @@ describe('preload schedule API', () => {
       ],
       ['schedule:archive', { workspaceId, scheduleId, expectedDate, expectedRevision: 2 }],
     ]);
+  });
+});
+
+describe('preload window API', () => {
+  it('exposes only the declared frozen window methods', () => {
+    expect(Object.keys(api.window).sort()).toEqual([
+      'close',
+      'minimize',
+      'onCloseRequest',
+      'toggleMaximize',
+    ]);
+    expect(Object.isFrozen(api.window)).toBe(true);
+  });
+
+  it('registers close protection before returning typed decisions to Main', async () => {
+    const request = {
+      requestId: '123e4567-e89b-42d3-a456-426614174000',
+      reason: 'window' as const,
+    };
+    const listener = vi.fn(() => false);
+    const unsubscribe = api.window.onCloseRequest(listener);
+
+    expect(electron.on).toHaveBeenCalledExactlyOnceWith(
+      'window:close-requested',
+      expect.any(Function),
+    );
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith('window:close-protection-ready');
+
+    const wrapped = electron.on.mock.calls[0]?.[1] as (event: unknown, payload: unknown) => void;
+    wrapped({}, request);
+    await vi.waitFor(() => {
+      expect(electron.invoke).toHaveBeenCalledWith('window:respond-close-request', {
+        requestId: request.requestId,
+        approved: false,
+      });
+    });
+    expect(listener).toHaveBeenCalledExactlyOnceWith(request);
+
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledExactlyOnceWith(
+      'window:close-requested',
+      wrapped,
+    );
+  });
+
+  it('freezes an approved renderer before responding and restores it when delivery fails', async () => {
+    class FocusedElement {
+      public readonly blur = vi.fn();
+    }
+    const documentElement = { inert: false };
+    const activeElement = new FocusedElement();
+    vi.stubGlobal('HTMLElement', FocusedElement);
+    vi.stubGlobal('document', { documentElement, activeElement });
+    electron.invoke
+      .mockImplementationOnce(() => Promise.resolve(undefined))
+      .mockImplementationOnce(() => Promise.reject(new Error('response delivery failed')))
+      .mockImplementationOnce(() => Promise.resolve(undefined));
+
+    const request = {
+      requestId: '123e4567-e89b-42d3-a456-426614174001',
+      reason: 'application' as const,
+    };
+    const unsubscribe = api.window.onCloseRequest(() => true);
+    const wrapped = electron.on.mock.calls[0]?.[1] as (event: unknown, payload: unknown) => void;
+
+    wrapped({}, request);
+
+    await vi.waitFor(() => {
+      expect(electron.invoke).toHaveBeenCalledWith('window:respond-close-request', {
+        requestId: request.requestId,
+        approved: false,
+      });
+    });
+    expect(activeElement.blur).toHaveBeenCalledTimes(1);
+    expect(documentElement.inert).toBe(false);
+    unsubscribe();
+  });
+});
+
+describe('preload browser API', () => {
+  it('exposes only the declared frozen browser methods', () => {
+    expect(Object.keys(api.browser).sort()).toEqual([
+      'activateTab',
+      'back',
+      'cancelDownload',
+      'closeTab',
+      'createTab',
+      'dismissDownload',
+      'forward',
+      'getSnapshot',
+      'navigate',
+      'onFocusAddressRequest',
+      'onOpenUrlRequest',
+      'onStateChange',
+      'openBookmark',
+      'pauseDownload',
+      'reload',
+      'removeBookmark',
+      'resumeDownload',
+      'revealDownload',
+      'setBounds',
+      'setVisible',
+      'stop',
+      'toggleBookmark',
+    ]);
+    expect(Object.isFrozen(api.browser)).toBe(true);
+  });
+
+  it('forwards exact browser inputs through the allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const tabId = '723e4567-e89b-42d3-a456-426614174000';
+    const bookmarkId = '823e4567-e89b-42d3-a456-426614174000';
+    const downloadId = '923e4567-e89b-42d3-a456-426614174000';
+    const tabTarget = { workspaceId, tabId };
+    const downloadTarget = { workspaceId, downloadId };
+
+    await api.browser.getSnapshot({ workspaceId });
+    await api.browser.createTab({ workspaceId, url: 'https://example.com/' });
+    await api.browser.activateTab(tabTarget);
+    await api.browser.closeTab(tabTarget);
+    await api.browser.navigate({ ...tabTarget, url: 'https://example.com/docs' });
+    await api.browser.back(tabTarget);
+    await api.browser.forward(tabTarget);
+    await api.browser.reload(tabTarget);
+    await api.browser.stop(tabTarget);
+    await api.browser.toggleBookmark(tabTarget);
+    await api.browser.removeBookmark({ workspaceId, bookmarkId });
+    await api.browser.openBookmark({ workspaceId, bookmarkId, newTab: true });
+    await api.browser.pauseDownload(downloadTarget);
+    await api.browser.resumeDownload(downloadTarget);
+    await api.browser.cancelDownload(downloadTarget);
+    await api.browser.dismissDownload(downloadTarget);
+    await api.browser.revealDownload(downloadTarget);
+    await api.browser.setBounds({
+      workspaceId,
+      bounds: { x: 10, y: 20, width: 430, height: 640 },
+    });
+    await api.browser.setVisible({ workspaceId, visible: true });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['browser:get-snapshot', { workspaceId }],
+      ['browser:create-tab', { workspaceId, url: 'https://example.com/' }],
+      ['browser:activate-tab', tabTarget],
+      ['browser:close-tab', tabTarget],
+      ['browser:navigate', { ...tabTarget, url: 'https://example.com/docs' }],
+      ['browser:back', tabTarget],
+      ['browser:forward', tabTarget],
+      ['browser:reload', tabTarget],
+      ['browser:stop', tabTarget],
+      ['browser:toggle-bookmark', tabTarget],
+      ['browser:remove-bookmark', { workspaceId, bookmarkId }],
+      ['browser:open-bookmark', { workspaceId, bookmarkId, newTab: true }],
+      ['browser:pause-download', downloadTarget],
+      ['browser:resume-download', downloadTarget],
+      ['browser:cancel-download', downloadTarget],
+      ['browser:dismiss-download', downloadTarget],
+      ['browser:reveal-download', downloadTarget],
+      ['browser:set-bounds', { workspaceId, bounds: { x: 10, y: 20, width: 430, height: 640 } }],
+      ['browser:set-visible', { workspaceId, visible: true }],
+    ]);
+  });
+
+  it('subscribes and removes browser state and focus listeners', () => {
+    const stateListener = vi.fn();
+    const focusListener = vi.fn();
+    const openUrlListener = vi.fn();
+    const unsubscribeState = api.browser.onStateChange(stateListener);
+    const unsubscribeFocus = api.browser.onFocusAddressRequest(focusListener);
+    const unsubscribeOpenUrl = api.browser.onOpenUrlRequest(openUrlListener);
+    expect(electron.on).toHaveBeenNthCalledWith(1, 'browser:state-changed', expect.any(Function));
+    expect(electron.on).toHaveBeenNthCalledWith(
+      2,
+      'browser:focus-address-requested',
+      expect.any(Function),
+    );
+    expect(electron.on).toHaveBeenNthCalledWith(
+      3,
+      'browser:open-url-requested',
+      expect.any(Function),
+    );
+
+    const wrappedState = electron.on.mock.calls[0]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+    const wrappedFocus = electron.on.mock.calls[1]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+    const wrappedOpenUrl = electron.on.mock.calls[2]?.[1] as (
+      event: unknown,
+      payload: unknown,
+    ) => void;
+    const snapshot = {
+      workspaceId: '123e4567-e89b-42d3-a456-426614174000',
+      revision: 1,
+      activeTabId: '723e4567-e89b-42d3-a456-426614174000',
+      tabs: [],
+      bookmarks: [],
+      downloads: [],
+    };
+    const openUrlRequest = {
+      workspaceId: snapshot.workspaceId,
+      url: 'https://example.com/',
+    };
+    wrappedState({}, snapshot);
+    wrappedFocus({}, undefined);
+    wrappedOpenUrl({}, openUrlRequest);
+    expect(stateListener).toHaveBeenCalledWith(snapshot);
+    expect(focusListener).toHaveBeenCalledTimes(1);
+    expect(openUrlListener).toHaveBeenCalledWith(openUrlRequest);
+
+    unsubscribeState();
+    unsubscribeFocus();
+    unsubscribeOpenUrl();
+    expect(electron.removeListener).toHaveBeenCalledWith('browser:state-changed', wrappedState);
+    expect(electron.removeListener).toHaveBeenCalledWith(
+      'browser:focus-address-requested',
+      wrappedFocus,
+    );
+    expect(electron.removeListener).toHaveBeenCalledWith(
+      'browser:open-url-requested',
+      wrappedOpenUrl,
+    );
   });
 });

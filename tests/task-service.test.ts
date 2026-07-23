@@ -51,7 +51,7 @@ describe('task service', () => {
       taskIds: [TASK_A],
     });
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 5 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 6 });
     await expect(service.getTaskSnapshot({ workspaceId: WORKSPACE_A })).resolves.toEqual({
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
@@ -110,7 +110,7 @@ describe('task service', () => {
 
     const reopened = createService(dataDirectory);
     const result = await reopened.open();
-    expect(result.migration).toEqual({ fromVersion: 5, toVersion: 5, applied: [] });
+    expect(result.migration).toEqual({ fromVersion: 6, toVersion: 6, applied: [] });
     await expect(reopened.getTaskSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
       todayDate: TODAY,
       tasks: [{ id: TASK_A, title: '更新后的任务', status: 'todo', plannedFor: null }],
@@ -395,7 +395,7 @@ describe('task service', () => {
     await createVersionThreeDatabase(dataDirectory);
     const service = createService(dataDirectory, { taskIds: [TASK_A] });
     const result = await service.open();
-    expect(result.migration).toMatchObject({ fromVersion: 3, toVersion: 5 });
+    expect(result.migration).toMatchObject({ fromVersion: 3, toVersion: 6 });
     expect(result.preMigrationBackup).toMatchObject({
       reason: 'pre-migration',
       schemaVersion: 3,

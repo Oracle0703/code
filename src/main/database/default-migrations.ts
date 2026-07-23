@@ -3,6 +3,7 @@ import workspacesSql from '../../../migrations/0002_workspaces.sql?raw';
 import inboxSql from '../../../migrations/0003_inbox.sql?raw';
 import tasksSql from '../../../migrations/0004_tasks.sql?raw';
 import notesScheduleSql from '../../../migrations/0005_notes_schedule.sql?raw';
+import browserTabsBookmarksSql from '../../../migrations/0006_browser_tabs_bookmarks.sql?raw';
 import type { Migration } from './types';
 
 export const DEFAULT_MIGRATIONS: readonly Migration[] = Object.freeze([
@@ -30,5 +31,10 @@ export const DEFAULT_MIGRATIONS: readonly Migration[] = Object.freeze([
     version: 5,
     name: 'notes_schedule',
     sql: notesScheduleSql,
+  }),
+  Object.freeze({
+    version: 6,
+    name: 'browser_tabs_bookmarks',
+    sql: browserTabsBookmarksSql,
   }),
 ]);

@@ -29,6 +29,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Ensure Linux GUI smoke dependencies
+        run: |
+          if ! command -v xvfb-run >/dev/null || ! command -v xauth >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes xvfb xauth
+          fi
+
       - name: Check formatting
         run: npm run format:check
 
@@ -40,6 +47,21 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Build real Electron download smoke bundle
+        run: npm run build:electron-download-smoke
+
+      - name: Smoke-test Electron downloads
+        run: |
+          node -e "require('electron')"
+          electron_path="$(node -p "require('electron')")"
+          test -x "$electron_path"
+          xvfb-run -a \
+            --server-args='-screen 0 1280x720x24' \
+            "$electron_path" \
+            --no-sandbox \
+            --disable-gpu \
+            reports/electron-download-smoke/electron-download-smoke.cjs
 
       - name: Audit complete dependency tree
         run: npm run audit:all
@@ -104,6 +126,28 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Build real Electron download smoke bundle
+        run: npm run build:electron-download-smoke
+
+      - name: Smoke-test Electron downloads
+        shell: pwsh
+        run: |
+          node -e "require('electron')"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not install the pinned Electron executable.'
+          }
+          $electronPath = (node -p "require('electron')").Trim()
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not resolve the pinned Electron executable.'
+          }
+          if (-not (Test-Path $electronPath -PathType Leaf)) {
+            throw "Could not find the pinned Electron executable: $electronPath"
+          }
+          & $electronPath 'reports\electron-download-smoke\electron-download-smoke.cjs'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Electron download smoke test failed with exit code $LASTEXITCODE."
+          }
 
       - name: Build Windows installer
         run: npm run make:windows

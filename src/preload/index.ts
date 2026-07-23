@@ -1,8 +1,17 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC_CHANNELS,
-  type BrowserBounds,
-  type BrowserState,
+  type BrowserBoundsInput,
+  type BrowserBookmarkTargetInput,
+  type BrowserCreateTabInput,
+  type BrowserDownloadTargetInput,
+  type BrowserNavigateInput,
+  type BrowserOpenBookmarkInput,
+  type BrowserOpenUrlRequest,
+  type BrowserSnapshot,
+  type BrowserTabTargetInput,
+  type BrowserVisibilityInput,
+  type BrowserWorkspaceInput,
   type DatabaseBackupInfo,
   type DatabaseStatus,
   type InboxArchiveResult,
@@ -33,6 +42,8 @@ import {
   type TerminalExitEvent,
   type TerminalSessionInfo,
   type Unsubscribe,
+  type WindowCloseRequest,
+  type WindowCloseResponse,
   type WorkbenchApi,
   type WorkspaceCreateInput,
   type WorkspacePreferences,
@@ -41,6 +52,7 @@ import {
   type WorkspaceSnapshot,
   type WorkspaceTargetInput,
 } from '../shared/contracts';
+import { freezeRendererCloseSurface } from './close-surface';
 
 function invoke<TResult>(channel: string, ...args: unknown[]): Promise<TResult> {
   return ipcRenderer.invoke(channel, ...args) as Promise<TResult>;
@@ -55,6 +67,75 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): Unsubscr
   return () => {
     ipcRenderer.removeListener(channel, wrappedListener);
   };
+}
+
+function subscribeToCloseRequests(
+  listener: (request: WindowCloseRequest) => boolean | Promise<boolean>,
+): Unsubscribe {
+  const wrappedListener = (_event: IpcRendererEvent, request: WindowCloseRequest): void => {
+    void Promise.resolve()
+      .then(() => listener(request))
+      .then(
+        async (approved) => {
+          const releaseCloseSurface =
+            approved === true ? freezeCurrentRendererCloseSurface() : null;
+          try {
+            await invoke<void>(IPC_CHANNELS.window.respondCloseRequest, {
+              requestId: request.requestId,
+              approved: approved === true,
+            } satisfies WindowCloseResponse);
+          } catch {
+            try {
+              await invoke<void>(IPC_CHANNELS.window.respondCloseRequest, {
+                requestId: request.requestId,
+                approved: false,
+              } satisfies WindowCloseResponse);
+            } catch {
+              // Main may already be closing or the transport may be unavailable.
+            } finally {
+              releaseCloseSurface?.();
+            }
+          }
+        },
+        () =>
+          invoke<void>(IPC_CHANNELS.window.respondCloseRequest, {
+            requestId: request.requestId,
+            approved: false,
+          } satisfies WindowCloseResponse),
+      )
+      .catch(() => undefined);
+  };
+
+  ipcRenderer.on(IPC_CHANNELS.window.closeRequested, wrappedListener);
+  void invoke<void>(IPC_CHANNELS.window.closeProtectionReady).catch(() => undefined);
+  return () => {
+    ipcRenderer.removeListener(IPC_CHANNELS.window.closeRequested, wrappedListener);
+  };
+}
+
+function freezeCurrentRendererCloseSurface(): () => void {
+  const preloadDocument = (
+    globalThis as {
+      document?: {
+        documentElement?: { inert: boolean };
+        activeElement?: unknown;
+      };
+    }
+  ).document;
+  const surface = preloadDocument?.documentElement;
+  if (!surface) return () => undefined;
+  const activeElement = preloadDocument.activeElement;
+  let focusedControl: { blur(): void } | null = null;
+  if (
+    activeElement &&
+    typeof activeElement === 'object' &&
+    'blur' in activeElement &&
+    typeof activeElement.blur === 'function'
+  ) {
+    const blur = activeElement.blur as () => void;
+    focusedControl = { blur: () => blur.call(activeElement) };
+  }
+  return freezeRendererCloseSurface(surface, focusedControl);
 }
 
 const workbenchApi: WorkbenchApi = Object.freeze({
@@ -127,18 +208,52 @@ const workbenchApi: WorkbenchApi = Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),
     toggleMaximize: () => invoke<boolean>(IPC_CHANNELS.window.toggleMaximize),
     close: () => invoke<void>(IPC_CHANNELS.window.close),
+    onCloseRequest: subscribeToCloseRequests,
   }),
   browser: Object.freeze({
-    getState: () => invoke<BrowserState>(IPC_CHANNELS.browser.getState),
-    navigate: (url: string) => invoke<BrowserState>(IPC_CHANNELS.browser.navigate, url),
-    back: () => invoke<BrowserState>(IPC_CHANNELS.browser.back),
-    forward: () => invoke<BrowserState>(IPC_CHANNELS.browser.forward),
-    reload: () => invoke<BrowserState>(IPC_CHANNELS.browser.reload),
-    stop: () => invoke<BrowserState>(IPC_CHANNELS.browser.stop),
-    setBounds: (bounds: BrowserBounds) => invoke<void>(IPC_CHANNELS.browser.setBounds, bounds),
-    setVisible: (visible: boolean) => invoke<void>(IPC_CHANNELS.browser.setVisible, visible),
-    onStateChange: (listener: (state: BrowserState) => void) =>
+    getSnapshot: (input: BrowserWorkspaceInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.getSnapshot, input),
+    createTab: (input: BrowserCreateTabInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.createTab, input),
+    activateTab: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.activateTab, input),
+    closeTab: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.closeTab, input),
+    navigate: (input: BrowserNavigateInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.navigate, input),
+    back: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.back, input),
+    forward: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.forward, input),
+    reload: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.reload, input),
+    stop: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.stop, input),
+    toggleBookmark: (input: BrowserTabTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.toggleBookmark, input),
+    removeBookmark: (input: BrowserBookmarkTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.removeBookmark, input),
+    openBookmark: (input: BrowserOpenBookmarkInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.openBookmark, input),
+    pauseDownload: (input: BrowserDownloadTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.pauseDownload, input),
+    resumeDownload: (input: BrowserDownloadTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.resumeDownload, input),
+    cancelDownload: (input: BrowserDownloadTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.cancelDownload, input),
+    dismissDownload: (input: BrowserDownloadTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.dismissDownload, input),
+    revealDownload: (input: BrowserDownloadTargetInput) =>
+      invoke<BrowserSnapshot>(IPC_CHANNELS.browser.revealDownload, input),
+    setBounds: (input: BrowserBoundsInput) => invoke<void>(IPC_CHANNELS.browser.setBounds, input),
+    setVisible: (input: BrowserVisibilityInput) =>
+      invoke<void>(IPC_CHANNELS.browser.setVisible, input),
+    onStateChange: (listener: (snapshot: BrowserSnapshot) => void) =>
       subscribe(IPC_CHANNELS.browser.stateChanged, listener),
+    onFocusAddressRequest: (listener: () => void) =>
+      subscribe(IPC_CHANNELS.browser.focusAddressRequested, listener),
+    onOpenUrlRequest: (listener: (request: BrowserOpenUrlRequest) => void) =>
+      subscribe(IPC_CHANNELS.browser.openUrlRequested, listener),
   }),
   terminal: Object.freeze({
     create: (options?: TerminalCreateOptions) =>

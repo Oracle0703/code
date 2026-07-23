@@ -34,6 +34,15 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  BrowserService,
+  type BrowserBookmarkDataInput,
+  type BrowserCreateTabDataInput,
+  type BrowserData,
+  type BrowserTabDataInput,
+  type BrowserTabMetadataInput,
+  type BrowserWorkspaceDataInput,
+} from '../browser';
 import { InboxService } from '../inbox';
 import { NoteService } from '../notes';
 import { ScheduleService } from '../schedule';
@@ -107,6 +116,8 @@ export interface DatabaseServiceOptions {
   readonly noteIdFactory?: () => string;
   readonly scheduleIdFactory?: () => string;
   readonly scheduleTodayFactory?: () => string;
+  readonly browserTabIdFactory?: () => string;
+  readonly browserBookmarkIdFactory?: () => string;
 }
 
 type ServiceState = 'closed' | 'opening' | 'open' | 'closing' | 'poisoned';
@@ -122,6 +133,7 @@ export class DatabaseService {
   readonly #taskService: TaskService;
   readonly #noteService: NoteService;
   readonly #scheduleService: ScheduleService;
+  readonly #browserService: BrowserService;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
   #backupManager: BackupManager | undefined;
@@ -147,6 +159,8 @@ export class DatabaseService {
     noteIdFactory = randomUUID,
     scheduleIdFactory = randomUUID,
     scheduleTodayFactory,
+    browserTabIdFactory = randomUUID,
+    browserBookmarkIdFactory = randomUUID,
   }: DatabaseServiceOptions) {
     this.#paths = resolveDatabasePaths(dataDirectory, databaseFileName);
     this.#adapterFactory = adapterFactory;
@@ -185,6 +199,13 @@ export class DatabaseService {
       now,
       idFactory: scheduleIdFactory,
       todayFactory: scheduleTodayFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#browserService = new BrowserService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      tabIdFactory: browserTabIdFactory,
+      bookmarkIdFactory: browserBookmarkIdFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
     });
   }
@@ -422,6 +443,34 @@ export class DatabaseService {
     return this.#scheduleService.archive(input);
   }
 
+  getBrowserData(input: BrowserWorkspaceDataInput): Promise<BrowserData> {
+    return this.#browserService.getData(input);
+  }
+
+  createBrowserTab(input: BrowserCreateTabDataInput): Promise<BrowserData> {
+    return this.#browserService.createTab(input);
+  }
+
+  activateBrowserTab(input: BrowserTabDataInput): Promise<BrowserData> {
+    return this.#browserService.activateTab(input);
+  }
+
+  closeBrowserTab(input: BrowserTabDataInput): Promise<BrowserData> {
+    return this.#browserService.closeTab(input);
+  }
+
+  persistBrowserTabMetadata(input: BrowserTabMetadataInput): Promise<BrowserData> {
+    return this.#browserService.persistTabMetadata(input);
+  }
+
+  toggleBrowserBookmark(input: BrowserTabDataInput): Promise<BrowserData> {
+    return this.#browserService.toggleBookmark(input);
+  }
+
+  removeBrowserBookmark(input: BrowserBookmarkDataInput): Promise<BrowserData> {
+    return this.#browserService.removeBookmark(input);
+  }
+
   async #initialize(): Promise<DatabaseInitializationResult> {
     await prepareDatabaseDirectories(this.#paths);
     const existed = await databaseFileExists(this.#paths.databasePath);
@@ -462,6 +511,7 @@ export class DatabaseService {
         this.#taskService.validateSnapshot(database);
         this.#noteService.validateSnapshot(database);
         this.#scheduleService.validateSnapshot(database);
+        this.#browserService.validateSnapshot(database);
         health = this.#readHealth(database);
         database.exec('COMMIT');
       } catch (error) {
@@ -545,6 +595,9 @@ export class DatabaseService {
     if (expectedVersion >= 5) {
       this.#noteService.validateSnapshot(database);
       this.#scheduleService.validateSnapshot(database);
+    }
+    if (expectedVersion >= 6) {
+      this.#browserService.validateSnapshot(database);
     }
   }
 

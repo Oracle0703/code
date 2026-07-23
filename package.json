@@ -20,6 +20,8 @@
     "premake:windows": "npm run clean",
     "make:windows": "electron-forge make --platform=win32 --arch=x64",
     "build:database-smoke": "vite build --config vite.database-smoke.config.ts",
+    "build:electron-download-smoke": "vite build --config vite.electron-download-smoke.config.ts",
+    "smoke:electron-downloads": "electron reports/electron-download-smoke/electron-download-smoke.cjs",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && tsc -p tsconfig.tools.json",
     "test": "vitest run",

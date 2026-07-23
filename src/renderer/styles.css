@@ -1926,39 +1926,55 @@ select:focus-visible,
 }
 
 .browser-panel {
-  display: grid;
+  display: flex;
   min-width: 0;
   min-height: 0;
   flex: 1;
-  grid-template-rows: 34px 39px minmax(0, 1fr);
+  flex-direction: column;
   overflow: hidden;
   background: var(--bg-raised);
 }
 
 .browser-tabs {
   display: flex;
+  height: 34px;
   min-width: 0;
-  align-items: end;
+  flex: 0 0 auto;
+  align-items: flex-end;
   padding: 4px 5px 0;
   gap: 2px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-sidebar);
 }
 
-.browser-tab {
+.browser-tab-list {
   display: flex;
   min-width: 0;
-  max-width: 210px;
+  flex: 1;
+  align-self: stretch;
+  align-items: flex-end;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.browser-tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+.browser-tab {
+  display: flex;
+  min-width: 104px;
+  max-width: 190px;
   height: 29px;
+  flex: 1 0 126px;
   align-items: center;
-  padding: 0 5px 0 9px;
-  gap: 7px;
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 7px 7px 0 0;
   color: var(--text-secondary);
   background: transparent;
-  font-size: 10px;
 }
 
 .browser-tab.is-active {
@@ -1967,7 +1983,26 @@ select:focus-visible,
   background: var(--bg-raised);
 }
 
-.browser-tab > span {
+.browser-tab__target {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  align-self: stretch;
+  padding: 0 3px 0 8px;
+  gap: 6px;
+  border-radius: 6px 0 0;
+  color: inherit;
+  background: transparent;
+  font-size: 10px;
+  text-align: left;
+}
+
+.browser-tab__target > svg {
+  flex: 0 0 auto;
+}
+
+.browser-tab__target > span {
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -1977,24 +2012,27 @@ select:focus-visible,
 
 .browser-tab .icon-button,
 .browser-tabs > .icon-button {
+  flex: 0 0 auto;
   width: 24px;
   height: 23px;
 }
 
-.browser-tab .icon-button {
+.browser-tab__close {
+  margin-right: 2px;
   opacity: 0;
 }
-.browser-tab:hover .icon-button,
-.browser-tab:focus-within .icon-button {
+
+.browser-tab:hover .browser-tab__close,
+.browser-tab:focus-within .browser-tab__close,
+.browser-tab.is-active .browser-tab__close {
   opacity: 1;
-}
-.browser-tabs__spacer {
-  flex: 1;
 }
 
 .browser-toolbar {
   display: flex;
   min-width: 0;
+  min-height: 39px;
+  flex: 0 0 auto;
   align-items: center;
   padding: 5px 7px;
   gap: 2px;
@@ -2003,6 +2041,8 @@ select:focus-visible,
 }
 
 .browser-toolbar > .icon-button {
+  position: relative;
+  flex: 0 0 auto;
   width: 27px;
   height: 27px;
 }
@@ -2039,14 +2079,281 @@ select:focus-visible,
   user-select: text;
 }
 
+.address-bar input[aria-invalid='true'] {
+  color: var(--danger);
+}
+
 .address-bar:focus-within input {
   color: var(--text-primary);
+}
+
+.browser-tool-badge {
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  display: grid;
+  min-width: 12px;
+  height: 12px;
+  place-items: center;
+  padding: 0 3px;
+  border: 1px solid var(--bg-raised);
+  border-radius: 7px;
+  color: white;
+  background: var(--accent);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.browser-notice {
+  display: flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 4px 7px 4px 10px;
+  gap: 7px;
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 22%, var(--border-subtle));
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-raised));
+  font-size: 9px;
+}
+
+.browser-notice > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-notice > button:not(.icon-button) {
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  font-size: 9px;
+}
+
+.browser-notice .icon-button {
+  width: 22px;
+  height: 22px;
+}
+
+.browser-bookmarks-bar {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar);
+}
+
+.browser-bookmarks-bar > p,
+.browser-downloads__empty {
+  margin: 0;
+  padding: 4px 6px;
+  color: var(--text-tertiary);
+  font-size: 9px;
+}
+
+.browser-bookmark-list {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.browser-bookmark {
+  display: flex;
+  min-width: 92px;
+  max-width: 176px;
+  height: 25px;
+  flex: 0 0 auto;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.browser-bookmark:hover,
+.browser-bookmark:focus-within {
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+  background: var(--border-subtle);
+}
+
+.browser-bookmark__target {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  align-items: center;
+  padding: 0 4px 0 7px;
+  gap: 5px;
+  color: inherit;
+  background: transparent;
+  font-size: 9px;
+}
+
+.browser-bookmark__target > svg {
+  flex: 0 0 auto;
+}
+
+.browser-bookmark__target > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-bookmark .icon-button {
+  width: 21px;
+  height: 21px;
+  margin-right: 1px;
+  opacity: 0;
+}
+
+.browser-bookmark:hover .icon-button,
+.browser-bookmark:focus-within .icon-button {
+  opacity: 1;
+}
+
+.browser-downloads {
+  display: flex;
+  max-height: min(245px, 42vh);
+  min-height: 62px;
+  flex: 0 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-sidebar);
+}
+
+.browser-downloads > header {
+  display: flex;
+  min-height: 31px;
+  flex: 0 0 auto;
+  align-items: baseline;
+  padding: 7px 9px 5px;
+  gap: 7px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.browser-downloads > header strong {
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.browser-downloads > header span {
+  color: var(--text-tertiary);
+  font-size: 8px;
+}
+
+.browser-download-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 3px 5px 5px;
+}
+
+.browser-download {
+  display: grid;
+  min-height: 48px;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 5px 3px;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.browser-download:last-child {
+  border-bottom: 0;
+}
+
+.browser-download__icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.browser-download.is-completed .browser-download__icon {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.browser-download.is-failed .browser-download__icon,
+.browser-download.is-cancelled .browser-download__icon {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.browser-download__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.browser-download__body strong {
+  overflow: hidden;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-download__body > span:not(.browser-download__progress) {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 7.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-download__progress {
+  display: block;
+  width: 100%;
+  height: 2px;
+  margin-top: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border-default);
+}
+
+.browser-download__progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.browser-download__progress.is-indeterminate i {
+  width: 36%;
+  animation: browser-download-indeterminate 1.2s ease-in-out infinite;
+}
+
+.browser-download__actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.browser-download__actions .icon-button {
+  width: 23px;
+  height: 23px;
 }
 
 .browser-viewport {
   position: relative;
   min-width: 0;
   min-height: 0;
+  flex: 1;
   overflow: hidden;
   background: #fff;
 }
@@ -4831,6 +5138,14 @@ select:focus-visible,
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+@keyframes browser-download-indeterminate {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(310%);
   }
 }
 @keyframes pulse {

@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest';
 import {
   assertNoArguments,
   parseBoolean,
+  parseBrowserBookmarkTargetInput,
   parseBrowserBounds,
+  parseBrowserBoundsInput,
+  parseBrowserCreateTabInput,
+  parseBrowserDownloadTargetInput,
+  parseBrowserNavigateInput,
+  parseBrowserOpenBookmarkInput,
+  parseBrowserTabTargetInput,
+  parseBrowserVisibilityInput,
+  parseBrowserWorkspaceInput,
   parseInboxCategorizeInput,
   parseInboxCreateInput,
   parseInboxTargetInput,
@@ -22,6 +31,7 @@ import {
   parseSessionId,
   parseTerminalCreateOptions,
   parseTerminalSize,
+  parseWindowCloseResponse,
   parseWorkspaceCreateInput,
   parseWorkspacePreferencesInput,
   parseWorkspaceRenameInput,
@@ -35,6 +45,9 @@ const UNDO_TOKEN = '323e4567-e89b-42d3-a456-426614174000';
 const TASK_ID = '423e4567-e89b-42d3-a456-426614174000';
 const NOTE_ID = '523e4567-e89b-42d3-a456-426614174000';
 const SCHEDULE_ID = '623e4567-e89b-42d3-a456-426614174000';
+const TAB_ID = '723e4567-e89b-42d3-a456-426614174000';
+const BOOKMARK_ID = '823e4567-e89b-42d3-a456-426614174000';
+const DOWNLOAD_ID = '923e4567-e89b-42d3-a456-426614174000';
 
 describe('IPC validation', () => {
   it('accepts integer browser bounds in the supported range', () => {
@@ -52,6 +65,98 @@ describe('IPC validation', () => {
     { x: 0, y: 0, width: 100, height: 100, extra: true },
   ])('rejects malformed browser bounds', (bounds) => {
     expect(() => parseBrowserBounds(bounds)).toThrow(TypeError);
+  });
+
+  it('accepts exact workspace-bound browser operations', () => {
+    expect(parseBrowserWorkspaceInput({ workspaceId: WORKSPACE_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(parseBrowserCreateTabInput({ workspaceId: WORKSPACE_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(
+      parseBrowserCreateTabInput({
+        workspaceId: WORKSPACE_ID,
+        url: ' https://example.com/path ',
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, url: 'https://example.com/path' });
+    expect(parseBrowserTabTargetInput({ workspaceId: WORKSPACE_ID, tabId: TAB_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      tabId: TAB_ID,
+    });
+    expect(
+      parseBrowserNavigateInput({
+        workspaceId: WORKSPACE_ID,
+        tabId: TAB_ID,
+        url: 'https://example.com/',
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, tabId: TAB_ID, url: 'https://example.com/' });
+    expect(
+      parseBrowserBookmarkTargetInput({
+        workspaceId: WORKSPACE_ID,
+        bookmarkId: BOOKMARK_ID,
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, bookmarkId: BOOKMARK_ID });
+    expect(
+      parseBrowserOpenBookmarkInput({
+        workspaceId: WORKSPACE_ID,
+        bookmarkId: BOOKMARK_ID,
+        newTab: true,
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, bookmarkId: BOOKMARK_ID, newTab: true });
+    expect(
+      parseBrowserDownloadTargetInput({
+        workspaceId: WORKSPACE_ID,
+        downloadId: DOWNLOAD_ID,
+      }),
+    ).toEqual({ workspaceId: WORKSPACE_ID, downloadId: DOWNLOAD_ID });
+    expect(
+      parseBrowserBoundsInput({
+        workspaceId: WORKSPACE_ID,
+        bounds: { x: 10, y: 20, width: 430, height: 640 },
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      bounds: { x: 10, y: 20, width: 430, height: 640 },
+    });
+    expect(parseBrowserVisibilityInput({ workspaceId: WORKSPACE_ID, visible: false })).toEqual({
+      workspaceId: WORKSPACE_ID,
+      visible: false,
+    });
+  });
+
+  it('rejects forged browser ids, paths, fields, booleans, and control characters', () => {
+    expect(() =>
+      parseBrowserTabTargetInput({ workspaceId: WORKSPACE_ID, tabId: '../../tab' }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseBrowserDownloadTargetInput({
+        workspaceId: WORKSPACE_ID,
+        downloadId: DOWNLOAD_ID,
+        path: '/tmp/escape',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseBrowserNavigateInput({
+        workspaceId: WORKSPACE_ID,
+        tabId: TAB_ID,
+        url: 'https://exa\u0000mple.com',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseBrowserOpenBookmarkInput({
+        workspaceId: WORKSPACE_ID,
+        bookmarkId: BOOKMARK_ID,
+        newTab: 'true',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseBrowserBoundsInput({
+        workspaceId: WORKSPACE_ID,
+        bounds: { x: 0, y: 0, width: 430, height: 640 },
+        tabId: TAB_ID,
+      }),
+    ).toThrow(TypeError);
   });
 
   it('accepts supported terminal profiles and safe sizes', () => {
@@ -78,6 +183,25 @@ describe('IPC validation', () => {
   it('does not coerce boolean values', () => {
     expect(parseBoolean(true, 'visible')).toBe(true);
     expect(() => parseBoolean('true', 'visible')).toThrow(TypeError);
+  });
+
+  it('accepts only exact close responses with a lowercase UUID v4', () => {
+    expect(
+      parseWindowCloseResponse({
+        requestId: WORKSPACE_ID,
+        approved: false,
+      }),
+    ).toEqual({ requestId: WORKSPACE_ID, approved: false });
+    expect(() => parseWindowCloseResponse({ requestId: WORKSPACE_ID, approved: 'false' })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      parseWindowCloseResponse({
+        requestId: WORKSPACE_ID,
+        approved: true,
+        path: '/tmp/escape',
+      }),
+    ).toThrow(TypeError);
   });
 
   it('rejects surplus arguments for parameterless operations', () => {

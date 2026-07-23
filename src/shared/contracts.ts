@@ -54,17 +54,33 @@ export const IPC_CHANNELS = {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
     close: 'window:close',
+    closeProtectionReady: 'window:close-protection-ready',
+    respondCloseRequest: 'window:respond-close-request',
+    closeRequested: 'window:close-requested',
   },
   browser: {
-    getState: 'browser:get-state',
+    getSnapshot: 'browser:get-snapshot',
+    createTab: 'browser:create-tab',
+    activateTab: 'browser:activate-tab',
+    closeTab: 'browser:close-tab',
     navigate: 'browser:navigate',
     back: 'browser:back',
     forward: 'browser:forward',
     reload: 'browser:reload',
     stop: 'browser:stop',
+    toggleBookmark: 'browser:toggle-bookmark',
+    removeBookmark: 'browser:remove-bookmark',
+    openBookmark: 'browser:open-bookmark',
+    pauseDownload: 'browser:pause-download',
+    resumeDownload: 'browser:resume-download',
+    cancelDownload: 'browser:cancel-download',
+    dismissDownload: 'browser:dismiss-download',
+    revealDownload: 'browser:reveal-download',
     setBounds: 'browser:set-bounds',
     setVisible: 'browser:set-visible',
     stateChanged: 'browser:state-changed',
+    focusAddressRequested: 'browser:focus-address-requested',
+    openUrlRequested: 'browser:open-url-requested',
   },
   terminal: {
     create: 'terminal:create',
@@ -83,12 +99,97 @@ export interface BrowserBounds {
   height: number;
 }
 
-export interface BrowserState {
-  url: string;
-  title: string;
-  canGoBack: boolean;
-  canGoForward: boolean;
-  isLoading: boolean;
+export interface BrowserTab {
+  readonly id: string;
+  readonly url: string;
+  readonly title: string;
+  readonly canGoBack: boolean;
+  readonly canGoForward: boolean;
+  readonly isLoading: boolean;
+}
+
+export interface BrowserBookmark {
+  readonly id: string;
+  readonly url: string;
+  readonly title: string;
+  readonly createdAt: string;
+}
+
+export type BrowserDownloadState =
+  'progressing' | 'paused' | 'interrupted' | 'completed' | 'cancelled' | 'failed';
+
+export interface BrowserDownload {
+  readonly id: string;
+  readonly fileName: string;
+  readonly sourceHost: string;
+  readonly mimeType: string;
+  readonly receivedBytes: number;
+  readonly totalBytes: number;
+  readonly state: BrowserDownloadState;
+  readonly canResume: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface BrowserSnapshot {
+  readonly workspaceId: string;
+  readonly revision: number;
+  readonly activeTabId: string;
+  readonly tabs: readonly BrowserTab[];
+  readonly bookmarks: readonly BrowserBookmark[];
+  readonly downloads: readonly BrowserDownload[];
+}
+
+export interface BrowserWorkspaceInput {
+  readonly workspaceId: string;
+}
+
+export interface BrowserCreateTabInput extends BrowserWorkspaceInput {
+  readonly url?: string;
+}
+
+export interface BrowserTabTargetInput extends BrowserWorkspaceInput {
+  readonly tabId: string;
+}
+
+export interface BrowserNavigateInput extends BrowserTabTargetInput {
+  readonly url: string;
+}
+
+export interface BrowserBookmarkTargetInput extends BrowserWorkspaceInput {
+  readonly bookmarkId: string;
+}
+
+export interface BrowserOpenBookmarkInput extends BrowserBookmarkTargetInput {
+  readonly newTab: boolean;
+}
+
+export interface BrowserDownloadTargetInput extends BrowserWorkspaceInput {
+  readonly downloadId: string;
+}
+
+export interface BrowserBoundsInput extends BrowserWorkspaceInput {
+  readonly bounds: BrowserBounds;
+}
+
+export interface BrowserVisibilityInput extends BrowserWorkspaceInput {
+  readonly visible: boolean;
+}
+
+export interface BrowserOpenUrlRequest extends BrowserWorkspaceInput {
+  readonly url: string;
+}
+
+export type WindowCloseReason = 'window' | 'application';
+
+export interface WindowCloseRequest {
+  readonly requestId: string;
+  readonly reason: WindowCloseReason;
+}
+
+export interface WindowCloseResponse {
+  readonly requestId: string;
+  readonly approved: boolean;
 }
 
 export type DatabaseBackupReason = 'manual' | 'pre-migration';
@@ -463,17 +564,33 @@ export interface WorkbenchApi {
     minimize(): Promise<void>;
     toggleMaximize(): Promise<boolean>;
     close(): Promise<void>;
+    onCloseRequest(
+      listener: (request: WindowCloseRequest) => boolean | Promise<boolean>,
+    ): Unsubscribe;
   };
   browser: {
-    getState(): Promise<BrowserState>;
-    navigate(url: string): Promise<BrowserState>;
-    back(): Promise<BrowserState>;
-    forward(): Promise<BrowserState>;
-    reload(): Promise<BrowserState>;
-    stop(): Promise<BrowserState>;
-    setBounds(bounds: BrowserBounds): Promise<void>;
-    setVisible(visible: boolean): Promise<void>;
-    onStateChange(listener: (state: BrowserState) => void): Unsubscribe;
+    getSnapshot(input: BrowserWorkspaceInput): Promise<BrowserSnapshot>;
+    createTab(input: BrowserCreateTabInput): Promise<BrowserSnapshot>;
+    activateTab(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    closeTab(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    navigate(input: BrowserNavigateInput): Promise<BrowserSnapshot>;
+    back(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    forward(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    reload(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    stop(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    toggleBookmark(input: BrowserTabTargetInput): Promise<BrowserSnapshot>;
+    removeBookmark(input: BrowserBookmarkTargetInput): Promise<BrowserSnapshot>;
+    openBookmark(input: BrowserOpenBookmarkInput): Promise<BrowserSnapshot>;
+    pauseDownload(input: BrowserDownloadTargetInput): Promise<BrowserSnapshot>;
+    resumeDownload(input: BrowserDownloadTargetInput): Promise<BrowserSnapshot>;
+    cancelDownload(input: BrowserDownloadTargetInput): Promise<BrowserSnapshot>;
+    dismissDownload(input: BrowserDownloadTargetInput): Promise<BrowserSnapshot>;
+    revealDownload(input: BrowserDownloadTargetInput): Promise<BrowserSnapshot>;
+    setBounds(input: BrowserBoundsInput): Promise<void>;
+    setVisible(input: BrowserVisibilityInput): Promise<void>;
+    onStateChange(listener: (snapshot: BrowserSnapshot) => void): Unsubscribe;
+    onFocusAddressRequest(listener: () => void): Unsubscribe;
+    onOpenUrlRequest(listener: (request: BrowserOpenUrlRequest) => void): Unsubscribe;
   };
   terminal: {
     create(options?: TerminalCreateOptions): Promise<TerminalSessionInfo>;
