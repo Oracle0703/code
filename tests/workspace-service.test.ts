@@ -38,7 +38,7 @@ describe('workspace service', () => {
     const dataDirectory = await createDataDirectory();
     const service = createService(dataDirectory, [DEFAULT_ID]);
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 10 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 11 });
     await expect(service.getWorkspaceSnapshot()).resolves.toMatchObject({
       currentWorkspaceId: DEFAULT_ID,
       workspaces: [
@@ -168,6 +168,309 @@ describe('workspace service', () => {
     } finally {
       database.close();
     }
+  });
+
+  it('sorts the archive by newest recovery candidate first', async () => {
+    const dataDirectory = await createDataDirectory();
+    let currentTime = new Date('2026-07-22T08:00:00.000Z');
+    const ids = [DEFAULT_ID, SECOND_ID, THIRD_ID];
+    const service = new DatabaseService({
+      dataDirectory,
+      now: () => currentTime,
+      workspaceIdFactory: () => ids.shift() ?? 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    });
+    await service.open();
+    currentTime = new Date('2026-07-22T09:00:00.000Z');
+    await service.createWorkspace({ name: '较早创建', color: WORKSPACE_COLORS[1] });
+    currentTime = new Date('2026-07-22T10:00:00.000Z');
+    await service.createWorkspace({ name: '较晚创建', color: WORKSPACE_COLORS[2] });
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+
+    currentTime = new Date('2026-07-22T11:00:00.000Z');
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    currentTime = new Date('2026-07-22T12:00:00.000Z');
+    await service.archiveWorkspace({ workspaceId: THIRD_ID });
+
+    await expect(service.getWorkspaceArchiveSnapshot()).resolves.toEqual({
+      archivedWorkspaces: [
+        expect.objectContaining({
+          id: THIRD_ID,
+          archivedAt: '2026-07-22T12:00:00.000Z',
+          revision: 2,
+        }),
+        expect.objectContaining({
+          id: SECOND_ID,
+          archivedAt: '2026-07-22T11:00:00.000Z',
+          revision: 2,
+        }),
+      ],
+    });
+    await service.close();
+  });
+
+  it('restores preserved data without switching the current workspace', async () => {
+    const dataDirectory = await createDataDirectory();
+    const service = createService(dataDirectory, [DEFAULT_ID, SECOND_ID]);
+    await service.open();
+    await service.updateWorkspacePreferences({
+      workspaceId: DEFAULT_ID,
+      patch: { theme: 'light' },
+    });
+    await service.createWorkspace({ name: '待恢复空间', color: WORKSPACE_COLORS[4] });
+    await service.updateWorkspacePreferences({
+      workspaceId: SECOND_ID,
+      patch: {
+        activeView: 'tasks',
+        sidebarCollapsed: true,
+        browserOpen: false,
+        terminalHeight: 460,
+      },
+    });
+    const taskBeforeArchive = await service.createTask({
+      workspaceId: SECOND_ID,
+      title: '恢复后仍在',
+      planning: 'day-0',
+    });
+    const taskId = taskBeforeArchive.tasks.find(({ title }) => title === '恢复后仍在')?.id;
+    expect(taskId).toBeDefined();
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    const archived = await service.getWorkspaceArchiveSnapshot();
+    expect(archived.archivedWorkspaces).toEqual([
+      expect.objectContaining({
+        id: SECOND_ID,
+        name: '待恢复空间',
+        color: WORKSPACE_COLORS[4],
+        revision: 2,
+      }),
+    ]);
+
+    const restored = await service.restoreWorkspace({
+      workspaceId: SECOND_ID,
+      expectedRevision: 2,
+      name: '待恢复空间',
+    });
+    expect(restored.workspaceSnapshot).toMatchObject({
+      currentWorkspaceId: DEFAULT_ID,
+      workspaces: [
+        { id: DEFAULT_ID },
+        { id: SECOND_ID, name: '待恢复空间', color: WORKSPACE_COLORS[4] },
+      ],
+      preferences: { theme: 'light' },
+    });
+    expect(restored.archiveSnapshot.archivedWorkspaces).toEqual([]);
+
+    const activated = await service.activateWorkspace({ workspaceId: SECOND_ID });
+    expect(activated.preferences).toMatchObject({
+      activeView: 'tasks',
+      sidebarCollapsed: true,
+      browserOpen: false,
+      terminalHeight: 460,
+    });
+    expect((await service.getTaskSnapshot({ workspaceId: SECOND_ID })).tasks).toContainEqual(
+      expect.objectContaining({ id: taskId, title: '恢复后仍在' }),
+    );
+    await service.close();
+
+    const reopened = createService(dataDirectory, []);
+    await reopened.open();
+    expect((await reopened.getTaskSnapshot({ workspaceId: SECOND_ID })).tasks).toContainEqual(
+      expect.objectContaining({ id: taskId, title: '恢复后仍在' }),
+    );
+    await reopened.close();
+  });
+
+  it('requires an available archived workspace and its latest recovery revision', async () => {
+    const dataDirectory = await createDataDirectory();
+    const service = createService(dataDirectory, [DEFAULT_ID, SECOND_ID]);
+    await service.open();
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 1,
+        name: '不存在',
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceNotFoundError);
+
+    await service.createWorkspace({ name: '待校验', color: WORKSPACE_COLORS[1] });
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    const before = await service.getWorkspaceArchiveSnapshot();
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 1,
+        name: '待校验',
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceConflictError);
+    await expect(service.getWorkspaceArchiveSnapshot()).resolves.toEqual(before);
+    await service.close();
+  });
+
+  it('keeps a conflicting archive unchanged, allows recovery rename, and rejects repeat restore', async () => {
+    const dataDirectory = await createDataDirectory();
+    const service = createService(dataDirectory, [DEFAULT_ID, SECOND_ID, THIRD_ID]);
+    await service.open();
+    await service.createWorkspace({ name: '  Ａlpha  ', color: WORKSPACE_COLORS[1] });
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    await service.createWorkspace({ name: 'alpha', color: WORKSPACE_COLORS[2] });
+    const before = await service.getWorkspaceArchiveSnapshot();
+
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 2,
+        name: 'Alpha',
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceConflictError);
+    await expect(service.getWorkspaceArchiveSnapshot()).resolves.toEqual(before);
+
+    const restored = await service.restoreWorkspace({
+      workspaceId: SECOND_ID,
+      expectedRevision: 2,
+      name: 'Beta',
+    });
+    expect(restored.workspaceSnapshot.currentWorkspaceId).toBe(THIRD_ID);
+    expect(restored.workspaceSnapshot.workspaces).toContainEqual(
+      expect.objectContaining({ id: SECOND_ID, name: 'Beta' }),
+    );
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 3,
+        name: 'Beta',
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceNotFoundError);
+    await service.close();
+  });
+
+  it('rejects an ABA restore token even when a fixed clock repeats the archive timestamp', async () => {
+    const dataDirectory = await createDataDirectory();
+    const service = createService(dataDirectory, [DEFAULT_ID, SECOND_ID]);
+    await service.open();
+    await service.createWorkspace({ name: '固定时钟', color: WORKSPACE_COLORS[1] });
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    await service.restoreWorkspace({
+      workspaceId: SECOND_ID,
+      expectedRevision: 2,
+      name: '固定时钟',
+    });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    await expect(service.getWorkspaceArchiveSnapshot()).resolves.toEqual({
+      archivedWorkspaces: [
+        expect.objectContaining({
+          id: SECOND_ID,
+          archivedAt: NOW.toISOString(),
+          revision: 4,
+        }),
+      ],
+    });
+
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 2,
+        name: '固定时钟',
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceConflictError);
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 4,
+        name: '固定时钟',
+      }),
+    ).resolves.toMatchObject({
+      workspaceSnapshot: { currentWorkspaceId: DEFAULT_ID },
+      archiveSnapshot: { archivedWorkspaces: [] },
+    });
+    await service.close();
+  });
+
+  it('restores at the exact global automation capacity boundary', async () => {
+    const dataDirectory = await createDataDirectory();
+    let service = createService(dataDirectory, [DEFAULT_ID, SECOND_ID]);
+    await service.open();
+    await service.createWorkspace({ name: '一条自动化', color: WORKSPACE_COLORS[1] });
+    await service.close();
+    insertAutomationDefinitions(dataDirectory, SECOND_ID, 1, 1_000);
+
+    service = createService(dataDirectory, []);
+    await service.open();
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    await service.close();
+    insertAutomationDefinitions(dataDirectory, DEFAULT_ID, 99, 2_000);
+
+    service = createService(dataDirectory, []);
+    await service.open();
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 2,
+        name: '一条自动化',
+      }),
+    ).resolves.toMatchObject({
+      workspaceSnapshot: {
+        currentWorkspaceId: DEFAULT_ID,
+        workspaces: [{ id: DEFAULT_ID }, { id: SECOND_ID }],
+      },
+      archiveSnapshot: { archivedWorkspaces: [] },
+    });
+    await expect(service.getAutomationSnapshot({ workspaceId: SECOND_ID })).resolves.toMatchObject({
+      items: [{ enabled: false }],
+    });
+    await service.close();
+  });
+
+  it('rejects restore at 101 automations, then succeeds after capacity is released', async () => {
+    const dataDirectory = await createDataDirectory();
+    let service = createService(dataDirectory, [DEFAULT_ID, SECOND_ID]);
+    await service.open();
+    await service.createWorkspace({ name: '容量恢复', color: WORKSPACE_COLORS[1] });
+    await service.close();
+    insertAutomationDefinitions(dataDirectory, SECOND_ID, 1, 3_000);
+
+    service = createService(dataDirectory, []);
+    await service.open();
+    await service.activateWorkspace({ workspaceId: DEFAULT_ID });
+    await service.archiveWorkspace({ workspaceId: SECOND_ID });
+    await service.close();
+    const activeAutomationIds = insertAutomationDefinitions(dataDirectory, DEFAULT_ID, 100, 4_000);
+
+    service = createService(dataDirectory, []);
+    await service.open();
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 2,
+        name: '容量恢复',
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceConflictError);
+    await expect(service.getWorkspaceArchiveSnapshot()).resolves.toEqual({
+      archivedWorkspaces: [expect.objectContaining({ id: SECOND_ID, revision: 2 })],
+    });
+
+    await service.archiveAutomation({
+      workspaceId: DEFAULT_ID,
+      automationId: activeAutomationIds[0],
+      expectedRevision: 1,
+    });
+    await expect(
+      service.restoreWorkspace({
+        workspaceId: SECOND_ID,
+        expectedRevision: 2,
+        name: '容量恢复',
+      }),
+    ).resolves.toMatchObject({
+      workspaceSnapshot: {
+        currentWorkspaceId: DEFAULT_ID,
+        workspaces: [{ id: DEFAULT_ID }, { id: SECOND_ID }],
+      },
+      archiveSnapshot: { archivedWorkspaces: [] },
+    });
+    await service.close();
   });
 
   it('refuses to archive the final active workspace without changing state', async () => {
@@ -507,7 +810,7 @@ describe('workspace service', () => {
 
     const service = createService(dataDirectory, [DEFAULT_ID]);
     const result = await service.open();
-    expect(result.migration).toMatchObject({ fromVersion: 1, toVersion: 10 });
+    expect(result.migration).toMatchObject({ fromVersion: 1, toVersion: 11 });
     expect(result.preMigrationBackup).toMatchObject({ reason: 'pre-migration', schemaVersion: 1 });
     const backup = result.preMigrationBackup;
     expect(backup).toBeDefined();
@@ -579,6 +882,42 @@ async function createDataDirectory(): Promise<string> {
 
 function openDatabase(dataDirectory: string): DatabaseSync {
   return new DatabaseSync(join(dataDirectory, 'daily-workbench.sqlite3'));
+}
+
+function insertAutomationDefinitions(
+  dataDirectory: string,
+  workspaceId: string,
+  count: number,
+  offset: number,
+): string[] {
+  const database = openDatabase(dataDirectory);
+  const insert = database.prepare(
+    `INSERT INTO automations (
+       id, workspace_id, name, cadence, local_time_minute, weekday,
+       action_kind, action_title, action_body, enabled, effective_at,
+       revision, created_at, updated_at, archived_at
+     ) VALUES (?, ?, ?, 'daily', 510, NULL,
+               'create-today-task', '检查计划', NULL, 0, NULL,
+               1, ?, ?, NULL)`,
+  );
+  const ids: string[] = [];
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const prefix = (offset + index + 1).toString(16).padStart(8, '0');
+      const id = `${prefix}-0000-4000-8000-000000000000`;
+      insert.run(
+        id,
+        workspaceId,
+        `自动化 ${offset + index + 1}`,
+        NOW.toISOString(),
+        NOW.toISOString(),
+      );
+      ids.push(id);
+    }
+    return ids;
+  } finally {
+    database.close();
+  }
 }
 
 function bindAdapterWithFailingArchive(

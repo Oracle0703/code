@@ -54,6 +54,7 @@ import {
   type WorkspaceCreateInput,
   type WorkspacePreferencesInput,
   type WorkspaceRenameInput,
+  type WorkspaceRestoreInput,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
 import {
@@ -106,6 +107,7 @@ import {
   normalizeWorkspaceId,
   normalizeWorkspaceName,
   normalizeWorkspacePreferencesPatch,
+  normalizeWorkspaceRevision,
 } from '../../shared/workspace-domain';
 import { normalizeSearchQuery, normalizeSearchScope } from '../../shared/search-domain';
 
@@ -436,6 +438,18 @@ export function parseWorkspaceTargetInput(value: unknown): WorkspaceTargetInput 
   }
   assertOnlyKeys(value, ['workspaceId']);
   return { workspaceId: normalizeWorkspaceId(value.workspaceId) };
+}
+
+export function parseWorkspaceRestoreInput(value: unknown): WorkspaceRestoreInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Workspace restore input must be an object');
+  }
+  assertOnlyKeys(value, ['workspaceId', 'expectedRevision', 'name']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    expectedRevision: normalizeWorkspaceRevision(value.expectedRevision),
+    name: normalizeWorkspaceName(value.name),
+  };
 }
 
 export function parseWorkspacePreferencesInput(value: unknown): WorkspacePreferencesInput {

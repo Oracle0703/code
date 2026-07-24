@@ -60,9 +60,12 @@ import {
   type TerminalWriteInput,
   type WindowCloseResponse,
   type WorkspaceCreateInput,
+  type WorkspaceArchiveSnapshot,
   type WorkspacePreferences,
   type WorkspacePreferencesInput,
   type WorkspaceRenameInput,
+  type WorkspaceRestoreInput,
+  type WorkspaceRestoreResult,
   type WorkspaceSnapshot,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
@@ -120,6 +123,7 @@ import {
   parseWorkspaceCreateInput,
   parseWorkspacePreferencesInput,
   parseWorkspaceRenameInput,
+  parseWorkspaceRestoreInput,
   parseWorkspaceTargetInput,
 } from './validation';
 
@@ -148,10 +152,12 @@ interface IpcDependencies {
   };
   workspace: {
     getWorkspaceSnapshot(): Promise<WorkspaceSnapshot>;
+    getWorkspaceArchiveSnapshot(): Promise<WorkspaceArchiveSnapshot>;
     createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot>;
     renameWorkspace(input: WorkspaceRenameInput): Promise<WorkspaceSnapshot>;
     activateWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
     archiveWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+    restoreWorkspace(input: WorkspaceRestoreInput): Promise<WorkspaceRestoreResult>;
     updateWorkspacePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
   };
   inbox: {
@@ -319,6 +325,10 @@ export function registerIpcHandlers({
     assertNoArguments(args, 'Getting the workspace snapshot');
     return workspace.getWorkspaceSnapshot();
   });
+  register(IPC_CHANNELS.workspace.getArchiveSnapshot, (_event, ...args) => {
+    assertNoArguments(args, 'Getting archived workspaces');
+    return workspace.getWorkspaceArchiveSnapshot();
+  });
   register(IPC_CHANNELS.workspace.create, (_event, input, ...args) => {
     assertNoArguments(args, 'Creating a workspace');
     return workspace.createWorkspace(parseWorkspaceCreateInput(input));
@@ -334,6 +344,10 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.workspace.archive, (_event, input, ...args) => {
     assertNoArguments(args, 'Archiving a workspace');
     return workspace.archiveWorkspace(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.workspace.restore, (_event, input, ...args) => {
+    assertNoArguments(args, 'Restoring a workspace');
+    return workspace.restoreWorkspace(parseWorkspaceRestoreInput(input));
   });
   register(IPC_CHANNELS.workspace.updatePreferences, (_event, input, ...args) => {
     assertNoArguments(args, 'Updating workspace preferences');

@@ -109,6 +109,54 @@ describe('preload data and search API', () => {
   });
 });
 
+describe('preload workspace API', () => {
+  it('exposes only the declared frozen workspace methods', () => {
+    expect(Object.keys(api.workspace).sort()).toEqual([
+      'activate',
+      'archive',
+      'create',
+      'getArchiveSnapshot',
+      'getSnapshot',
+      'rename',
+      'restore',
+      'updatePreferences',
+    ]);
+    expect(Object.isFrozen(api.workspace)).toBe(true);
+  });
+
+  it('uses a parameterless archive read and forwards exact restore input', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const restoreInput = {
+      workspaceId,
+      expectedRevision: 3,
+      name: '恢复工作区',
+    };
+
+    await api.workspace.getSnapshot();
+    await api.workspace.getArchiveSnapshot();
+    await api.workspace.create({ name: '新工作区', color: '#348bd4' });
+    await api.workspace.rename({ workspaceId, name: '重命名工作区' });
+    await api.workspace.activate({ workspaceId });
+    await api.workspace.archive({ workspaceId });
+    await api.workspace.restore(restoreInput);
+    await api.workspace.updatePreferences({
+      workspaceId,
+      patch: { browserOpen: false },
+    });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['workspace:get-snapshot'],
+      ['workspace:get-archive-snapshot'],
+      ['workspace:create', { name: '新工作区', color: '#348bd4' }],
+      ['workspace:rename', { workspaceId, name: '重命名工作区' }],
+      ['workspace:activate', { workspaceId }],
+      ['workspace:archive', { workspaceId }],
+      ['workspace:restore', restoreInput],
+      ['workspace:update-preferences', { workspaceId, patch: { browserOpen: false } }],
+    ]);
+  });
+});
+
 describe('preload inbox API', () => {
   it('exposes only the declared inbox methods and capture event', () => {
     expect(Object.keys(api.inbox).sort()).toEqual([

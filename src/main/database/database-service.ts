@@ -41,10 +41,13 @@ import type {
   TaskRenameInput,
   TaskSnapshot,
   TaskStatusInput,
+  WorkspaceArchiveSnapshot,
   WorkspaceCreateInput,
   WorkspacePreferences,
   WorkspacePreferencesInput,
   WorkspaceRenameInput,
+  WorkspaceRestoreInput,
+  WorkspaceRestoreResult,
   WorkspaceSnapshot,
   WorkspaceTargetInput,
 } from '../../shared/contracts';
@@ -78,7 +81,7 @@ import type {
   TerminalWorkingDirectoryPreferenceWrite,
   TerminalWslDistributionPreferenceWrite,
 } from '../terminal/terminal-preference-types';
-import { WorkspaceService } from '../workspaces';
+import { WORKSPACE_RECOVERY_SCHEMA_VERSION, WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
 import { BackupPolicyRepository } from './backup-policy-repository';
 import type { BackupSchedulerPersistentState } from './backup-scheduler';
@@ -537,6 +540,10 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#workspaceService.getSnapshot();
   }
 
+  getWorkspaceArchiveSnapshot(): Promise<WorkspaceArchiveSnapshot> {
+    return this.#workspaceService.getArchiveSnapshot();
+  }
+
   createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot> {
     return this.#workspaceService.create(input);
   }
@@ -551,6 +558,10 @@ export class DatabaseService implements TerminalPreferenceStore {
 
   archiveWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot> {
     return this.#workspaceService.archive(input);
+  }
+
+  restoreWorkspace(input: WorkspaceRestoreInput): Promise<WorkspaceRestoreResult> {
+    return this.#workspaceService.restore(input);
   }
 
   updateWorkspacePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences> {
@@ -832,7 +843,11 @@ export class DatabaseService implements TerminalPreferenceStore {
       let health: DatabaseHealth;
       try {
         new MetadataRepository(database).initializeWithinTransaction(openedAt, this.#idFactory());
-        this.#workspaceService.initializeWithinTransaction(database, openedAt);
+        this.#workspaceService.initializeWithinTransaction(
+          database,
+          openedAt,
+          migration.toVersion >= WORKSPACE_RECOVERY_SCHEMA_VERSION,
+        );
         if (migration.toVersion >= 8) {
           new TerminalPreferenceRepository(database).validateSnapshot();
         }
@@ -946,7 +961,10 @@ export class DatabaseService implements TerminalPreferenceStore {
       new MetadataRepository(database).read();
     }
     if (expectedVersion >= 2) {
-      this.#workspaceService.validateSnapshot(database);
+      this.#workspaceService.validateSnapshot(
+        database,
+        expectedVersion >= WORKSPACE_RECOVERY_SCHEMA_VERSION,
+      );
     }
     if (expectedVersion >= 3) {
       this.#inboxService.validateSnapshot(database);

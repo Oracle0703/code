@@ -25,10 +25,12 @@ export const IPC_CHANNELS = {
   },
   workspace: {
     getSnapshot: 'workspace:get-snapshot',
+    getArchiveSnapshot: 'workspace:get-archive-snapshot',
     create: 'workspace:create',
     rename: 'workspace:rename',
     activate: 'workspace:activate',
     archive: 'workspace:archive',
+    restore: 'workspace:restore',
     updatePreferences: 'workspace:update-preferences',
   },
   inbox: {
@@ -424,6 +426,11 @@ export interface WorkspaceInfo {
   readonly updatedAt: string;
 }
 
+export interface ArchivedWorkspaceInfo extends WorkspaceInfo {
+  readonly archivedAt: string;
+  readonly revision: number;
+}
+
 export interface WorkspacePreferences {
   readonly activeView: WorkspaceViewId;
   readonly theme: WorkspaceTheme;
@@ -450,6 +457,10 @@ export interface WorkspaceSnapshot {
   readonly preferences: WorkspacePreferences;
 }
 
+export interface WorkspaceArchiveSnapshot {
+  readonly archivedWorkspaces: readonly ArchivedWorkspaceInfo[];
+}
+
 export interface WorkspaceCreateInput {
   readonly name: string;
   readonly color: WorkspaceColor;
@@ -462,6 +473,16 @@ export interface WorkspaceRenameInput {
 
 export interface WorkspaceTargetInput {
   readonly workspaceId: string;
+}
+
+export interface WorkspaceRestoreInput extends WorkspaceTargetInput {
+  readonly expectedRevision: number;
+  readonly name: string;
+}
+
+export interface WorkspaceRestoreResult {
+  readonly workspaceSnapshot: WorkspaceSnapshot;
+  readonly archiveSnapshot: WorkspaceArchiveSnapshot;
 }
 
 export type WorkspacePreferencesPatch = Partial<WorkspacePreferences>;
@@ -1051,10 +1072,12 @@ export interface WorkbenchApi {
   };
   workspace: {
     getSnapshot(): Promise<WorkspaceSnapshot>;
+    getArchiveSnapshot(): Promise<WorkspaceArchiveSnapshot>;
     create(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot>;
     rename(input: WorkspaceRenameInput): Promise<WorkspaceSnapshot>;
     activate(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
     archive(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+    restore(input: WorkspaceRestoreInput): Promise<WorkspaceRestoreResult>;
     updatePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
   };
   inbox: {

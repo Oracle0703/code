@@ -104,8 +104,8 @@ import {
 } from './package-format';
 import { DEFAULT_MAX_IMPORT_STAGING_BYTES, type ImportStagingDriver } from './staging';
 
-export const PORTABLE_DATABASE_SCHEMA_VERSION = 10;
-export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8, 9, 10] as const);
+export const PORTABLE_DATABASE_SCHEMA_VERSION = 11;
+export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8, 9, 10, 11] as const);
 const MAX_PORTABLE_LOGICAL_RECORDS = 100_000;
 const MAX_PORTABLE_WORKSPACES = 500;
 const MAX_PORTABLE_BROWSER_TABS = 6_000;
@@ -690,7 +690,8 @@ function decodePortablePackage(packageData: ParsedPortablePackage): PortableData
     (packageData.manifest.formatVersion === AUTOMATION_DATA_PACKAGE_FORMAT_VERSION &&
       packageData.manifest.sourceSchemaVersion === 9) ||
     (packageData.manifest.formatVersion === DATA_PACKAGE_FORMAT_VERSION &&
-      packageData.manifest.sourceSchemaVersion === 10);
+      (packageData.manifest.sourceSchemaVersion === 10 ||
+        packageData.manifest.sourceSchemaVersion === 11));
   if (
     packageData.manifest.format !== DATA_PACKAGE_FORMAT ||
     !formatMatchesSchema ||
@@ -891,9 +892,7 @@ function decodeWorkspace(value: unknown): WorkspaceRecord {
   const createdAt = readIsoTimestamp(data.createdAt, 'workspace creation time');
   const updatedAt = readIsoTimestamp(data.updatedAt, 'workspace update time');
   const archivedAt = readNullableIsoTimestamp(data.archivedAt, 'workspace archive time');
-  if (archivedAt !== null && archivedAt < createdAt) {
-    throw new DataPackageError('The data package workspace archive time is invalid.');
-  }
+  assertTimestampOrder(createdAt, updatedAt, archivedAt, 'workspace');
   return {
     id: normalizedValue(data.id, normalizeWorkspaceId, 'workspace id'),
     name: normalizedValue(data.name, normalizeWorkspaceName, 'workspace name'),
@@ -1994,7 +1993,7 @@ function sqliteSidecarPaths(databasePath: string): readonly string[] {
 function assertCurrentMigrationSet(migrations: readonly Migration[]): void {
   const runner = new MigrationRunner(migrations);
   if (runner.latestVersion !== PORTABLE_DATABASE_SCHEMA_VERSION) {
-    throw new TypeError('The import codec requires the current v10 migration set.');
+    throw new TypeError('The import codec requires the current v11 migration set.');
   }
 }
 

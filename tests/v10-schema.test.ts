@@ -54,7 +54,7 @@ describe('v10 focus session schema', () => {
     );
 
     const database = await createDatabase();
-    expect(new MigrationRunner(DEFAULT_MIGRATIONS).apply(database)).toMatchObject({
+    expect(new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 10)).apply(database)).toMatchObject({
       fromVersion: 0,
       toVersion: 10,
     });
@@ -266,7 +266,7 @@ async function createDatabase(): Promise<SqliteAdapter> {
 
 async function createV10Database(): Promise<SqliteAdapter> {
   const database = await createDatabase();
-  new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+  new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 10)).apply(database);
   return database;
 }
 

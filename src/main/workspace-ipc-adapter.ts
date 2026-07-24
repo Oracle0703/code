@@ -1,18 +1,23 @@
 import type {
+  WorkspaceArchiveSnapshot,
   WorkspaceCreateInput,
   WorkspacePreferences,
   WorkspacePreferencesInput,
   WorkspaceRenameInput,
+  WorkspaceRestoreInput,
+  WorkspaceRestoreResult,
   WorkspaceSnapshot,
   WorkspaceTargetInput,
 } from '../shared/contracts';
 
 export interface WorkspaceIpcPersistence {
   getWorkspaceSnapshot(): Promise<WorkspaceSnapshot>;
+  getWorkspaceArchiveSnapshot(): Promise<WorkspaceArchiveSnapshot>;
   createWorkspace(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot>;
   renameWorkspace(input: WorkspaceRenameInput): Promise<WorkspaceSnapshot>;
   activateWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
   archiveWorkspace(input: WorkspaceTargetInput): Promise<WorkspaceSnapshot>;
+  restoreWorkspace(input: WorkspaceRestoreInput): Promise<WorkspaceRestoreResult>;
   updateWorkspacePreferences(input: WorkspacePreferencesInput): Promise<WorkspacePreferences>;
 }
 
@@ -41,6 +46,7 @@ export function createWorkspaceIpcAdapter(
 
   return {
     getWorkspaceSnapshot: () => track(persistence.getWorkspaceSnapshot()),
+    getWorkspaceArchiveSnapshot: () => persistence.getWorkspaceArchiveSnapshot(),
     createWorkspace: (input: WorkspaceCreateInput) => track(persistence.createWorkspace(input)),
     renameWorkspace: (input: WorkspaceRenameInput) => track(persistence.renameWorkspace(input)),
     activateWorkspace: (input: WorkspaceTargetInput) => track(persistence.activateWorkspace(input)),
@@ -64,6 +70,12 @@ export function createWorkspaceIpcAdapter(
       }
       onSnapshot(snapshot);
       return snapshot;
+    },
+    restoreWorkspace: async (input: WorkspaceRestoreInput) => {
+      const result = await persistence.restoreWorkspace(input);
+      terminal.setActiveWorkspace(result.workspaceSnapshot.currentWorkspaceId);
+      onSnapshot(result.workspaceSnapshot);
+      return result;
     },
     updateWorkspacePreferences: (input: WorkspacePreferencesInput) =>
       persistence.updateWorkspacePreferences(input),

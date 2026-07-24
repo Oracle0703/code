@@ -64,7 +64,7 @@ describe('task service', () => {
       taskIds: [TASK_A],
     });
     const initialized = await service.open();
-    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 10 });
+    expect(initialized.migration).toMatchObject({ fromVersion: 0, toVersion: 11 });
     await expect(service.getTaskSnapshot({ workspaceId: WORKSPACE_A })).resolves.toEqual({
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
@@ -124,7 +124,7 @@ describe('task service', () => {
 
     const reopened = createService(dataDirectory);
     const result = await reopened.open();
-    expect(result.migration).toEqual({ fromVersion: 10, toVersion: 10, applied: [] });
+    expect(result.migration).toEqual({ fromVersion: 11, toVersion: 11, applied: [] });
     await expect(reopened.getTaskSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
       todayDate: TODAY,
       tasks: [{ id: TASK_A, title: '更新后的任务', status: 'todo', plannedFor: null }],
@@ -510,7 +510,7 @@ describe('task service', () => {
     await createVersionThreeDatabase(dataDirectory);
     const service = createService(dataDirectory, { taskIds: [TASK_A] });
     const result = await service.open();
-    expect(result.migration).toMatchObject({ fromVersion: 3, toVersion: 10 });
+    expect(result.migration).toMatchObject({ fromVersion: 3, toVersion: 11 });
     expect(result.preMigrationBackup).toMatchObject({
       reason: 'pre-migration',
       schemaVersion: 3,
@@ -713,7 +713,7 @@ async function createVersionThreeDatabase(dataDirectory: string): Promise<void> 
     execute: async (operation) => operation(database),
     now: () => new Date(NOW),
     idFactory: () => WORKSPACE_A,
-  }).initialize(database, NOW.toISOString());
+  }).initialize(database, NOW.toISOString(), false);
   const inbox = new InboxService({
     execute: async (operation) => operation(database),
     now: () => new Date(NOW),

@@ -47,6 +47,13 @@ export function normalizeWorkspaceName(value: unknown): string {
   return normalized;
 }
 
+export function normalizeWorkspaceRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new TypeError('Workspace revision must be a positive safe integer.');
+  }
+  return value as number;
+}
+
 export function createWorkspaceNameKey(name: string): string {
   return normalizeWorkspaceName(name).toLowerCase();
 }

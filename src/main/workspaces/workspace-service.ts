@@ -1,18 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import {
   WORKSPACE_COLORS,
+  type WorkspaceArchiveSnapshot,
   type WorkspaceCreateInput,
   type WorkspacePreferences,
   type WorkspacePreferencesInput,
   type WorkspaceRenameInput,
+  type WorkspaceRestoreInput,
+  type WorkspaceRestoreResult,
   type WorkspaceSnapshot,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
+import { AUTOMATION_ACTIVE_GLOBAL_LIMIT } from '../../shared/automation-domain';
 import {
   normalizeWorkspaceColor,
   normalizeWorkspaceId,
   normalizeWorkspaceName,
   normalizeWorkspacePreferencesPatch,
+  normalizeWorkspaceRevision,
 } from '../../shared/workspace-domain';
 import { DatabaseIntegrityError } from '../database/errors';
 import type { SqliteAdapter } from '../database/sqlite-adapter';
@@ -28,6 +33,8 @@ import { WorkspaceRepository } from './workspace-repository';
 export type WorkspaceOperationExecutor = <T>(
   operation: (database: SqliteAdapter) => Promise<T> | T,
 ) => Promise<T>;
+
+export const WORKSPACE_RECOVERY_SCHEMA_VERSION = 11;
 
 export interface WorkspaceServiceOptions {
   readonly execute: WorkspaceOperationExecutor;
@@ -54,18 +61,30 @@ export class WorkspaceService {
     this.#onFatalTransaction = onFatalTransaction;
   }
 
-  initialize(database: SqliteAdapter, openedAt?: string): WorkspaceSnapshot {
+  initialize(
+    database: SqliteAdapter,
+    openedAt?: string,
+    requireRecoverySchema = true,
+  ): WorkspaceSnapshot {
     return this.#transaction(database, 'initialize', (repository) =>
-      this.#initializeRepository(repository, openedAt),
+      this.#initializeRepository(repository, openedAt, requireRecoverySchema),
     );
   }
 
-  initializeWithinTransaction(database: SqliteAdapter, openedAt: string): WorkspaceSnapshot {
+  initializeWithinTransaction(
+    database: SqliteAdapter,
+    openedAt: string,
+    requireRecoverySchema = true,
+  ): WorkspaceSnapshot {
     if (!database.isTransaction) {
       throw new DatabaseIntegrityError('Workspace initialization requires an active transaction.');
     }
     try {
-      return this.#initializeRepository(new WorkspaceRepository(database), openedAt);
+      return this.#initializeRepository(
+        new WorkspaceRepository(database),
+        openedAt,
+        requireRecoverySchema,
+      );
     } catch (error) {
       if (error instanceof WorkspaceError || error instanceof DatabaseIntegrityError) {
         throw error;
@@ -74,12 +93,16 @@ export class WorkspaceService {
     }
   }
 
-  validateSnapshot(database: SqliteAdapter): WorkspaceSnapshot {
-    return new WorkspaceRepository(database).validateIntegrity();
+  validateSnapshot(database: SqliteAdapter, requireRecoverySchema = true): WorkspaceSnapshot {
+    return new WorkspaceRepository(database).validateIntegrity(requireRecoverySchema);
   }
 
   getSnapshot(): Promise<WorkspaceSnapshot> {
     return this.#execute((database) => new WorkspaceRepository(database).readSnapshot());
+  }
+
+  getArchiveSnapshot(): Promise<WorkspaceArchiveSnapshot> {
+    return this.#execute((database) => new WorkspaceRepository(database).readArchiveSnapshot());
   }
 
   create(input: WorkspaceCreateInput): Promise<WorkspaceSnapshot> {
@@ -111,7 +134,11 @@ export class WorkspaceService {
         if (repository.activeNameExists(name, workspaceId)) {
           throw new WorkspaceConflictError('An active workspace already uses this name.');
         }
-        repository.rename(workspaceId, name, this.#timestamp());
+        repository.rename(
+          workspaceId,
+          name,
+          this.#timestampAtLeast(workspace.createdAt, workspace.updatedAt),
+        );
         return repository.readSnapshot();
       }),
     );
@@ -148,6 +175,45 @@ export class WorkspaceService {
         }
         repository.archive(workspaceId, timestamp);
         return repository.readSnapshot();
+      }),
+    );
+  }
+
+  restore(input: WorkspaceRestoreInput): Promise<WorkspaceRestoreResult> {
+    const workspaceId = this.#workspaceIdFromInput(input?.workspaceId);
+    const expectedRevision = this.#recoveryRevision(input?.expectedRevision);
+    const name = this.#name(input?.name);
+    return this.#execute((database) =>
+      this.#transaction(database, 'restore', (repository) => {
+        const workspace = repository.findArchived(workspaceId);
+        if (!workspace) {
+          throw new WorkspaceNotFoundError('The archived workspace is unavailable.');
+        }
+        if (workspace.revision !== expectedRevision) {
+          throw new WorkspaceConflictError('The archived workspace changed. Reload and retry.');
+        }
+        if (repository.activeNameExists(name)) {
+          throw new WorkspaceConflictError('An active workspace already uses this name.');
+        }
+        if (
+          repository.countActiveAutomationDefinitions() +
+            repository.countRestorableAutomationDefinitions(workspaceId) >
+          AUTOMATION_ACTIVE_GLOBAL_LIMIT
+        ) {
+          throw new WorkspaceConflictError(
+            `Restoring this workspace would exceed the ${AUTOMATION_ACTIVE_GLOBAL_LIMIT} active automation limit.`,
+          );
+        }
+        repository.restore(
+          workspaceId,
+          expectedRevision,
+          name,
+          this.#timestampAtLeast(workspace.createdAt, workspace.updatedAt, workspace.archivedAt),
+        );
+        return {
+          workspaceSnapshot: repository.readSnapshot(),
+          archiveSnapshot: repository.readArchiveSnapshot(),
+        };
       }),
     );
   }
@@ -241,7 +307,11 @@ export class WorkspaceService {
     return workspace;
   }
 
-  #initializeRepository(repository: WorkspaceRepository, openedAt?: string): WorkspaceSnapshot {
+  #initializeRepository(
+    repository: WorkspaceRepository,
+    openedAt?: string,
+    requireRecoverySchema = true,
+  ): WorkspaceSnapshot {
     const workspaceCount = repository.countAll();
     const preferenceCount = repository.countPreferences();
     const stateCount = repository.countStateRows();
@@ -255,9 +325,9 @@ export class WorkspaceService {
         timestamp,
       });
       repository.insertState(workspaceId, timestamp);
-      return repository.readSnapshot();
+      return repository.validateIntegrity(requireRecoverySchema);
     }
-    return repository.validateIntegrity();
+    return repository.validateIntegrity(requireRecoverySchema);
   }
 
   #workspaceId(): string {
@@ -318,5 +388,15 @@ export class WorkspaceService {
       throw new WorkspaceValidationError('Workspace timestamp is invalid.');
     }
     return value;
+  }
+
+  #recoveryRevision(value: unknown): number {
+    try {
+      return normalizeWorkspaceRevision(value);
+    } catch (error) {
+      throw new WorkspaceValidationError('Workspace recovery revision is invalid.', {
+        cause: error,
+      });
+    }
   }
 }
