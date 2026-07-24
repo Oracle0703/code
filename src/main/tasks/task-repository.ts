@@ -1,4 +1,5 @@
 import type { Task, TaskSnapshot, TaskStatus } from '../../shared/contracts';
+import { createRollingPlanningDays } from '../../shared/planning-domain';
 import {
   normalizeTaskCivilDate,
   normalizeTaskId,
@@ -50,6 +51,7 @@ export class TaskRepository {
     return {
       workspaceId,
       todayDate,
+      planningDays: createRollingPlanningDays(todayDate),
       tasks: this.#database
         .all<TaskRow>(
           `SELECT id, workspace_id, title, status, planned_for, source_inbox_entry_id,

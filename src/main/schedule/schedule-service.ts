@@ -7,6 +7,7 @@ import type {
   ScheduleUpdateInput,
   WorkspaceTargetInput,
 } from '../../shared/contracts';
+import { isDateInRollingPlanningWindow } from '../../shared/planning-domain';
 import {
   formatLocalScheduleDate,
   normalizeScheduleCivilDate,
@@ -92,7 +93,7 @@ export class ScheduleService {
           workspaceId,
           title,
           kind,
-          scheduledFor: todayDate,
+          scheduledFor: expectedDate,
           ...range,
           timestamp,
         });
@@ -113,7 +114,7 @@ export class ScheduleService {
       this.#transaction(database, 'update a schedule item', (schedule) => {
         this.#requireActiveWorkspace(database, workspaceId);
         const todayDate = this.#requireExpectedDate(expectedDate);
-        const item = this.#requireActiveItem(schedule, workspaceId, scheduleId, todayDate);
+        const item = this.#requireActiveItem(schedule, workspaceId, scheduleId, expectedDate);
         this.#requireRevision(item, expectedRevision);
         if (
           item.title !== title ||
@@ -124,7 +125,7 @@ export class ScheduleService {
           schedule.update(
             workspaceId,
             scheduleId,
-            todayDate,
+            expectedDate,
             expectedRevision,
             title,
             kind,
@@ -147,12 +148,12 @@ export class ScheduleService {
       this.#transaction(database, 'archive a schedule item', (schedule) => {
         this.#requireActiveWorkspace(database, workspaceId);
         const todayDate = this.#requireExpectedDate(expectedDate);
-        const item = this.#requireActiveItem(schedule, workspaceId, scheduleId, todayDate);
+        const item = this.#requireActiveItem(schedule, workspaceId, scheduleId, expectedDate);
         this.#requireRevision(item, expectedRevision);
         schedule.archive(
           workspaceId,
           scheduleId,
-          todayDate,
+          expectedDate,
           expectedRevision,
           this.#timestampAtLeast(item.createdAt, item.updatedAt),
         );
@@ -240,8 +241,10 @@ export class ScheduleService {
 
   #requireExpectedDate(expectedDate: string): string {
     const todayDate = this.#todayDate();
-    if (expectedDate !== todayDate) {
-      throw new ScheduleConflictError('The current schedule date changed. Reload today first.');
+    if (!isDateInRollingPlanningWindow(expectedDate, todayDate)) {
+      throw new ScheduleConflictError(
+        'The selected schedule date is outside the current planning window. Reload the plan first.',
+      );
     }
     return todayDate;
   }

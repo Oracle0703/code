@@ -15,6 +15,7 @@ import {
   Square,
 } from 'lucide-react';
 import type { Task, TaskPlanning, TaskSnapshot, TaskStatus } from '../../shared/contracts';
+import { planningDayLabel, planningValueForTask } from '../planning-state';
 import { filterTasks, type TaskFilter } from '../task-state';
 
 interface TaskPageProps {
@@ -208,6 +209,7 @@ export function TaskPage({
               {visibleTasks.map((task) => {
                 const pending = pendingTaskIds.has(task.id);
                 const completed = task.status === 'completed';
+                const planningValue = planningValueForTask(task, snapshot?.planningDays ?? []);
                 return (
                   <li className={`task-page-row${completed ? ' is-completed' : ''}`} key={task.id}>
                     <button
@@ -277,7 +279,7 @@ export function TaskPage({
                         {task.plannedFor ? (
                           <small className="task-date-chip">
                             <CalendarDays size={11} />{' '}
-                            {formatPlannedDate(task.plannedFor, todayDate)}
+                            {formatPlannedDate(task.plannedFor, snapshot?.planningDays ?? [])}
                           </small>
                         ) : null}
                       </span>
@@ -305,7 +307,7 @@ export function TaskPage({
                     <label className="task-page-row__select">
                       <span className="sr-only">修改“{task.title}”的安排</span>
                       <select
-                        value={planningValue(task, todayDate)}
+                        value={planningValue}
                         disabled={pending || assistantSelectionOpen}
                         onChange={(event) =>
                           void onUpdatePlanning(task.id, event.target.value as TaskPlanning).catch(
@@ -313,12 +315,19 @@ export function TaskPage({
                           )
                         }
                       >
-                        {task.plannedFor && task.plannedFor !== todayDate ? (
-                          <option value="past" disabled>
-                            原计划 {formatShortDate(task.plannedFor)}
+                        {planningValue === 'outside-window' && task.plannedFor ? (
+                          <option value="outside-window" disabled>
+                            窗口外 · {formatShortDate(task.plannedFor)}
                           </option>
                         ) : null}
-                        <option value="today">今天</option>
+                        {snapshot?.planningDays.map((day) => {
+                          const label = planningDayLabel(day);
+                          return (
+                            <option value={day.token} key={day.token}>
+                              {label.short} · {label.date}
+                            </option>
+                          );
+                        })}
                         <option value="none">不安排</option>
                       </select>
                     </label>
@@ -368,13 +377,11 @@ export function TaskPage({
   );
 }
 
-function planningValue(task: Task, todayDate: string): TaskPlanning | 'past' {
-  if (task.plannedFor === todayDate) return 'today';
-  return task.plannedFor === null ? 'none' : 'past';
-}
-
-function formatPlannedDate(value: string, todayDate: string): string {
-  return value === todayDate ? '今天' : `原计划 ${formatShortDate(value)}`;
+function formatPlannedDate(value: string, planningDays: TaskSnapshot['planningDays']): string {
+  const day = planningDays.find(({ date }) => date === value);
+  if (!day) return `窗口外 ${formatShortDate(value)}`;
+  const label = planningDayLabel(day);
+  return day.token === 'day-0' ? '今天' : `${label.short} ${label.date}`;
 }
 
 function formatShortDate(value: string): string {

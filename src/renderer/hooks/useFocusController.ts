@@ -204,12 +204,13 @@ export function useFocusController(workspaceId: string | null) {
     [],
   );
 
-  const snapshot =
-    storedSnapshot?.activation === activation && storedSnapshot.snapshot.workspaceId === workspaceId
-      ? storedSnapshot.snapshot
-      : null;
+  const storedSnapshotIsVisible =
+    storedSnapshot?.activation === activation &&
+    storedSnapshot.snapshot.workspaceId === workspaceId &&
+    isFocusSnapshotDateCurrent(storedSnapshot.snapshot, new Date());
+  const snapshot = storedSnapshotIsVisible ? storedSnapshot.snapshot : null;
   const visibleLoadState =
-    loadState.activation === activation
+    loadState.activation === activation && !(loadState.status === 'ready' && !snapshot)
       ? loadState
       : {
           activation,

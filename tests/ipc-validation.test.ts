@@ -53,7 +53,7 @@ import {
   parseWorkspaceRenameInput,
   parseWorkspaceTargetInput,
 } from '../src/main/ipc/validation';
-import { WORKSPACE_COLORS } from '../src/shared/contracts';
+import { PLANNING_DAY_TOKENS, WORKSPACE_COLORS } from '../src/shared/contracts';
 
 const WORKSPACE_ID = '123e4567-e89b-42d3-a456-426614174000';
 const ENTRY_ID = '223e4567-e89b-42d3-a456-426614174000';
@@ -742,12 +742,12 @@ describe('IPC validation', () => {
       parseTaskCreateInput({
         workspaceId: WORKSPACE_ID,
         title: '  ＡPI e\u0301 👩‍💻  ',
-        planning: 'today',
+        planning: 'day-0',
       }),
     ).toEqual({
       workspaceId: WORKSPACE_ID,
       title: 'ＡPI e\u0301 👩‍💻',
-      planning: 'today',
+      planning: 'day-0',
     });
     expect(
       parseTaskRenameInput({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, title: '新的标题' }),
@@ -759,26 +759,28 @@ describe('IPC validation', () => {
         status: 'completed',
       }),
     ).toEqual({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, status: 'completed' });
-    expect(
-      parseTaskPlanningInput({
-        workspaceId: WORKSPACE_ID,
-        taskId: TASK_ID,
-        planning: 'none',
-      }),
-    ).toEqual({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, planning: 'none' });
+    for (const planning of [...PLANNING_DAY_TOKENS, 'none'] as const) {
+      expect(
+        parseTaskPlanningInput({
+          workspaceId: WORKSPACE_ID,
+          taskId: TASK_ID,
+          planning,
+        }),
+      ).toEqual({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, planning });
+    }
     expect(
       parseTaskConvertInboxInput({
         workspaceId: WORKSPACE_ID,
         entryId: ENTRY_ID,
-        planning: 'today',
+        planning: 'day-6',
       }),
-    ).toEqual({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID, planning: 'today' });
+    ).toEqual({ workspaceId: WORKSPACE_ID, entryId: ENTRY_ID, planning: 'day-6' });
   });
 
   it('rejects invalid task values and renderer-owned persistence fields', () => {
     for (const title of ['', '  ', 'line one\nline two', '\u0000', 'x'.repeat(501)]) {
       expect(() =>
-        parseTaskCreateInput({ workspaceId: WORKSPACE_ID, title, planning: 'today' }),
+        parseTaskCreateInput({ workspaceId: WORKSPACE_ID, title, planning: 'day-0' }),
       ).toThrow(TypeError);
     }
     expect(() =>
@@ -786,6 +788,29 @@ describe('IPC validation', () => {
     ).toThrow(TypeError);
     expect(() =>
       parseTaskPlanningInput({ workspaceId: WORKSPACE_ID, taskId: TASK_ID, planning: 'tomorrow' }),
+    ).toThrow(TypeError);
+    for (const legacyPlanning of ['today', 'day-7', 0, null]) {
+      expect(() =>
+        parseTaskPlanningInput({
+          workspaceId: WORKSPACE_ID,
+          taskId: TASK_ID,
+          planning: legacyPlanning,
+        }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      parseTaskCreateInput({
+        workspaceId: WORKSPACE_ID,
+        title: '旧规划值',
+        planning: 'today',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTaskConvertInboxInput({
+        workspaceId: WORKSPACE_ID,
+        entryId: ENTRY_ID,
+        planning: 'today',
+      }),
     ).toThrow(TypeError);
     expect(() =>
       parseTaskRenameInput({
@@ -798,7 +823,7 @@ describe('IPC validation', () => {
       parseTaskCreateInput({
         workspaceId: WORKSPACE_ID,
         title: '不能伪造字段',
-        planning: 'today',
+        planning: 'day-0',
         id: TASK_ID,
         sourceInboxEntryId: ENTRY_ID,
         completedAt: new Date().toISOString(),
@@ -808,8 +833,16 @@ describe('IPC validation', () => {
       parseTaskConvertInboxInput({
         workspaceId: WORKSPACE_ID,
         entryId: ENTRY_ID,
-        planning: 'today',
+        planning: 'day-0',
         title: '不能覆盖来源正文',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseTaskPlanningInput({
+        workspaceId: WORKSPACE_ID,
+        taskId: TASK_ID,
+        planning: 'day-0',
+        plannedFor: '2026-07-22',
       }),
     ).toThrow(TypeError);
   });

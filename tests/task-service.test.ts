@@ -21,7 +21,7 @@ import {
 import { InboxService } from '../src/main/inbox';
 import { TaskNotFoundError, TaskValidationError } from '../src/main/tasks';
 import { WorkspaceService } from '../src/main/workspaces';
-import { WORKSPACE_COLORS } from '../src/shared/contracts';
+import { PLANNING_DAY_TOKENS, WORKSPACE_COLORS } from '../src/shared/contracts';
 
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
@@ -31,6 +31,19 @@ const TASK_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const ENTRY_A = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const NOW = new Date('2026-07-22T12:00:00.000Z');
 const TODAY = '2026-07-22';
+const PLANNING_DATES = [
+  '2026-07-22',
+  '2026-07-23',
+  '2026-07-24',
+  '2026-07-25',
+  '2026-07-26',
+  '2026-07-27',
+  '2026-07-28',
+] as const;
+const PLANNING_DAYS = PLANNING_DAY_TOKENS.map((token, index) => ({
+  token,
+  date: PLANNING_DATES[index]!,
+}));
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -55,6 +68,7 @@ describe('task service', () => {
     await expect(service.getTaskSnapshot({ workspaceId: WORKSPACE_A })).resolves.toEqual({
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
+      planningDays: PLANNING_DAYS,
       tasks: [],
     });
 
@@ -62,7 +76,7 @@ describe('task service', () => {
     let snapshot = await service.createTask({
       workspaceId: WORKSPACE_A,
       title: original,
-      planning: 'today',
+      planning: 'day-0',
     });
     expect(snapshot.tasks).toMatchObject([
       {
@@ -118,6 +132,107 @@ describe('task service', () => {
     await reopened.close();
   });
 
+  it('maps all seven fixed planning tokens for creation, updates, and inbox conversion', async () => {
+    const dataDirectory = await createDataDirectory();
+    const taskIds = Array.from(
+      { length: 15 },
+      (_, index) => `10000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}`,
+    );
+    const inboxIds = Array.from(
+      { length: 7 },
+      (_, index) => `20000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}`,
+    );
+    const service = createService(dataDirectory, {
+      workspaceIds: [WORKSPACE_A],
+      inboxIds,
+      taskIds,
+    });
+    await service.open();
+
+    for (const [index, planning] of PLANNING_DAY_TOKENS.entries()) {
+      const snapshot = await service.createTask({
+        workspaceId: WORKSPACE_A,
+        title: `创建 ${planning}`,
+        planning,
+      });
+      expect(snapshot.planningDays).toEqual(PLANNING_DAYS);
+      expect(snapshot.tasks.find(({ id }) => id === taskIds[index])).toMatchObject({
+        plannedFor: PLANNING_DATES[index],
+      });
+    }
+
+    const updateTaskId = taskIds[7]!;
+    await service.createTask({
+      workspaceId: WORKSPACE_A,
+      title: '逐日移动',
+      planning: 'none',
+    });
+    for (const [index, planning] of PLANNING_DAY_TOKENS.entries()) {
+      const snapshot = await service.updateTaskPlanning({
+        workspaceId: WORKSPACE_A,
+        taskId: updateTaskId,
+        planning,
+      });
+      expect(snapshot.tasks.find(({ id }) => id === updateTaskId)).toMatchObject({
+        plannedFor: PLANNING_DATES[index],
+      });
+    }
+
+    for (const [index, planning] of PLANNING_DAY_TOKENS.entries()) {
+      await service.createInboxEntry({
+        workspaceId: WORKSPACE_A,
+        content: `转换 ${planning}`,
+        category: 'task',
+      });
+      const converted = await service.convertInboxToTask({
+        workspaceId: WORKSPACE_A,
+        entryId: inboxIds[index]!,
+        planning,
+      });
+      expect(
+        converted.taskSnapshot.tasks.find(({ id }) => id === taskIds[index + 8]),
+      ).toMatchObject({
+        plannedFor: PLANNING_DATES[index],
+        sourceInboxEntryId: inboxIds[index],
+      });
+    }
+
+    await service.close();
+  });
+
+  it('keeps dates that fall outside the current rolling window readable', async () => {
+    const dataDirectory = await createDataDirectory();
+    const service = createService(dataDirectory, {
+      workspaceIds: [WORKSPACE_A],
+      taskIds: [TASK_A],
+    });
+    await service.open();
+    await service.createTask({
+      workspaceId: WORKSPACE_A,
+      title: '窗口外仍保留',
+      planning: 'day-6',
+    });
+    await service.close();
+
+    const reopened = createService(dataDirectory, { today: () => '2026-08-01' });
+    await reopened.open();
+    const snapshot = await reopened.getTaskSnapshot({ workspaceId: WORKSPACE_A });
+    expect(snapshot).toMatchObject({
+      todayDate: '2026-08-01',
+      tasks: [{ id: TASK_A, plannedFor: '2026-07-28' }],
+    });
+    expect(snapshot.planningDays).toEqual([
+      { token: 'day-0', date: '2026-08-01' },
+      { token: 'day-1', date: '2026-08-02' },
+      { token: 'day-2', date: '2026-08-03' },
+      { token: 'day-3', date: '2026-08-04' },
+      { token: 'day-4', date: '2026-08-05' },
+      { token: 'day-5', date: '2026-08-06' },
+      { token: 'day-6', date: '2026-08-07' },
+    ]);
+    await reopened.close();
+  });
+
   it('isolates workspaces and makes archived workspace tasks immutable', async () => {
     const dataDirectory = await createDataDirectory();
     const service = createService(dataDirectory, {
@@ -125,7 +240,7 @@ describe('task service', () => {
       taskIds: [TASK_A, TASK_B],
     });
     await service.open();
-    await service.createTask({ workspaceId: WORKSPACE_A, title: '空间 A', planning: 'today' });
+    await service.createTask({ workspaceId: WORKSPACE_A, title: '空间 A', planning: 'day-0' });
     await service.createWorkspace({ name: '空间 B', color: WORKSPACE_COLORS[1] });
     await service.createTask({ workspaceId: WORKSPACE_B, title: '空间 B', planning: 'none' });
 
@@ -178,7 +293,7 @@ describe('task service', () => {
     const converted = await service.convertInboxToTask({
       workspaceId: WORKSPACE_A,
       entryId: ENTRY_A,
-      planning: 'today',
+      planning: 'day-0',
     });
     expect(converted.inboxSnapshot.entries).toEqual([]);
     expect(converted.taskSnapshot.tasks).toMatchObject([
@@ -240,7 +355,7 @@ describe('task service', () => {
       service.convertInboxToTask({
         workspaceId: WORKSPACE_A,
         entryId: ENTRY_A,
-        planning: 'today',
+        planning: 'day-0',
       }),
     ).rejects.toThrow();
     failTaskInsert = false;
@@ -279,7 +394,7 @@ describe('task service', () => {
       service.convertInboxToTask({
         workspaceId: WORKSPACE_A,
         entryId: ENTRY_A,
-        planning: 'today',
+        planning: 'day-0',
       }),
     ).rejects.toThrow();
     failCommit = false;
@@ -317,7 +432,7 @@ describe('task service', () => {
     const failed = service.convertInboxToTask({
       workspaceId: WORKSPACE_A,
       entryId: ENTRY_A,
-      planning: 'today',
+      planning: 'day-0',
     });
     const queued = service.getTaskSnapshot({ workspaceId: WORKSPACE_A });
     await expect(failed).rejects.toBeInstanceOf(DatabaseIntegrityError);
@@ -370,7 +485,7 @@ describe('task service', () => {
     const failed = service.convertInboxToTask({
       workspaceId: WORKSPACE_A,
       entryId: ENTRY_A,
-      planning: 'today',
+      planning: 'day-0',
     });
     const queued = service.createBackup();
     await expect(failed).rejects.toBeInstanceOf(DatabaseIntegrityError);
@@ -432,7 +547,7 @@ describe('task service', () => {
       taskIds: [TASK_A],
     });
     await service.open();
-    await service.createTask({ workspaceId: WORKSPACE_A, title: '即将损坏', planning: 'today' });
+    await service.createTask({ workspaceId: WORKSPACE_A, title: '即将损坏', planning: 'day-0' });
     await service.close();
 
     let database = openDatabase(dataDirectory);
@@ -486,6 +601,24 @@ describe('task service', () => {
     ).toThrow(TaskValidationError);
     await invalidId.close();
 
+    const legacyPlanningDirectory = await createDataDirectory();
+    const legacyPlanning = createService(legacyPlanningDirectory, {
+      workspaceIds: [WORKSPACE_A],
+      taskIds: [TASK_A],
+    });
+    await legacyPlanning.open();
+    expect(() =>
+      legacyPlanning.createTask({
+        workspaceId: WORKSPACE_A,
+        title: 'legacy planning',
+        planning: 'today' as never,
+      }),
+    ).toThrow(TaskValidationError);
+    await expect(
+      legacyPlanning.getTaskSnapshot({ workspaceId: WORKSPACE_A }),
+    ).resolves.toMatchObject({ tasks: [] });
+    await legacyPlanning.close();
+
     const invalidDateDirectory = await createDataDirectory();
     const invalidDate = createService(invalidDateDirectory, {
       workspaceIds: [WORKSPACE_A],
@@ -516,7 +649,7 @@ describe('task service', () => {
       taskIds: [TASK_A],
     });
     await service.open();
-    await service.createTask({ workspaceId: WORKSPACE_A, title: '日期约束', planning: 'today' });
+    await service.createTask({ workspaceId: WORKSPACE_A, title: '日期约束', planning: 'day-0' });
 
     const database = openDatabase(dataDirectory);
     for (const invalidDate of ['0000-01-01', '2026-00-10', '2026-02-30', '2026-99-99']) {

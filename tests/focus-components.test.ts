@@ -5,6 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { FocusSession, FocusSnapshot, Task, TaskSnapshot } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   TodayDashboard,
   type TodayDashboardProps,
@@ -17,6 +18,7 @@ const SESSION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TASK_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const TODAY = '2026-07-23';
 const OBSERVED_AT = '2026-07-23T12:00:00.000Z';
+const PLANNING_DAYS = createRollingPlanningDays(TODAY);
 
 describe('focus renderer components', () => {
   it('renders an idle fixed-duration timer and today completed-round count', () => {
@@ -163,12 +165,51 @@ describe('focus renderer components', () => {
       /useEffect\(\s*\(\) => \(\) => \{\s*onFocusDialogOpenChange\(false\);\s*\}/u,
     );
   });
+
+  it('does not paint an old schedule snapshot while the task window advances at midnight', () => {
+    const tomorrow = '2026-07-24';
+    const staleItem = {
+      id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      title: 'yesterday schedule must stay hidden',
+      kind: 'review' as const,
+      scheduledFor: TODAY,
+      startMinute: 540,
+      endMinute: 570,
+      revision: 1,
+      createdAt: OBSERVED_AT,
+      updatedAt: OBSERVED_AT,
+    };
+    const markup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          taskSnapshot: {
+            workspaceId: WORKSPACE_A,
+            todayDate: tomorrow,
+            planningDays: createRollingPlanningDays(tomorrow),
+            tasks: [],
+          },
+          scheduleItems: [staleItem],
+          scheduleSnapshot: {
+            workspaceId: WORKSPACE_A,
+            todayDate: TODAY,
+            planningDays: PLANNING_DAYS,
+            items: [staleItem],
+          },
+        }),
+      ),
+    );
+
+    expect(markup).not.toContain(staleItem.title);
+    expect(markup).toContain('任务与日程的日期窗口不一致');
+  });
 });
 
 function dashboardProps(overrides: Partial<TodayDashboardProps> = {}): TodayDashboardProps {
   const taskSnapshot: TaskSnapshot = {
     workspaceId: WORKSPACE_A,
     todayDate: TODAY,
+    planningDays: PLANNING_DAYS,
     tasks: [task()],
   };
   return {
@@ -185,6 +226,7 @@ function dashboardProps(overrides: Partial<TodayDashboardProps> = {}): TodayDash
     scheduleSnapshot: {
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
+      planningDays: PLANNING_DAYS,
       items: [],
     },
     scheduleItems: [],
@@ -201,9 +243,11 @@ function dashboardProps(overrides: Partial<TodayDashboardProps> = {}): TodayDash
     onCapture: async () => undefined,
     onOpenInbox: () => undefined,
     onOpenTasks: () => undefined,
-    onCreateToday: () => undefined,
+    onRetryTasks: () => undefined,
+    onCreateTask: () => undefined,
     onOpenTask: () => undefined,
     onUpdateTaskStatus: async () => undefined,
+    onUpdateTaskPlanning: async () => undefined,
     onRetrySchedule: () => undefined,
     onCreateSchedule: () => undefined,
     onOpenSchedule: () => undefined,

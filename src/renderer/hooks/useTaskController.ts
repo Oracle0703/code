@@ -296,7 +296,11 @@ export function useTaskController(workspaceId: string | null) {
   );
 
   const snapshot =
-    storedSnapshot?.workspaceId === workspaceId && workspaceId !== null ? storedSnapshot : null;
+    storedSnapshot?.workspaceId === workspaceId &&
+    workspaceId !== null &&
+    isTaskSnapshotDateCurrent(storedSnapshot, new Date())
+      ? storedSnapshot
+      : null;
   const tasks = snapshot?.tasks ?? EMPTY_TASKS;
   const counts = useMemo(
     () => (snapshot ? countTasks(tasks, snapshot.todayDate) : null),
@@ -312,7 +316,7 @@ export function useTaskController(workspaceId: string | null) {
     status:
       snapshot !== null
         ? ('ready' as const)
-        : storedSnapshot !== null && storedSnapshot.workspaceId !== workspaceId
+        : storedSnapshot !== null
           ? ('loading' as const)
           : status,
     loadError,

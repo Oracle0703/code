@@ -11,6 +11,7 @@ import type {
   WorkspaceTargetInput,
 } from '../../shared/contracts';
 import { normalizeInboxId } from '../../shared/inbox-domain';
+import { planningDateForTask } from '../../shared/planning-domain';
 import {
   formatLocalTaskDate,
   normalizeTaskCivilDate,
@@ -348,7 +349,11 @@ export class TaskService {
   }
 
   #plannedFor(planning: TaskPlanning, todayDate: string): string | null {
-    return planning === 'today' ? todayDate : null;
+    try {
+      return planningDateForTask(planning, todayDate);
+    } catch (error) {
+      throw new TaskValidationError('Task planning date is invalid.', { cause: error });
+    }
   }
 
   #validNow(): Date {

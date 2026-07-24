@@ -42,6 +42,7 @@ import {
   type AssistantContextReference,
   type AutomationItem,
   type SearchResult,
+  type TaskPlanning,
 } from '../shared/contracts';
 import {
   ASSISTANT_API_KEY_MAX_LENGTH,
@@ -83,7 +84,7 @@ import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
 import type { AppSurfaceId } from './model';
-import { defaultScheduleRange } from './schedule-state';
+import { defaultScheduleRangeForPlanningDate } from './schedule-state';
 import {
   SearchNavigationCoordinator,
   assertSearchTargetExists,
@@ -347,9 +348,11 @@ export function App() {
   ]);
 
   const openTaskCreate = useCallback(
-    (planning: 'today' | 'none') => {
+    (planning: TaskPlanning) => {
       if (
         !activeWorkspace ||
+        (planning !== 'none' &&
+          !taskController.snapshot?.planningDays.some(({ token }) => token === planning)) ||
         workspaceDialog !== null ||
         quickCaptureTarget !== null ||
         scheduleDialog !== null ||
@@ -374,49 +377,58 @@ export function App() {
       focusDialogOpen,
       quickCaptureTarget,
       scheduleDialog,
+      taskController.snapshot,
       dataState.importPreview,
       workspaceController.pendingOperation,
       workspaceDialog,
     ],
   );
 
-  const openScheduleCreate = useCallback(() => {
-    if (
-      !activeWorkspace ||
-      !scheduleController.snapshot ||
-      workspaceDialog !== null ||
-      quickCaptureTarget !== null ||
-      taskDialog !== null ||
-      scheduleDialog !== null ||
-      automationDialog !== null ||
-      focusDialogOpen ||
-      dataState.importPreview !== null ||
-      workspaceController.pendingOperation !== null
-    ) {
-      return;
-    }
-    const defaults = defaultScheduleRange(new Date());
-    setPaletteOpen(false);
-    setScheduleDialog({
-      mode: 'create',
-      workspaceId: activeWorkspace.id,
-      workspaceName: activeWorkspace.name,
-      expectedDate: scheduleController.snapshot.todayDate,
-      startMinute: defaults.startMinute,
-      endMinute: defaults.endMinute,
-    });
-  }, [
-    activeWorkspace,
-    automationDialog,
-    quickCaptureTarget,
-    scheduleController.snapshot,
-    scheduleDialog,
-    dataState.importPreview,
-    focusDialogOpen,
-    taskDialog,
-    workspaceController.pendingOperation,
-    workspaceDialog,
-  ]);
+  const openScheduleCreate = useCallback(
+    (expectedDate: string) => {
+      if (
+        !activeWorkspace ||
+        !scheduleController.snapshot ||
+        !scheduleController.snapshot.planningDays.some(({ date }) => date === expectedDate) ||
+        workspaceDialog !== null ||
+        quickCaptureTarget !== null ||
+        taskDialog !== null ||
+        scheduleDialog !== null ||
+        automationDialog !== null ||
+        focusDialogOpen ||
+        dataState.importPreview !== null ||
+        workspaceController.pendingOperation !== null
+      ) {
+        return;
+      }
+      const defaults = defaultScheduleRangeForPlanningDate(
+        expectedDate,
+        scheduleController.snapshot.todayDate,
+        new Date(),
+      );
+      setPaletteOpen(false);
+      setScheduleDialog({
+        mode: 'create',
+        workspaceId: activeWorkspace.id,
+        workspaceName: activeWorkspace.name,
+        expectedDate: defaults.expectedDate,
+        startMinute: defaults.startMinute,
+        endMinute: defaults.endMinute,
+      });
+    },
+    [
+      activeWorkspace,
+      automationDialog,
+      quickCaptureTarget,
+      scheduleController.snapshot,
+      scheduleDialog,
+      dataState.importPreview,
+      focusDialogOpen,
+      taskDialog,
+      workspaceController.pendingOperation,
+      workspaceDialog,
+    ],
+  );
 
   const openAutomationCreate = useCallback(() => {
     if (
@@ -750,7 +762,7 @@ export function App() {
               mode: 'edit',
               workspaceId: result.workspaceId,
               workspaceName: result.workspaceName,
-              expectedDate: scheduleSnapshot.todayDate,
+              expectedDate: item.scheduledFor,
               item,
             });
             return;
@@ -1321,7 +1333,8 @@ export function App() {
                     focusRemainingSeconds={focusController.remainingSeconds}
                     onOpenInbox={() => requestActiveView('inbox')}
                     onOpenTasks={() => requestActiveView('tasks')}
-                    onCreateToday={() => openTaskCreate('today')}
+                    onRetryTasks={taskController.retry}
+                    onCreateTask={openTaskCreate}
                     onOpenTask={(task) =>
                       setTaskDialog({
                         mode: 'rename',
@@ -1331,6 +1344,7 @@ export function App() {
                       })
                     }
                     onUpdateTaskStatus={taskController.updateStatus}
+                    onUpdateTaskPlanning={taskController.updatePlanning}
                     onRetrySchedule={scheduleController.retry}
                     onCreateSchedule={openScheduleCreate}
                     onOpenSchedule={(item) =>
@@ -1338,7 +1352,7 @@ export function App() {
                         mode: 'edit',
                         workspaceId: snapshot.currentWorkspaceId,
                         workspaceName: activeWorkspace.name,
-                        expectedDate: scheduleController.snapshot?.todayDate ?? item.scheduledFor,
+                        expectedDate: item.scheduledFor,
                         item,
                       })
                     }
@@ -1382,7 +1396,7 @@ export function App() {
                         workspaceId: snapshot.currentWorkspaceId,
                         workspaceName: activeWorkspace.name,
                         entry,
-                        planning: 'today',
+                        planning: 'day-0',
                       })
                     }
                     onConvertNote={async (entry) => {
@@ -1702,6 +1716,7 @@ export function App() {
       {taskDialog ? (
         <TaskDialog
           state={taskDialog}
+          planningDays={taskController.snapshot?.planningDays ?? []}
           onClose={() => setTaskDialog(null)}
           onCreate={async (title, planning) => {
             if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {

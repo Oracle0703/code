@@ -46,10 +46,10 @@ export class SearchService {
     const workspaceId = this.#workspaceId(input?.workspaceId);
     const query = this.#query(input?.query);
     const scope = this.#scope(input?.scope);
-    const todayDate = this.#todayDate();
 
     return this.#execute((database) => {
       try {
+        const todayDate = this.#todayDate();
         if (!new WorkspaceRepository(database).findActive(workspaceId)) {
           throw new SearchNotFoundError();
         }

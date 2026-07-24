@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Task, TaskSnapshot } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   countTasks,
   filterTasks,
@@ -14,6 +15,7 @@ import {
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
 const TODAY = '2026-07-22';
+const PLANNING_DAYS = createRollingPlanningDays(TODAY);
 
 const tasks: readonly Task[] = [
   task('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '今天待办', 'todo', TODAY),
@@ -35,7 +37,12 @@ describe('task renderer state', () => {
   });
 
   it('rejects snapshots from a previously active workspace', () => {
-    const snapshot: TaskSnapshot = { workspaceId: WORKSPACE_A, todayDate: TODAY, tasks: [] };
+    const snapshot: TaskSnapshot = {
+      workspaceId: WORKSPACE_A,
+      todayDate: TODAY,
+      planningDays: PLANNING_DAYS,
+      tasks: [],
+    };
     expect(isTaskWorkspaceCurrent(WORKSPACE_A, snapshot)).toBe(true);
     expect(isTaskWorkspaceCurrent(WORKSPACE_B, snapshot)).toBe(false);
     expect(isTaskWorkspaceCurrent(null, snapshot)).toBe(false);
@@ -72,13 +79,23 @@ describe('task renderer state', () => {
     expect(millisecondsUntilNextLocalDay(lateLocalTime)).toBe(550);
     expect(
       isTaskSnapshotDateCurrent(
-        { workspaceId: WORKSPACE_A, todayDate: TODAY, tasks: [] },
+        {
+          workspaceId: WORKSPACE_A,
+          todayDate: TODAY,
+          planningDays: PLANNING_DAYS,
+          tasks: [],
+        },
         lateLocalTime,
       ),
     ).toBe(true);
     expect(
       isTaskSnapshotDateCurrent(
-        { workspaceId: WORKSPACE_A, todayDate: '2026-07-21', tasks: [] },
+        {
+          workspaceId: WORKSPACE_A,
+          todayDate: '2026-07-21',
+          planningDays: createRollingPlanningDays('2026-07-21'),
+          tasks: [],
+        },
         lateLocalTime,
       ),
     ).toBe(false);

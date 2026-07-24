@@ -1,7 +1,8 @@
 import { CalendarDays, CheckSquare2, Inbox, Pencil, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { InboxEntry, Task, TaskPlanning } from '../../shared/contracts';
+import type { InboxEntry, PlanningDay, Task, TaskPlanning } from '../../shared/contracts';
 import { TASK_TITLE_MAX_LENGTH } from '../../shared/task-domain';
+import { planningDayLabel } from '../planning-state';
 
 export type TaskDialogState =
   | {
@@ -26,25 +27,34 @@ export type TaskDialogState =
 
 interface TaskDialogProps {
   state: TaskDialogState;
+  planningDays: readonly PlanningDay[];
   onClose: () => void;
   onCreate: (title: string, planning: TaskPlanning) => Promise<void>;
   onRename: (taskId: string, title: string) => Promise<void>;
   onConvert: (entryId: string, planning: TaskPlanning) => Promise<void>;
 }
 
-export function TaskDialog({ state, onClose, onCreate, onRename, onConvert }: TaskDialogProps) {
+export function TaskDialog({
+  state,
+  planningDays,
+  onClose,
+  onCreate,
+  onRename,
+  onConvert,
+}: TaskDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
-  const planningRef = useRef<HTMLInputElement>(null);
+  const planningRef = useRef<HTMLSelectElement>(null);
   const [title, setTitle] = useState(state.mode === 'rename' ? state.task.title : '');
   const [planning, setPlanning] = useState<TaskPlanning>(
-    state.mode === 'rename' ? (state.task.plannedFor === null ? 'none' : 'today') : state.planning,
+    state.mode === 'rename' ? 'none' : state.planning,
   );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const normalizedTitle = title.trim();
   const titleLength = Array.from(normalizedTitle).length;
   const titleTooLong = titleLength > TASK_TITLE_MAX_LENGTH;
+  const planningValid = planning === 'none' || planningDays.some(({ token }) => token === planning);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -61,7 +71,14 @@ export function TaskDialog({ state, onClose, onCreate, onRename, onConvert }: Ta
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (submitting || titleTooLong || (state.mode !== 'convert' && !normalizedTitle)) return;
+    if (
+      submitting ||
+      titleTooLong ||
+      !planningValid ||
+      (state.mode !== 'convert' && !normalizedTitle)
+    ) {
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -142,40 +159,33 @@ export function TaskDialog({ state, onClose, onCreate, onRename, onConvert }: Ta
           )}
 
           {state.mode !== 'rename' ? (
-            <fieldset className="task-planning-options">
-              <legend>安排时间</legend>
-              <label className={planning === 'today' ? 'is-selected' : ''}>
-                <input
-                  ref={planningRef}
-                  type="radio"
-                  name="task-planning"
-                  value="today"
-                  checked={planning === 'today'}
-                  disabled={submitting}
-                  onChange={() => setPlanning('today')}
-                />
-                <CalendarDays size={16} aria-hidden="true" />
-                <span>
-                  <strong>加入今天</strong>
-                  <small>出现在今日清单</small>
-                </span>
-              </label>
-              <label className={planning === 'none' ? 'is-selected' : ''}>
-                <input
-                  type="radio"
-                  name="task-planning"
-                  value="none"
-                  checked={planning === 'none'}
-                  disabled={submitting}
-                  onChange={() => setPlanning('none')}
-                />
-                <CheckSquare2 size={16} aria-hidden="true" />
-                <span>
-                  <strong>稍后安排</strong>
-                  <small>保留在任务列表</small>
-                </span>
-              </label>
-            </fieldset>
+            <label className="task-dialog__planning-field">
+              <span>
+                <CalendarDays size={15} aria-hidden="true" /> 安排时间
+              </span>
+              <select
+                ref={planningRef}
+                value={planning}
+                disabled={submitting}
+                aria-invalid={!planningValid}
+                onChange={(event) => setPlanning(event.target.value as TaskPlanning)}
+              >
+                {planningDays.map((day) => {
+                  const label = planningDayLabel(day);
+                  return (
+                    <option value={day.token} key={day.token}>
+                      {label.short} · {label.date}
+                    </option>
+                  );
+                })}
+                <option value="none">稍后安排</option>
+              </select>
+              <small className={!planningValid ? 'is-error' : undefined}>
+                {planningValid
+                  ? '可在接下来 7 天内安排，或保留在任务列表。'
+                  : '日期窗口正在更新，请稍后重试。'}
+              </small>
+            </label>
           ) : null}
         </div>
 
@@ -203,6 +213,7 @@ export function TaskDialog({ state, onClose, onCreate, onRename, onConvert }: Ta
             disabled={
               submitting ||
               titleTooLong ||
+              !planningValid ||
               (state.mode !== 'convert' && normalizedTitle.length === 0)
             }
           >

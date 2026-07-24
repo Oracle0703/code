@@ -1,4 +1,5 @@
 import type { SearchResult, SearchResultKind, SearchScope } from '../../shared/contracts';
+import { planningWindowEndDate } from '../../shared/planning-domain';
 import {
   SEARCH_EXCERPT_MAX_LENGTH,
   SEARCH_RESULT_LIMIT,
@@ -297,16 +298,17 @@ export class SearchRepository {
        JOIN workspaces AS workspace ON workspace.id = schedule.workspace_id
        WHERE workspace.archived_at IS NULL
          AND schedule.archived_at IS NULL
-         AND schedule.scheduled_for = ?
+         AND schedule.scheduled_for BETWEEN ? AND ?
          ${scopeSql(context, 'schedule.workspace_id')}
          AND ${match.sql}
        ORDER BY match_tier, workspace_rank, relevance,
-                schedule.start_minute, schedule.end_minute, schedule.id
+                schedule.scheduled_for, schedule.start_minute, schedule.end_minute, schedule.id
        LIMIT ?`,
       [
         ...titleMatchParameters(context),
         context.workspaceId,
         context.todayDate,
+        context.planningWindowEndDate,
         ...scopeParameters(context),
         ...match.parameters,
         QUERY_LIMIT,
@@ -453,6 +455,7 @@ const SEARCH_INDEXES = [
 ] as const;
 
 interface QueryContext extends SearchRepositoryInput {
+  readonly planningWindowEndDate: string;
   readonly likeContains: string;
   readonly likePrefix: string;
   readonly ftsPhrase: string;
@@ -469,6 +472,7 @@ function createQueryContext(input: SearchRepositoryInput): QueryContext {
   const escaped = escapeSearchLike(input.query);
   return {
     ...input,
+    planningWindowEndDate: planningWindowEndDate(input.todayDate),
     likeContains: `%${escaped}%`,
     likePrefix: `${escaped}%`,
     ftsPhrase: toSearchFtsPhrase(input.query),

@@ -277,7 +277,11 @@ export function useScheduleController(workspaceId: string | null) {
   );
 
   const snapshot =
-    storedSnapshot?.workspaceId === workspaceId && workspaceId !== null ? storedSnapshot : null;
+    storedSnapshot?.workspaceId === workspaceId &&
+    workspaceId !== null &&
+    isScheduleSnapshotDateCurrent(storedSnapshot, new Date())
+      ? storedSnapshot
+      : null;
   const items = useMemo(
     () => (snapshot ? sortScheduleItems(snapshot.items) : EMPTY_ITEMS),
     [snapshot],
@@ -289,7 +293,7 @@ export function useScheduleController(workspaceId: string | null) {
     status:
       snapshot !== null
         ? ('ready' as const)
-        : storedSnapshot !== null && storedSnapshot.workspaceId !== workspaceId
+        : storedSnapshot !== null
           ? ('loading' as const)
           : status,
     loadError,

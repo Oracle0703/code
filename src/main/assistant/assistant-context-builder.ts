@@ -121,9 +121,12 @@ export class AssistantContextBuilder {
     const todayTasks = tasks.tasks.filter(
       ({ plannedFor, status }) => plannedFor === tasks.todayDate && status !== 'completed',
     );
+    const todaySchedule = schedule.items.filter(
+      ({ scheduledFor }) => scheduledFor === schedule.todayDate,
+    );
     const includedTasks = todayTasks.slice(0, ASSISTANT_TODAY_TASK_MAX_COUNT);
-    const includedSchedule = schedule.items.slice(0, ASSISTANT_TODAY_SCHEDULE_MAX_COUNT);
-    const totalCount = todayTasks.length + schedule.items.length;
+    const includedSchedule = todaySchedule.slice(0, ASSISTANT_TODAY_SCHEDULE_MAX_COUNT);
+    const totalCount = todayTasks.length + todaySchedule.length;
     const includedCount = includedTasks.length + includedSchedule.length;
     return {
       workspaceId,
