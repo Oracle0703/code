@@ -3,6 +3,7 @@ import {
   Check,
   FileText,
   LoaderCircle,
+  MessageSquareText,
   NotebookPen,
   PencilLine,
   Plus,
@@ -48,6 +49,7 @@ interface NotePageProps {
   onUpdate: (note: Note, title: string, body: string) => Promise<Note>;
   onArchive: (note: Note) => Promise<void>;
   onOpenLink: (url: string) => void;
+  onOpenAssistant: (note: Note) => void;
 }
 
 export function NotePage({
@@ -66,6 +68,7 @@ export function NotePage({
   onUpdate,
   onArchive,
   onOpenLink,
+  onOpenAssistant,
 }: NotePageProps) {
   const [query, setQuery] = useState('');
   const [selection, setSelection] = useState<NoteSelection>(null);
@@ -338,6 +341,25 @@ export function NotePage({
                               ? `已保存 · 修订 ${editor.note.revision}`
                               : '新笔记'}
                     </span>
+                    {editor.note ? (
+                      <button
+                        type="button"
+                        className="note-editor__assistant"
+                        onClick={() => {
+                          if (editor.note) onOpenAssistant(editor.note);
+                        }}
+                        disabled={dirty || saving || archiving}
+                        aria-describedby={dirty ? 'note-assistant-disabled-reason' : undefined}
+                      >
+                        <MessageSquareText size={14} />
+                        询问 AI
+                      </button>
+                    ) : null}
+                    {editor.note && dirty ? (
+                      <span className="sr-only" id="note-assistant-disabled-reason">
+                        请先保存笔记，再将其作为 AI 上下文。
+                      </span>
+                    ) : null}
                     {editor.note ? (
                       <button
                         type="button"

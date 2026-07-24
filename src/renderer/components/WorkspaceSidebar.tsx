@@ -7,6 +7,7 @@ import {
   FileText,
   Folder,
   Hash,
+  MessageSquareText,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -15,11 +16,11 @@ import {
 import type { WorkspaceInfo } from '../../shared/contracts';
 import { createWorkspaceMark } from '../../shared/workspace-domain';
 import type { WorkspaceSaveStatus } from '../hooks/useWorkspaceController';
-import type { ViewId } from '../model';
+import type { AppSurfaceId } from '../model';
 import { IconButton } from './IconButton';
 
 interface WorkspaceSidebarProps {
-  activeView: ViewId;
+  activeView: AppSurfaceId;
   activeWorkspace: WorkspaceInfo;
   workspaces: readonly WorkspaceInfo[];
   busy: boolean;
@@ -30,7 +31,7 @@ interface WorkspaceSidebarProps {
   taskCount: number | null;
   todayCount: number | null;
   onRetrySave: () => void;
-  onSelectView: (view: ViewId) => void;
+  onSelectView: (view: AppSurfaceId) => void;
   onSelectWorkspace: (workspaceId: string) => void;
   onCreateWorkspace: () => void;
   onRenameWorkspace: (workspace: WorkspaceInfo) => void;
@@ -38,7 +39,7 @@ interface WorkspaceSidebarProps {
 }
 
 const sidebarLinks: Array<{
-  id: ViewId;
+  id: AppSurfaceId;
   label: string;
   icon: typeof Clock3;
 }> = [
@@ -46,6 +47,7 @@ const sidebarLinks: Array<{
   { id: 'inbox', label: '稍后处理', icon: Star },
   { id: 'tasks', label: '所有任务', icon: CheckSquare2 },
   { id: 'notes', label: '所有笔记', icon: FileText },
+  { id: 'assistant', label: 'AI 助手', icon: MessageSquareText },
 ];
 
 export function WorkspaceSidebar({

@@ -68,6 +68,15 @@ export const IPC_CHANNELS = {
     archive: 'automation:archive',
     changed: 'automation:changed',
   },
+  assistant: {
+    getCredentialStatus: 'assistant:get-credential-status',
+    configureCredential: 'assistant:configure-credential',
+    removeCredential: 'assistant:remove-credential',
+    getSnapshot: 'assistant:get-snapshot',
+    start: 'assistant:start',
+    cancel: 'assistant:cancel',
+    changed: 'assistant:changed',
+  },
   window: {
     minimize: 'window:minimize',
     toggleMaximize: 'window:toggle-maximize',
@@ -739,6 +748,90 @@ export interface AutomationChangedEvent {
   readonly outputKind: 'task' | 'note' | null;
 }
 
+export type AssistantContextReference =
+  | {
+      readonly kind: 'none';
+    }
+  | {
+      readonly kind: 'today';
+    }
+  | {
+      readonly kind: 'tasks';
+      readonly taskIds: readonly string[];
+    }
+  | {
+      readonly kind: 'note';
+      readonly noteId: string;
+      readonly revision: number;
+    };
+
+export interface AssistantCredentialInput {
+  readonly apiKey: string;
+}
+
+export type AssistantCredentialAvailability = 'available' | 'unavailable';
+
+export type AssistantCredentialReason =
+  'secure-storage-unavailable' | 'plaintext-storage' | 'credential-corrupt' | null;
+
+export interface AssistantCredentialStatus {
+  readonly availability: AssistantCredentialAvailability;
+  readonly configured: boolean;
+  readonly removable: boolean;
+  readonly provider: 'OpenAI';
+  readonly model: 'gpt-5.6';
+  readonly reason: AssistantCredentialReason;
+}
+
+export type AssistantPhase = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type AssistantErrorCode =
+  | 'not-configured'
+  | 'credential-unavailable'
+  | 'invalid-context'
+  | 'provider-authentication'
+  | 'provider-rate-limited'
+  | 'provider-unavailable'
+  | 'request-timeout'
+  | 'response-too-large'
+  | 'internal-error';
+
+export interface AssistantError {
+  readonly code: AssistantErrorCode;
+  readonly message: string;
+}
+
+export interface AssistantContextSummary {
+  readonly kind: AssistantContextReference['kind'];
+  readonly label: string;
+  readonly includedCount: number;
+  readonly totalCount: number;
+  readonly truncated: boolean;
+}
+
+export interface AssistantSnapshot {
+  readonly sequence: number;
+  readonly workspaceId: string;
+  readonly phase: AssistantPhase;
+  readonly runId: string | null;
+  readonly prompt: string;
+  readonly context: AssistantContextReference;
+  readonly contextSummary: AssistantContextSummary;
+  readonly response: string;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+  readonly error: AssistantError | null;
+}
+
+export interface AssistantStartInput {
+  readonly prompt: string;
+  readonly context: AssistantContextReference;
+}
+
+export interface AssistantCancelInput {
+  readonly runId: string;
+}
+
 export const TERMINAL_PROFILE_IDS = [
   'system-default',
   'powershell-7',
@@ -930,6 +1023,15 @@ export interface WorkbenchApi {
     setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
     archive(input: AutomationTargetInput): Promise<AutomationSnapshot>;
     onChanged(listener: (event: AutomationChangedEvent) => void): Unsubscribe;
+  };
+  assistant: {
+    getCredentialStatus(): Promise<AssistantCredentialStatus>;
+    configureCredential(input: AssistantCredentialInput): Promise<AssistantCredentialStatus>;
+    removeCredential(): Promise<AssistantCredentialStatus>;
+    getSnapshot(): Promise<AssistantSnapshot>;
+    start(input: AssistantStartInput): Promise<AssistantSnapshot>;
+    cancel(input: AssistantCancelInput): Promise<AssistantSnapshot>;
+    onChanged(listener: (snapshot: AssistantSnapshot) => void): Unsubscribe;
   };
   window: {
     minimize(): Promise<void>;

@@ -1,5 +1,10 @@
 import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import {
+  type AssistantCancelInput,
+  type AssistantCredentialInput,
+  type AssistantCredentialStatus,
+  type AssistantSnapshot,
+  type AssistantStartInput,
   IPC_CHANNELS,
   type AutomationCreateInput,
   type AutomationSetEnabledInput,
@@ -62,6 +67,9 @@ import type { BrowserController } from '../browser/browser-controller';
 import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/trusted-renderer';
 import {
   assertNoArguments,
+  parseAssistantCancelInput,
+  parseAssistantCredentialInput,
+  parseAssistantStartInput,
   parseAutomationCreateInput,
   parseAutomationSetEnabledInput,
   parseAutomationTargetInput,
@@ -176,6 +184,14 @@ interface IpcDependencies {
     setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
     archive(input: AutomationTargetInput): Promise<AutomationSnapshot>;
   };
+  assistant: {
+    getCredentialStatus(): Promise<AssistantCredentialStatus>;
+    configureCredential(input: AssistantCredentialInput): Promise<AssistantCredentialStatus>;
+    removeCredential(): Promise<AssistantCredentialStatus>;
+    getSnapshot(): AssistantSnapshot | Promise<AssistantSnapshot>;
+    start(input: AssistantStartInput): Promise<AssistantSnapshot>;
+    cancel(input: AssistantCancelInput): Promise<AssistantSnapshot>;
+  };
   terminal: {
     getSnapshot(input: TerminalWorkspaceInput): TerminalSnapshot | Promise<TerminalSnapshot>;
     create(input: TerminalCreateInput): TerminalSnapshot | Promise<TerminalSnapshot>;
@@ -219,6 +235,7 @@ export function registerIpcHandlers({
   note,
   schedule,
   automation,
+  assistant,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -413,6 +430,31 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.automation.archive, (_event, input, ...args) => {
     assertNoArguments(args, 'Archiving an automation');
     return automation.archive(parseAutomationTargetInput(input));
+  });
+
+  register(IPC_CHANNELS.assistant.getCredentialStatus, (_event, ...args) => {
+    assertNoArguments(args, 'Getting assistant credential status');
+    return assistant.getCredentialStatus();
+  });
+  register(IPC_CHANNELS.assistant.configureCredential, (_event, input, ...args) => {
+    assertNoArguments(args, 'Configuring the assistant credential');
+    return assistant.configureCredential(parseAssistantCredentialInput(input));
+  });
+  register(IPC_CHANNELS.assistant.removeCredential, (_event, ...args) => {
+    assertNoArguments(args, 'Removing the assistant credential');
+    return assistant.removeCredential();
+  });
+  register(IPC_CHANNELS.assistant.getSnapshot, (_event, ...args) => {
+    assertNoArguments(args, 'Getting assistant state');
+    return assistant.getSnapshot();
+  });
+  register(IPC_CHANNELS.assistant.start, (_event, input, ...args) => {
+    assertNoArguments(args, 'Starting the assistant');
+    return assistant.start(parseAssistantStartInput(input));
+  });
+  register(IPC_CHANNELS.assistant.cancel, (_event, input, ...args) => {
+    assertNoArguments(args, 'Cancelling the assistant');
+    return assistant.cancel(parseAssistantCancelInput(input));
   });
 
   register(IPC_CHANNELS.window.minimize, () => {

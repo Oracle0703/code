@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC_CHANNELS,
+  type AssistantCancelInput,
+  type AssistantCredentialInput,
+  type AssistantCredentialStatus,
+  type AssistantSnapshot,
+  type AssistantStartInput,
   type AutomationChangedEvent,
   type AutomationCreateInput,
   type AutomationSetEnabledInput,
@@ -255,6 +260,21 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<AutomationSnapshot>(IPC_CHANNELS.automation.archive, input),
     onChanged: (listener: (event: AutomationChangedEvent) => void) =>
       subscribe(IPC_CHANNELS.automation.changed, listener),
+  }),
+  assistant: Object.freeze({
+    getCredentialStatus: () =>
+      invoke<AssistantCredentialStatus>(IPC_CHANNELS.assistant.getCredentialStatus),
+    configureCredential: (input: AssistantCredentialInput) =>
+      invoke<AssistantCredentialStatus>(IPC_CHANNELS.assistant.configureCredential, input),
+    removeCredential: () =>
+      invoke<AssistantCredentialStatus>(IPC_CHANNELS.assistant.removeCredential),
+    getSnapshot: () => invoke<AssistantSnapshot>(IPC_CHANNELS.assistant.getSnapshot),
+    start: (input: AssistantStartInput) =>
+      invoke<AssistantSnapshot>(IPC_CHANNELS.assistant.start, input),
+    cancel: (input: AssistantCancelInput) =>
+      invoke<AssistantSnapshot>(IPC_CHANNELS.assistant.cancel, input),
+    onChanged: (listener: (snapshot: AssistantSnapshot) => void) =>
+      subscribe(IPC_CHANNELS.assistant.changed, listener),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),

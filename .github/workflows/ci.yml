@@ -54,6 +54,9 @@ jobs:
       - name: Build production TerminalManager smoke bundle
         run: npm run build:terminal-manager-smoke
 
+      - name: Build production assistant provider smoke bundle
+        run: npm run build:assistant-provider-smoke
+
       - name: Smoke-test Electron downloads
         run: |
           node -e "require('electron')"
@@ -89,6 +92,15 @@ jobs:
 
       - name: Verify packaged app and Electron fuses
         run: node scripts/verify-packaged-app.mjs 'out/Daily Workbench-linux-x64/daily-workbench' 70
+
+      - name: Smoke-test packaged assistant provider
+        timeout-minutes: 2
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+        run: |
+          timeout --kill-after=5s 30s \
+            'out/Daily Workbench-linux-x64/daily-workbench' \
+            reports/assistant-provider-smoke/assistant-provider-smoke.cjs
 
       - name: Smoke-test packaged terminal
         timeout-minutes: 2
@@ -140,11 +152,17 @@ jobs:
       - name: Test terminal ownership and protocol
         run: npm run test:terminal
 
+      - name: Test assistant ownership and protocol
+        run: npm run test:assistant
+
       - name: Build real Electron download smoke bundle
         run: npm run build:electron-download-smoke
 
       - name: Build production TerminalManager smoke bundle
         run: npm run build:terminal-manager-smoke
+
+      - name: Build production assistant provider smoke bundle
+        run: npm run build:assistant-provider-smoke
 
       - name: Smoke-test Electron downloads
         shell: pwsh
@@ -191,6 +209,30 @@ jobs:
             throw 'Could not find the packaged Daily Workbench executable.'
           }
           node scripts/verify-packaged-app.mjs $executable.FullName 170
+
+      - name: Smoke-test packaged assistant provider
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $executable = Get-ChildItem -Path out -Recurse -File -Filter daily-workbench.exe |
+            Where-Object { $_.FullName -match 'win32-x64' } |
+            Select-Object -First 1
+          if (-not $executable) {
+            throw 'Could not find the packaged Daily Workbench executable.'
+          }
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          $process = Start-Process `
+            -FilePath $executable.FullName `
+            -ArgumentList @('reports\assistant-provider-smoke\assistant-provider-smoke.cjs') `
+            -NoNewWindow `
+            -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            taskkill /PID $process.Id /T /F | Out-Null
+            throw 'Packaged assistant provider smoke test timed out after 30 seconds.'
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged assistant provider smoke test failed with exit code $($process.ExitCode)."
+          }
 
       - name: Smoke-test packaged terminal
         timeout-minutes: 2

@@ -7,10 +7,14 @@ import {
   FolderOpen,
   Globe2,
   HardDrive,
+  KeyRound,
+  LoaderCircle,
+  MessageSquareText,
   RefreshCw,
   Settings2,
   ShieldCheck,
   SquareTerminal,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import {
@@ -26,6 +30,7 @@ import type {
   BackupPolicy,
   BackupPolicyUpdateInput,
   BackupRunErrorCode,
+  AssistantCredentialStatus,
   DataManagementSnapshot,
   DatabaseBackupReason,
   TerminalProfileId,
@@ -41,7 +46,21 @@ import {
 import { mergeTerminalSnapshot, terminalConfigurationIssue } from '../terminal-state';
 
 export type SettingsSection =
-  'general' | 'terminal' | 'appearance' | 'data' | 'shortcuts' | 'about';
+  'general' | 'assistant' | 'terminal' | 'appearance' | 'data' | 'shortcuts' | 'about';
+
+export type AssistantCredentialView = AssistantCredentialStatus;
+
+export interface AssistantSettingsProps {
+  readonly credential: AssistantCredentialView | null;
+  readonly credentialStatus: 'loading' | 'ready' | 'error';
+  readonly credentialError: string | null;
+  readonly credentialOperation: 'configure' | 'remove' | null;
+  readonly apiKeyMinLength: number;
+  readonly apiKeyMaxLength: number;
+  readonly onRetryCredential: () => void;
+  readonly onConfigureCredential: (apiKey: string) => Promise<void>;
+  readonly onRemoveCredential: () => Promise<void>;
+}
 
 interface SettingsPageProps {
   readonly workspaceId: string;
@@ -59,10 +78,12 @@ interface SettingsPageProps {
   readonly onUpdateBackupPolicy: (input: BackupPolicyUpdateInput) => void | Promise<void>;
   readonly onExportData: () => void | Promise<void>;
   readonly onChooseImport: () => void | Promise<void>;
+  readonly assistant: AssistantSettingsProps;
 }
 
 const SETTINGS_SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'general', label: '通用' },
+  { id: 'assistant', label: 'AI 助手' },
   { id: 'terminal', label: '终端' },
   { id: 'appearance', label: '外观' },
   { id: 'data', label: '数据' },
@@ -109,6 +130,7 @@ export function SettingsPage({
   onUpdateBackupPolicy,
   onExportData,
   onChooseImport,
+  assistant,
 }: SettingsPageProps) {
   const [internalSection, setInternalSection] = useState(defaultSection);
   const activeSection = section ?? internalSection;
@@ -193,6 +215,7 @@ export function SettingsPage({
           {activeSection === 'terminal' ? (
             <TerminalSettings controller={terminalController} onOpenTerminal={onOpenTerminal} />
           ) : null}
+          {activeSection === 'assistant' ? <AssistantSettings {...assistant} /> : null}
           {activeSection === 'appearance' ? <AppearanceSettings /> : null}
           {activeSection === 'data' ? (
             <DataSettings
@@ -213,13 +236,259 @@ export function SettingsPage({
       </section>
 
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {terminalController.operation
-          ? terminalOperationLabel(terminalController.operation)
-          : busy
-            ? dataOperationLabel(dataOperation)
-            : (terminalController.feedback?.message ?? dataFeedback?.message ?? '')}
+        {activeSection === 'assistant' && assistant.credentialOperation
+          ? assistant.credentialOperation === 'configure'
+            ? '正在安全保存 OpenAI API 密钥。'
+            : '正在移除 OpenAI API 密钥。'
+          : terminalController.operation
+            ? terminalOperationLabel(terminalController.operation)
+            : busy
+              ? dataOperationLabel(dataOperation)
+              : (terminalController.feedback?.message ?? dataFeedback?.message ?? '')}
       </p>
     </div>
+  );
+}
+
+export function AssistantSettings({
+  credential,
+  credentialStatus,
+  credentialError,
+  credentialOperation,
+  apiKeyMinLength,
+  apiKeyMaxLength,
+  onRetryCredential,
+  onConfigureCredential,
+  onRemoveCredential,
+}: AssistantSettingsProps) {
+  const [apiKey, setApiKey] = useState('');
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const keyInputRef = useRef<HTMLInputElement>(null);
+  const keyLength = Array.from(apiKey).length;
+  const busy = credentialOperation !== null;
+  const keyInvalid = keyLength > 0 && keyLength < apiKeyMinLength;
+  const removable = credential?.removable ?? false;
+
+  useEffect(
+    () => () => {
+      if (keyInputRef.current) keyInputRef.current.value = '';
+    },
+    [],
+  );
+
+  const configure = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (
+      keyLength < apiKeyMinLength ||
+      keyLength > apiKeyMaxLength ||
+      busy ||
+      credential?.availability !== 'available'
+    ) {
+      return;
+    }
+    setFeedback(null);
+    try {
+      await onConfigureCredential(apiKey);
+      setApiKey('');
+      setFeedback('OpenAI API 密钥已安全保存。');
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : '密钥未能保存，请重试。');
+    }
+  };
+
+  const remove = async () => {
+    if (busy || !removable) return;
+    const confirmation =
+      credential?.availability === 'unavailable'
+        ? '删除这份本机 OpenAI 凭据？即使当前无法解密，凭据文件也会从设备移除。'
+        : '移除 OpenAI API 密钥？AI 助手会立即停止接受新问题。';
+    if (!window.confirm(confirmation)) return;
+    setFeedback(null);
+    try {
+      await onRemoveCredential();
+      setApiKey('');
+      setFeedback('OpenAI API 密钥已移除。');
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : '密钥未能移除，请重试。');
+    }
+  };
+
+  if (credentialStatus === 'loading') {
+    return (
+      <div className="assistant-settings-state" role="status" aria-busy="true">
+        <LoaderCircle className="is-spinning" size={20} aria-hidden="true" />
+        <div>
+          <strong>正在检查 AI 配置</strong>
+          <p>已保存的密钥不会从 Main 回读；提交成功后输入框会立即清空。</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (credentialStatus === 'error' || !credential) {
+    return (
+      <div className="assistant-settings-state is-error" role="alert">
+        <MessageSquareText size={20} aria-hidden="true" />
+        <div>
+          <strong>无法读取 AI 配置</strong>
+          <p>{credentialError ?? '桌面安全存储暂时不可用。'}</p>
+          <button type="button" className="secondary-button" onClick={onRetryCredential}>
+            重新检查
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (credential.availability === 'unavailable') {
+    const unavailableCopy =
+      credential.reason === 'plaintext-storage'
+        ? {
+            title: '操作系统只提供明文凭据后端',
+            body: 'AI 助手拒绝降级保存密钥。请启用系统密钥环后重新启动应用。',
+          }
+        : {
+            title: '操作系统安全存储不可用',
+            body: 'AI 助手保持停用，不会把密钥保存到明文文件或工作区数据库。',
+          };
+    return (
+      <div className="assistant-settings-state is-error" role="alert">
+        <ShieldCheck size={20} aria-hidden="true" />
+        <div>
+          <strong>{unavailableCopy.title}</strong>
+          <p>{unavailableCopy.body}</p>
+          {removable ? (
+            <button
+              type="button"
+              className="danger-button"
+              disabled={busy}
+              onClick={() => void remove()}
+            >
+              {credentialOperation === 'remove' ? (
+                <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+              ) : (
+                <Trash2 size={14} aria-hidden="true" />
+              )}
+              {credentialOperation === 'remove' ? '删除中…' : '删除本机凭据'}
+            </button>
+          ) : null}
+          {feedback ? (
+            <p
+              className="assistant-settings-feedback"
+              role={feedback.includes('未能') ? 'alert' : 'status'}
+            >
+              {feedback}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="settings-group assistant-settings">
+        <h2>OpenAI 连接</h2>
+        <p>
+          AI 请求会把你明确选择的上下文发送给 {credential.provider}；模型为 {credential.model}。
+        </p>
+        <p>OpenAI API 用量单独计费，不包含在 ChatGPT 订阅中。</p>
+        <div className="assistant-credential-summary">
+          <span className={credential.configured ? 'is-configured' : ''}>
+            <KeyRound size={17} aria-hidden="true" />
+          </span>
+          <div>
+            <strong>
+              {credential.reason === 'credential-corrupt'
+                ? '已保存的 API 密钥无法解密'
+                : credential.configured
+                  ? 'API 密钥已配置'
+                  : '尚未配置 API 密钥'}
+            </strong>
+            <small>
+              {credential.reason === 'credential-corrupt'
+                ? '请保存新的密钥，或移除这份损坏的凭据。'
+                : '密钥会从受信任设置页临时提交，并仅由桌面主进程持久化到操作系统安全存储；不会写入工作区 SQLite。'}
+            </small>
+          </div>
+          {removable ? (
+            <button
+              type="button"
+              className="danger-button"
+              disabled={busy}
+              onClick={() => void remove()}
+            >
+              {credentialOperation === 'remove' ? (
+                <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+              ) : (
+                <Trash2 size={14} aria-hidden="true" />
+              )}
+              {credentialOperation === 'remove' ? '移除中…' : '移除'}
+            </button>
+          ) : null}
+        </div>
+
+        <form className="assistant-key-form" onSubmit={(event) => void configure(event)}>
+          <label htmlFor="assistant-api-key">
+            {credential.configured ? '替换 API 密钥' : 'OpenAI API 密钥'}
+          </label>
+          <div>
+            <input
+              id="assistant-api-key"
+              ref={keyInputRef}
+              type="password"
+              value={apiKey}
+              disabled={busy}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              minLength={apiKeyMinLength}
+              maxLength={apiKeyMaxLength}
+              aria-invalid={keyInvalid}
+              aria-describedby={keyInvalid ? 'assistant-api-key-help' : undefined}
+              placeholder="sk-…"
+              onChange={(event) => setApiKey(event.target.value)}
+            />
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={keyLength < apiKeyMinLength || keyLength > apiKeyMaxLength || busy}
+            >
+              {credentialOperation === 'configure' ? (
+                <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+              ) : (
+                <ShieldCheck size={14} aria-hidden="true" />
+              )}
+              {credentialOperation === 'configure' ? '保存中…' : '安全保存'}
+            </button>
+          </div>
+          {keyInvalid ? (
+            <small id="assistant-api-key-help" className="is-error">
+              API 密钥至少需要 {apiKeyMinLength} 个字符。
+            </small>
+          ) : null}
+        </form>
+      </div>
+
+      <div className="settings-group">
+        <h2>发送边界</h2>
+        <p>AI 助手不会自动读取整个工作区，也不会执行工具或更改本地数据。</p>
+        <div className="assistant-boundary-list">
+          <span>每次发送前显示所选上下文</span>
+          <span>链接仅以文本显示，不会自动打开</span>
+          <span>只有点击“保存为笔记”才会写入 SQLite</span>
+        </div>
+      </div>
+
+      {feedback ? (
+        <p
+          className="assistant-settings-feedback"
+          role={feedback.includes('未能') ? 'alert' : 'status'}
+        >
+          {feedback}
+        </p>
+      ) : null}
+    </>
   );
 }
 
@@ -1177,7 +1446,7 @@ function AboutSettings() {
           <ShieldCheck size={17} aria-hidden="true" />
         </span>
         <div>
-          <strong>本地模式</strong>
+          <strong>本地业务数据</strong>
           <small>业务数据保存在本机 SQLite 数据库中</small>
         </div>
       </div>

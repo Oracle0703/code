@@ -36,6 +36,8 @@
 - Today 计划只接受 `today`/`none` 意图，由 Main 生成本地民用日期；测试不能依赖 runner 的 locale 或当前系统日期。
 - 笔记请求必须显式携带目标工作区；正文换行只允许按约定规范为 LF，Renderer 不能提供 ID、时间戳、revision 或收件箱来源关系。
 - 笔记更新和归档必须携带 `expectedRevision`；迟到保存需要基于最新快照处理，不能静默覆盖。Markdown 预览不能执行原始 HTML 或把不安全协议带入可信 Renderer。
+- AI 请求只能由 Main 读取固定的工作区上下文并调用固定 Responses endpoint；除窄的一次性凭据配置调用外，不得从 Renderer 接受或回读 API key，也不得接受 endpoint、model、system prompt、工具、路径、URL 或预拼接的业务正文。测试必须使用 loopback SSE double，不能依赖真实 key、外网或计费。
+- API key 不得进入 SQLite、日志、备份、测试快照或 `.dwbx`；Linux `safeStorage` 为 `basic_text` 时必须 fail closed。AI 会话保持仅运行时；任何模型回答的持久化都必须在完整成功后由用户另行确认。
 - 收件箱转笔记必须在同一事务中创建笔记、建立唯一来源并归档条目；同一来源不能同时转换为任务和笔记。
 - 日程请求必须显式携带目标工作区和 `expectedDate`；持久化日期由 Main 生成，时间使用分钟整数，测试不能依赖 runner 的 locale、时区或当前系统日期。
 - 日程更新和归档必须携带 `expectedRevision`；跨午夜、窗口聚焦和页面恢复时必须丢弃旧日期快照后重新读取。

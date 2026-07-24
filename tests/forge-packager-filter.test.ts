@@ -17,10 +17,17 @@ describe('Forge packager filter', () => {
     expect(shouldIgnorePackagerPath(filePath)).toBe(false);
   });
 
-  it.each(['/.vite-old', '/src/main.ts', '/README.md', '/node_modules/react/index.js'])(
-    'excludes non-runtime path %s',
-    (filePath) => {
-      expect(shouldIgnorePackagerPath(filePath)).toBe(true);
-    },
-  );
+  it.each([
+    '/.vite-old',
+    '/src/main.ts',
+    '/src/main/assistant/openai-responses-provider.ts',
+    '/tests/helpers/fake-responses-server.ts',
+    '/reports/assistant-provider-smoke/assistant-provider-smoke.cjs',
+    '/README.md',
+    '/node_modules/react/index.js',
+    '/node_modules/openai/index.js',
+    '/node_modules/@openai/codex/package.json',
+  ])('excludes non-runtime path %s', (filePath) => {
+    expect(shouldIgnorePackagerPath(filePath)).toBe(true);
+  });
 });

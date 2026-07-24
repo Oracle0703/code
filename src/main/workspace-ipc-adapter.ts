@@ -30,6 +30,7 @@ export function createWorkspaceIpcAdapter(
   browser: WorkspaceBrowserLifecycle,
   terminal: WorkspaceTerminalLifecycle,
   onSnapshot: (snapshot: WorkspaceSnapshot) => void,
+  onWorkspaceArchived: (workspaceId: string) => void = () => undefined,
 ) {
   const track = async (operation: Promise<WorkspaceSnapshot>): Promise<WorkspaceSnapshot> => {
     const snapshot = await operation;
@@ -55,6 +56,11 @@ export function createWorkspaceIpcAdapter(
         terminal.discardWorkspace(input.workspaceId);
       } catch {
         // The database commit is authoritative; native cleanup cannot turn it into a false failure.
+      }
+      try {
+        onWorkspaceArchived(input.workspaceId);
+      } catch {
+        // Runtime cleanup cannot turn a committed workspace archive into a false failure.
       }
       onSnapshot(snapshot);
       return snapshot;
