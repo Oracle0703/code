@@ -39,13 +39,20 @@ import {
 import {
   DEFAULT_WORKSPACE_PREFERENCES,
   WORKSPACE_COLORS,
+  type AssistantContextReference,
   type AutomationItem,
   type SearchResult,
-  type WorkspaceViewId,
 } from '../shared/contracts';
+import {
+  ASSISTANT_API_KEY_MAX_LENGTH,
+  ASSISTANT_API_KEY_MIN_LENGTH,
+  ASSISTANT_PROMPT_MAX_LENGTH,
+  ASSISTANT_SELECTED_TASK_MAX_COUNT,
+} from '../shared/assistant-domain';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { findCurrentWorkspace } from '../shared/workspace-domain';
 import { ActivityRail } from './components/ActivityRail';
+import { AssistantPage } from './components/AssistantPage';
 import { AutomationDialog, type AutomationDialogState } from './components/AutomationDialog';
 import { AutomationPage } from './components/AutomationPage';
 import { BrowserPanel } from './components/BrowserPanel';
@@ -65,6 +72,7 @@ import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { useInboxController } from './hooks/useInboxController';
+import { useAssistantController } from './hooks/useAssistantController';
 import { useAutomationController } from './hooks/useAutomationController';
 import { useDataManagementController } from './hooks/useDataManagementController';
 import { useGlobalSearchController } from './hooks/useGlobalSearchController';
@@ -73,25 +81,27 @@ import { useScheduleController } from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
-import type { ViewId } from './model';
+import type { AppSurfaceId } from './model';
 import { defaultScheduleRange } from './schedule-state';
 import {
   SearchNavigationCoordinator,
   assertSearchTargetExists,
   searchNavigationError,
 } from './search-navigation';
+import { EMPTY_ASSISTANT_CONTEXT, assistantEntryContextForWorkspace } from './assistant-state';
 import {
   evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
   synchronizeDirtyDraft,
 } from './window-close';
 
-const viewLabels: Record<ViewId, string> = {
+const viewLabels: Record<AppSurfaceId, string> = {
   today: '今日',
   inbox: '收件箱',
   tasks: '任务',
   notes: '笔记',
   automations: '自动化',
+  assistant: 'AI 助手',
   settings: '设置',
 };
 
@@ -132,6 +142,12 @@ export function App() {
   const [automationDialog, setAutomationDialog] = useState<AutomationDialogState | null>(null);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
+  const [assistantSurfaceOpen, setAssistantSurfaceOpen] = useState(false);
+  const [assistantEntry, setAssistantEntry] = useState<{
+    readonly workspaceId: string | null;
+    readonly context: AssistantContextReference;
+    readonly generation: number;
+  }>({ workspaceId: null, context: EMPTY_ASSISTANT_CONTEXT, generation: 0 });
   const [requestedNoteId, setRequestedNoteId] = useState<string | null>(null);
   const [notePageGeneration, setNotePageGeneration] = useState(0);
   const [inboxReveal, setInboxReveal] = useState<{
@@ -153,6 +169,18 @@ export function App() {
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
+  useEffect(() => {
+    const workspaceId = snapshot?.currentWorkspaceId;
+    if (!workspaceId) return;
+    queueMicrotask(() => {
+      if (currentWorkspaceIdRef.current !== workspaceId) return;
+      setAssistantEntry((current) => ({
+        workspaceId,
+        context: EMPTY_ASSISTANT_CONTEXT,
+        generation: current.generation + 1,
+      }));
+    });
+  }, [snapshot?.currentWorkspaceId]);
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
@@ -167,11 +195,17 @@ export function App() {
       }
     },
   });
+  const assistantController = useAssistantController(snapshot?.currentWorkspaceId ?? null);
   const searchController = useGlobalSearchController({
     open: paletteOpen,
     workspaceId: snapshot?.currentWorkspaceId ?? null,
   });
   const activeWorkspace = snapshot ? findCurrentWorkspace(snapshot) : null;
+  const assistantInitialContext = assistantEntryContextForWorkspace(
+    snapshot?.currentWorkspaceId ?? null,
+    assistantEntry.workspaceId,
+    assistantEntry.context,
+  );
   const visibleUndoNotices = useMemo(
     () =>
       activeWorkspace
@@ -191,6 +225,7 @@ export function App() {
     terminalOpen,
     theme,
   } = preferences;
+  const activeSurface: AppSurfaceId = assistantSurfaceOpen ? 'assistant' : activeView;
   const overlayOpen =
     paletteOpen ||
     workspaceDialog !== null ||
@@ -237,14 +272,37 @@ export function App() {
     [],
   );
   const requestActiveView = useCallback(
-    (view: WorkspaceViewId) => {
-      if (view === activeView || !confirmLeaveNoteDraft()) return;
-      updatePreferences({ activeView: view });
+    (view: AppSurfaceId) => {
+      if (view === activeSurface || !confirmLeaveNoteDraft()) return;
+      if (view === 'assistant') {
+        setAssistantSurfaceOpen(true);
+      } else {
+        setAssistantSurfaceOpen(false);
+      }
+      if (view !== 'assistant' && view !== activeView) {
+        updatePreferences({ activeView: view });
+      }
     },
-    [activeView, confirmLeaveNoteDraft, updatePreferences],
+    [activeSurface, activeView, confirmLeaveNoteDraft, updatePreferences],
+  );
+  const openAssistant = useCallback(
+    (context: AssistantContextReference) => {
+      if (!activeWorkspace || !confirmLeaveNoteDraft()) return;
+      setAssistantEntry((current) => ({
+        workspaceId: activeWorkspace.id,
+        context,
+        generation: current.generation + 1,
+      }));
+      setAssistantSurfaceOpen(true);
+    },
+    [activeWorkspace, confirmLeaveNoteDraft],
   );
   const openTerminalSettings = useCallback(() => {
     setSettingsSection('terminal');
+    requestActiveView('settings');
+  }, [requestActiveView]);
+  const openAssistantSettings = useCallback(() => {
+    setSettingsSection('assistant');
     requestActiveView('settings');
   }, [requestActiveView]);
   const requestWorkspaceActivation = useCallback(
@@ -427,8 +485,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (activeView === 'settings') void loadData();
-  }, [activeView, loadData]);
+    if (activeSurface === 'settings') void loadData();
+  }, [activeSurface, loadData]);
 
   useEffect(() => window.workbench.inbox.onCaptureRequest(openQuickCapture), [openQuickCapture]);
 
@@ -613,6 +671,7 @@ export function App() {
               inboxSnapshot.entries.some(({ id }) => id === result.entityId),
             );
             finishNavigation();
+            setAssistantSurfaceOpen(false);
             updatePreferences({ activeView: 'inbox' }, true, result.workspaceId);
             setRequestedNoteId(null);
             setInboxReveal({
@@ -631,6 +690,7 @@ export function App() {
             const task = taskSnapshot.tasks.find(({ id }) => id === result.entityId);
             assertSearchTargetExists(intent, task !== undefined);
             finishNavigation();
+            setAssistantSurfaceOpen(false);
             updatePreferences({ activeView: 'tasks' }, true, result.workspaceId);
             setInboxReveal(null);
             setRequestedNoteId(null);
@@ -652,6 +712,7 @@ export function App() {
               noteSnapshot.notes.some(({ id }) => id === result.entityId),
             );
             finishNavigation();
+            setAssistantSurfaceOpen(false);
             updatePreferences({ activeView: 'notes' }, true, result.workspaceId);
             setInboxReveal(null);
             setRequestedNoteId(result.entityId);
@@ -665,6 +726,7 @@ export function App() {
             const item = scheduleSnapshot.items.find(({ id }) => id === result.entityId);
             assertSearchTargetExists(intent, item !== undefined);
             finishNavigation();
+            setAssistantSurfaceOpen(false);
             updatePreferences({ activeView: 'today' }, true, result.workspaceId);
             setInboxReveal(null);
             setRequestedNoteId(null);
@@ -889,6 +951,15 @@ export function App() {
         icon: Settings2,
         keywords: '终端 profile shell cwd wsl 工作目录',
         action: openTerminalSettings,
+      },
+      {
+        id: 'go-assistant',
+        label: '打开 AI 助手',
+        description: '选择上下文后手动发送问题',
+        group: '页面',
+        icon: Sparkles,
+        keywords: 'AI OpenAI 助手 问答',
+        action: () => requestActiveView('assistant'),
       },
       {
         id: 'go-today',
@@ -1131,7 +1202,7 @@ export function App() {
 
       <div className="workbench-shell">
         <ActivityRail
-          activeView={activeView}
+          activeView={activeSurface}
           inboxCount={inboxController.snapshot ? inboxController.counts.total : null}
           taskCount={taskController.counts?.active ?? null}
           todayCount={taskController.counts?.today ?? null}
@@ -1143,7 +1214,7 @@ export function App() {
           inert={sidebarCollapsed}
         >
           <WorkspaceSidebar
-            activeView={activeView}
+            activeView={activeSurface}
             activeWorkspace={activeWorkspace}
             workspaces={snapshot.workspaces}
             busy={workspaceController.pendingOperation !== null}
@@ -1184,7 +1255,7 @@ export function App() {
                   <AppWindow size={14} />
                   <span>{activeWorkspace.name}</span>
                   <i>/</i>
-                  <strong>{viewLabels[activeView]}</strong>
+                  <strong>{viewLabels[activeSurface]}</strong>
                 </div>
                 <div className="page-chrome__actions">
                   <IconButton label="打开命令中心" onClick={() => setPaletteOpen(true)}>
@@ -1202,7 +1273,7 @@ export function App() {
                 </div>
               </div>
               <div className="page-scroll">
-                {activeView === 'today' ? (
+                {activeSurface === 'today' ? (
                   <TodayDashboard
                     key={snapshot.currentWorkspaceId}
                     inboxStatus={inboxController.status}
@@ -1250,8 +1321,9 @@ export function App() {
                         item,
                       })
                     }
+                    onOpenAssistant={() => openAssistant({ kind: 'today' })}
                   />
-                ) : activeView === 'inbox' ? (
+                ) : activeSurface === 'inbox' ? (
                   <InboxPage
                     key={
                       inboxReveal?.workspaceId === snapshot.currentWorkspaceId
@@ -1297,8 +1369,9 @@ export function App() {
                       requestActiveView('notes');
                     }}
                   />
-                ) : activeView === 'tasks' ? (
+                ) : activeSurface === 'tasks' ? (
                   <TaskPage
+                    key={snapshot.currentWorkspaceId}
                     snapshot={taskController.snapshot}
                     tasks={taskController.tasks}
                     status={taskController.status}
@@ -1317,8 +1390,15 @@ export function App() {
                     }
                     onUpdateStatus={taskController.updateStatus}
                     onUpdatePlanning={taskController.updatePlanning}
+                    assistantTaskLimit={ASSISTANT_SELECTED_TASK_MAX_COUNT}
+                    onOpenAssistant={(tasks) =>
+                      openAssistant({
+                        kind: 'tasks',
+                        taskIds: tasks.map(({ id }) => id),
+                      })
+                    }
                   />
-                ) : activeView === 'notes' ? (
+                ) : activeSurface === 'notes' ? (
                   <NotePage
                     key={`${snapshot.currentWorkspaceId}:${notePageGeneration}`}
                     workspaceName={activeWorkspace.name}
@@ -1338,8 +1418,47 @@ export function App() {
                     onOpenLink={(url) => {
                       openUrlInWorkspace(snapshot.currentWorkspaceId, url);
                     }}
+                    onOpenAssistant={(note) =>
+                      openAssistant({
+                        kind: 'note',
+                        noteId: note.id,
+                        revision: note.revision,
+                      })
+                    }
                   />
-                ) : activeView === 'settings' ? (
+                ) : activeSurface === 'assistant' ? (
+                  <AssistantPage
+                    key={snapshot.currentWorkspaceId}
+                    workspaceName={activeWorkspace.name}
+                    credential={assistantController.credential}
+                    credentialStatus={assistantController.credentialStatus}
+                    credentialError={assistantController.credentialError}
+                    runtimeStatus={assistantController.runtimeStatus}
+                    runtimeError={assistantController.runtimeError}
+                    runtime={assistantController.snapshot}
+                    operation={
+                      assistantController.operation === 'start' ||
+                      assistantController.operation === 'cancel'
+                        ? assistantController.operation
+                        : null
+                    }
+                    notes={noteController.notes}
+                    tasks={taskController.tasks}
+                    initialContext={assistantInitialContext}
+                    contextGeneration={assistantEntry.generation}
+                    promptMaxLength={ASSISTANT_PROMPT_MAX_LENGTH}
+                    onRetry={assistantController.retry}
+                    onOpenSettings={openAssistantSettings}
+                    onStart={assistantController.start}
+                    onCancel={assistantController.cancel}
+                    onSaveResponse={async (response) => {
+                      await noteController.create(
+                        `AI 助手回复 · ${new Intl.DateTimeFormat('zh-CN').format(new Date())}`,
+                        response,
+                      );
+                    }}
+                  />
+                ) : activeSurface === 'settings' ? (
                   <SettingsPage
                     workspaceId={snapshot.currentWorkspaceId}
                     section={settingsSection}
@@ -1355,6 +1474,21 @@ export function App() {
                     onUpdateBackupPolicy={updateBackupPolicy}
                     onExportData={exportData}
                     onChooseImport={chooseImport}
+                    assistant={{
+                      credential: assistantController.credential,
+                      credentialStatus: assistantController.credentialStatus,
+                      credentialError: assistantController.credentialError,
+                      credentialOperation:
+                        assistantController.operation === 'configure' ||
+                        assistantController.operation === 'remove'
+                          ? assistantController.operation
+                          : null,
+                      apiKeyMinLength: ASSISTANT_API_KEY_MIN_LENGTH,
+                      apiKeyMaxLength: ASSISTANT_API_KEY_MAX_LENGTH,
+                      onRetryCredential: assistantController.retry,
+                      onConfigureCredential: assistantController.configureCredential,
+                      onRemoveCredential: assistantController.removeCredential,
+                    }}
                   />
                 ) : (
                   <AutomationPage
@@ -1470,6 +1604,8 @@ export function App() {
                   noteController.operationError ||
                   scheduleController.operationError ||
                   automationController.operationError ||
+                  assistantController.credentialError ||
+                  assistantController.runtimeError ||
                   dataState.feedback?.tone === 'error'
                     ? 'alert'
                     : undefined
@@ -1481,6 +1617,8 @@ export function App() {
                   noteController.operationError ??
                   scheduleController.operationError ??
                   automationController.operationError ??
+                  assistantController.credentialError ??
+                  assistantController.runtimeError ??
                   (dataState.feedback?.tone === 'error' ? dataState.feedback.message : null) ??
                   (noteDraftDirty ? '笔记有未保存的更改' : null) ??
                   '已就绪'}
@@ -1488,7 +1626,7 @@ export function App() {
             </div>
             <div className="statusbar__context">
               <span>{activeWorkspace.name}</span>
-              <span>本地模式</span>
+              <span>本地数据</span>
             </div>
             <div>
               <button

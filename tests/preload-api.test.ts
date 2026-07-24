@@ -377,6 +377,58 @@ describe('preload automation API', () => {
   });
 });
 
+describe('preload assistant API', () => {
+  it('exposes only the declared frozen assistant methods', () => {
+    expect(Object.keys(api.assistant).sort()).toEqual([
+      'cancel',
+      'configureCredential',
+      'getCredentialStatus',
+      'getSnapshot',
+      'onChanged',
+      'removeCredential',
+      'start',
+    ]);
+    expect(Object.isFrozen(api.assistant)).toBe(true);
+  });
+
+  it('forwards exact assistant inputs without exposing workspace or provider controls', async () => {
+    const apiKey = `sk-proj-${'a'.repeat(48)}`;
+    const runId = '123e4567-e89b-42d3-a456-426614174000';
+    const start = {
+      prompt: '梳理下一步',
+      context: { kind: 'today' as const },
+    };
+
+    await api.assistant.getCredentialStatus();
+    await api.assistant.configureCredential({ apiKey });
+    await api.assistant.removeCredential();
+    await api.assistant.getSnapshot();
+    await api.assistant.start(start);
+    await api.assistant.cancel({ runId });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['assistant:get-credential-status'],
+      ['assistant:configure-credential', { apiKey }],
+      ['assistant:remove-credential'],
+      ['assistant:get-snapshot'],
+      ['assistant:start', start],
+      ['assistant:cancel', { runId }],
+    ]);
+  });
+
+  it('subscribes and removes assistant snapshot listeners', () => {
+    const listener = vi.fn();
+    const unsubscribe = api.assistant.onChanged(listener);
+    expect(electron.on).toHaveBeenCalledExactlyOnceWith('assistant:changed', expect.any(Function));
+    const wrapped = electron.on.mock.calls[0]?.[1] as (event: unknown, payload: unknown) => void;
+    const payload = { sequence: 4, workspaceId: 'workspace', phase: 'running' };
+    wrapped({}, payload);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(payload);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledExactlyOnceWith('assistant:changed', wrapped);
+  });
+});
+
 describe('preload window API', () => {
   it('exposes only the declared frozen window methods', () => {
     expect(Object.keys(api.window).sort()).toEqual([

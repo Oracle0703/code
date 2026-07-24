@@ -1,9 +1,15 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, dialog, powerMonitor, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, powerMonitor, safeStorage, type WebContents } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { IPC_CHANNELS, type WindowCloseReason } from '../shared/contracts';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
+import {
+  AssistantContextBuilder,
+  AssistantController,
+  OpenAIResponsesProvider,
+  SafeStorageCredentialStore,
+} from './assistant';
 import { AutomationController } from './automations';
 import { BrowserController } from './browser/browser-controller';
 import {
@@ -38,6 +44,7 @@ let mainWindow: BrowserWindow | null = null;
 let databaseService: DatabaseService | null = null;
 let dataManagementController: DataManagementController | null = null;
 let automationController: AutomationController | null = null;
+let assistantController: AssistantController | null = null;
 let databaseShutdownPromise: Promise<void> | null = null;
 let replacementPreparationPromise: Promise<void> | null = null;
 let replacementRestartPromise: Promise<void> | null = null;
@@ -69,6 +76,7 @@ async function createMainWindow(
   database: DatabaseService,
   data: DataManagementController,
   automation: AutomationController,
+  assistant: AssistantController,
 ): Promise<void> {
   const initialWorkspaceSnapshot = await database.getWorkspaceSnapshot();
   let rendererWorkspaceId = initialWorkspaceSnapshot.currentWorkspaceId;
@@ -173,9 +181,17 @@ async function createMainWindow(
       stateChanged: (snapshot) => sendToRenderer(IPC_CHANNELS.terminal.stateChanged, snapshot),
     },
   });
-  const workspaceForIpc = createWorkspaceIpcAdapter(database, browser, terminal, (snapshot) => {
-    rendererWorkspaceId = snapshot.currentWorkspaceId;
-  });
+  assistant.setActiveWorkspace(initialWorkspaceSnapshot.currentWorkspaceId);
+  const workspaceForIpc = createWorkspaceIpcAdapter(
+    database,
+    browser,
+    terminal,
+    (snapshot) => {
+      rendererWorkspaceId = snapshot.currentWorkspaceId;
+      assistant.setActiveWorkspace(snapshot.currentWorkspaceId);
+    },
+    (workspaceId) => assistant.discardWorkspace(workspaceId),
+  );
   const unregisterIpc = registerIpcHandlers({
     window,
     windowLifecycle: {
@@ -192,6 +208,7 @@ async function createMainWindow(
     note: database,
     schedule: database,
     automation,
+    assistant,
     terminal,
     trustedRendererLocation,
   });
@@ -226,6 +243,7 @@ async function createMainWindow(
   });
   window.webContents.on('render-process-gone', () => {
     closeCoordinator.markUnavailable();
+    void assistant.cancelActive();
     void shutdownTerminal().catch((error: unknown) => {
       console.error('Daily Workbench failed to stop terminals after Renderer loss.', error);
     });
@@ -247,11 +265,15 @@ async function createMainWindow(
     terminalShutdownPromise ??= terminal.shutdown();
     return terminalShutdownPromise;
   };
+  const cancelAssistant = (): Promise<void> => {
+    return assistant.cancelActive();
+  };
   runtimeShutdowns.add(shutdownBrowser);
   runtimeShutdowns.add(shutdownTerminal);
+  runtimeShutdowns.add(cancelAssistant);
   const prepareReplacementRuntime = async (): Promise<void> => {
     unregisterIpcOnce();
-    await Promise.all([shutdownBrowser(), shutdownTerminal()]);
+    await Promise.all([shutdownBrowser(), shutdownTerminal(), cancelAssistant()]);
   };
   replacementRuntimePreparations.add(prepareReplacementRuntime);
   const cleanUp = (): void => {
@@ -280,7 +302,7 @@ async function createMainWindow(
       });
       try {
         await settleShutdownsBefore(
-          [shutdownBrowser, shutdownTerminal],
+          [shutdownBrowser, shutdownTerminal, cancelAssistant],
           async () => undefined,
           (error) => {
             console.error(
@@ -309,6 +331,7 @@ async function createMainWindow(
   window.once('closed', () => {
     runtimeShutdowns.delete(shutdownBrowser);
     runtimeShutdowns.delete(shutdownTerminal);
+    runtimeShutdowns.delete(cancelAssistant);
     replacementRuntimePreparations.delete(prepareReplacementRuntime);
     closeApprovalRequests.delete(requestCloseApproval);
     approvedCloseSurfaces.delete(window);
@@ -352,12 +375,14 @@ function prepareForDataReplacement(): Promise<void> {
   if (replacementPreparationPromise) return replacementPreparationPromise;
   const activeData = dataManagementController;
   const activeAutomation = automationController;
+  const activeAssistant = assistantController;
   prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
     console.error('Daily Workbench failed to hide a window before data replacement.', error);
   });
 
   const preparations = [
     ...replacementRuntimePreparations,
+    ...(activeAssistant ? [() => activeAssistant.stop()] : []),
     ...(activeAutomation ? [() => activeAutomation.stop()] : []),
     ...(activeData ? [() => activeData.stop()] : []),
   ];
@@ -383,6 +408,7 @@ function restartForDataReplacement(): Promise<void> {
   const activeDatabase = databaseService;
   const activeData = dataManagementController;
   const activeAutomation = automationController;
+  const activeAssistant = assistantController;
   prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
     console.error('Daily Workbench failed to hide a window before data replacement.', error);
   });
@@ -392,6 +418,7 @@ function restartForDataReplacement(): Promise<void> {
       databaseShutdownPromise = settleShutdownsBefore(
         [
           ...runtimeShutdowns,
+          ...(activeAssistant ? [() => activeAssistant.stop()] : []),
           ...(activeAutomation ? [() => activeAutomation.stop()] : []),
           ...(activeData ? [() => activeData.stop()] : []),
         ],
@@ -411,6 +438,7 @@ function restartForDataReplacement(): Promise<void> {
     databaseService = null;
     dataManagementController = null;
     automationController = null;
+    assistantController = null;
     allowQuit = true;
     finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
       console.error('Daily Workbench failed to destroy a window before restarting.', error);
@@ -599,6 +627,7 @@ if (!hasSingleInstanceLock) {
       const activeDatabase = databaseService;
       const activeData = dataManagementController;
       const activeAutomation = automationController;
+      const activeAssistant = assistantController;
       quitApprovalPromise = runAfterCloseApproval(
         [...closeApprovalRequests].map((requestApproval) => () => requestApproval('application')),
         async () => {
@@ -608,6 +637,7 @@ if (!hasSingleInstanceLock) {
           databaseShutdownPromise = settleShutdownsBefore(
             [
               ...runtimeShutdowns,
+              ...(activeAssistant ? [() => activeAssistant.stop()] : []),
               ...(activeAutomation ? [() => activeAutomation.stop()] : []),
               ...(activeData ? [() => activeData.stop()] : []),
             ],
@@ -626,6 +656,7 @@ if (!hasSingleInstanceLock) {
               databaseService = null;
               dataManagementController = null;
               automationController = null;
+              assistantController = null;
               allowQuit = true;
               finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
                 console.error('Daily Workbench failed to destroy an approved window.', error);
@@ -671,6 +702,20 @@ if (!hasSingleInstanceLock) {
 
       const data = await createDataManagementController(database, dataDirectory);
       dataManagementController = data;
+      const workspaceSnapshot = await database.getWorkspaceSnapshot();
+      const assistant = new AssistantController({
+        initialWorkspaceId: workspaceSnapshot.currentWorkspaceId,
+        contextBuilder: new AssistantContextBuilder(database),
+        credentialStore: new SafeStorageCredentialStore({
+          directory: join(app.getPath('userData'), 'credentials'),
+          safeStorage,
+        }),
+        provider: new OpenAIResponsesProvider(),
+        onChanged: (snapshot) => {
+          sendToRenderer(IPC_CHANNELS.assistant.changed, snapshot);
+        },
+      });
+      assistantController = assistant;
       const automation = new AutomationController({
         database,
         onChanged: (event) => {
@@ -682,7 +727,7 @@ if (!hasSingleInstanceLock) {
       });
       automationController = automation;
       await automation.start();
-      await createMainWindow(database, data, automation);
+      await createMainWindow(database, data, automation, assistant);
       await data.start();
 
       powerMonitor.on('resume', () => {
@@ -700,17 +745,22 @@ if (!hasSingleInstanceLock) {
       app.on('activate', () => {
         const activeDatabase = databaseService;
         const activeAutomation = automationController;
+        const activeAssistant = assistantController;
         if (
           activeDatabase &&
           activeAutomation &&
+          activeAssistant &&
           !databaseShutdownPromise &&
           BrowserWindow.getAllWindows().length === 0
         ) {
           const activeData = dataManagementController;
           if (activeData) {
-            void createMainWindow(activeDatabase, activeData, activeAutomation).catch(
-              quitAfterStartupFailure,
-            );
+            void createMainWindow(
+              activeDatabase,
+              activeData,
+              activeAutomation,
+              activeAssistant,
+            ).catch(quitAfterStartupFailure);
           }
         }
       });

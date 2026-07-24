@@ -3,24 +3,25 @@ import {
   CheckSquare2,
   Inbox,
   LayoutDashboard,
+  MessageSquareText,
   NotebookPen,
   Settings2,
   Sparkles,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { ViewId } from '../model';
+import type { AppSurfaceId } from '../model';
 import { IconButton } from './IconButton';
 
 interface ActivityRailProps {
-  activeView: ViewId;
+  activeView: AppSurfaceId;
   inboxCount: number | null;
   taskCount: number | null;
   todayCount: number | null;
-  onSelect: (view: ViewId) => void;
+  onSelect: (view: AppSurfaceId) => void;
 }
 
 interface RailItem {
-  id: ViewId;
+  id: AppSurfaceId;
   label: string;
   icon: LucideIcon;
   badge?: number;
@@ -32,6 +33,7 @@ const primaryItems: RailItem[] = [
   { id: 'tasks', label: '任务', icon: CheckSquare2 },
   { id: 'notes', label: '笔记', icon: NotebookPen },
   { id: 'automations', label: '自动化', icon: Bot },
+  { id: 'assistant', label: 'AI 助手', icon: MessageSquareText },
 ];
 
 export function ActivityRail({
@@ -61,7 +63,7 @@ export function ActivityRail({
             <div className="activity-rail__item" key={id}>
               <IconButton
                 label={label}
-                active={activeView === id}
+                className={activeView === id ? 'is-active' : ''}
                 tooltipSide="right"
                 onClick={() => onSelect(id)}
                 aria-current={activeView === id ? 'page' : undefined}
@@ -81,7 +83,7 @@ export function ActivityRail({
       <div className="activity-rail__footer">
         <IconButton
           label="设置"
-          active={activeView === 'settings'}
+          className={activeView === 'settings' ? 'is-active' : ''}
           tooltipSide="right"
           onClick={() => onSelect('settings')}
           aria-current={activeView === 'settings' ? 'page' : undefined}

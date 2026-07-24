@@ -1,4 +1,7 @@
 import {
+  type AssistantCancelInput,
+  type AssistantCredentialInput,
+  type AssistantStartInput,
   type AutomationAction,
   type AutomationCreateInput,
   type AutomationSchedule,
@@ -51,6 +54,11 @@ import {
   type WorkspaceRenameInput,
   type WorkspaceTargetInput,
 } from '../../shared/contracts';
+import {
+  normalizeAssistantContextReference,
+  normalizeAssistantCredentialInput,
+  normalizeAssistantPrompt,
+} from '../../shared/assistant-domain';
 import {
   normalizeAutomationAction,
   normalizeAutomationActionKind,
@@ -372,6 +380,29 @@ export function assertNoArguments(values: readonly unknown[], operation: string)
   if (values.length !== 0) {
     throw new TypeError(`${operation} does not accept arguments`);
   }
+}
+
+export function parseAssistantCredentialInput(value: unknown): AssistantCredentialInput {
+  return normalizeAssistantCredentialInput(value);
+}
+
+export function parseAssistantStartInput(value: unknown): AssistantStartInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Assistant start input must be an object');
+  }
+  assertOnlyKeys(value, ['prompt', 'context']);
+  return {
+    prompt: normalizeAssistantPrompt(value.prompt),
+    context: normalizeAssistantContextReference(value.context),
+  };
+}
+
+export function parseAssistantCancelInput(value: unknown): AssistantCancelInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Assistant cancellation input must be an object');
+  }
+  assertOnlyKeys(value, ['runId']);
+  return { runId: parseUuidV4(value.runId, 'Assistant run id') };
 }
 
 export function parseWorkspaceCreateInput(value: unknown): WorkspaceCreateInput {

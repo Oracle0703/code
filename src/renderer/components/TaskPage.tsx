@@ -7,10 +7,12 @@ import {
   Circle,
   Inbox,
   LoaderCircle,
+  MessageSquareText,
   Pencil,
   Plus,
   Search,
   Sparkles,
+  Square,
 } from 'lucide-react';
 import type { Task, TaskPlanning, TaskSnapshot, TaskStatus } from '../../shared/contracts';
 import { filterTasks, type TaskFilter } from '../task-state';
@@ -27,6 +29,8 @@ interface TaskPageProps {
   onOpenRename: (task: Task) => void;
   onUpdateStatus: (taskId: string, status: TaskStatus) => Promise<void>;
   onUpdatePlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
+  assistantTaskLimit: number;
+  onOpenAssistant: (tasks: readonly Task[]) => void;
 }
 
 const filters: readonly { id: TaskFilter; label: string }[] = [
@@ -54,15 +58,47 @@ export function TaskPage({
   onOpenRename,
   onUpdateStatus,
   onUpdatePlanning,
+  assistantTaskLimit,
+  onOpenAssistant,
 }: TaskPageProps) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<TaskFilter>('open');
+  const [assistantSelectionOpen, setAssistantSelectionOpen] = useState(false);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<ReadonlySet<string>>(() => new Set());
   const todayDate = snapshot?.todayDate ?? '';
   const visibleTasks = useMemo(
     () => filterTasks(tasks, filter, query, todayDate),
     [filter, query, tasks, todayDate],
   );
   const openCount = tasks.filter(({ status: taskStatus }) => taskStatus !== 'completed').length;
+  const effectiveSelectedTaskIds = useMemo(() => {
+    const eligibleIds = new Set(
+      tasks.filter(({ status: taskStatus }) => taskStatus !== 'completed').map(({ id }) => id),
+    );
+    return new Set(
+      [...selectedTaskIds].filter((id) => eligibleIds.has(id)).slice(0, assistantTaskLimit),
+    );
+  }, [assistantTaskLimit, selectedTaskIds, tasks]);
+  const selectedTasks = tasks.filter(({ id, status: taskStatus }) => {
+    return taskStatus !== 'completed' && effectiveSelectedTaskIds.has(id);
+  });
+
+  const toggleAssistantTask = (taskId: string) => {
+    setSelectedTaskIds(() => {
+      const next = new Set(effectiveSelectedTaskIds);
+      if (next.has(taskId)) {
+        next.delete(taskId);
+      } else if (next.size < assistantTaskLimit) {
+        next.add(taskId);
+      }
+      return next;
+    });
+  };
+
+  const closeAssistantSelection = () => {
+    setAssistantSelectionOpen(false);
+    setSelectedTaskIds(new Set());
+  };
 
   return (
     <div className="section-page task-page" aria-busy={status === 'loading'}>
@@ -76,9 +112,23 @@ export function TaskPage({
             <p>{snapshot ? `${openCount} 项待完成` : '按工作区推进下一步。'}</p>
           </div>
         </div>
-        <button type="button" className="primary-button" onClick={onOpenCreate}>
-          <Plus size={15} /> 新建任务
-        </button>
+        <div className="section-page__header-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            aria-pressed={assistantSelectionOpen}
+            onClick={() => {
+              if (assistantSelectionOpen) closeAssistantSelection();
+              else setAssistantSelectionOpen(true);
+            }}
+          >
+            <MessageSquareText size={15} />{' '}
+            {assistantSelectionOpen ? '取消选择' : '选择任务询问 AI'}
+          </button>
+          <button type="button" className="primary-button" onClick={onOpenCreate}>
+            <Plus size={15} /> 新建任务
+          </button>
+        </div>
       </header>
 
       {status === 'error' ? (
@@ -127,6 +177,26 @@ export function TaskPage({
             })}
           </div>
 
+          {assistantSelectionOpen ? (
+            <div className="task-assistant-selection">
+              <span role="status" aria-live="polite">
+                选择未完成任务作为本次上下文（最多 {assistantTaskLimit} 项）。已选{' '}
+                {selectedTasks.length} 项。
+              </span>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={selectedTasks.length === 0}
+                onClick={() => {
+                  onOpenAssistant(selectedTasks);
+                  closeAssistantSelection();
+                }}
+              >
+                <MessageSquareText size={14} /> 带入 AI 助手
+              </button>
+            </div>
+          ) : null}
+
           {operationError ? (
             <p className="task-operation-error" role="alert">
               {operationError}
@@ -143,16 +213,47 @@ export function TaskPage({
                     <button
                       type="button"
                       className="task-page-row__toggle"
-                      aria-label={completed ? `重新打开：${task.title}` : `完成：${task.title}`}
-                      disabled={pending}
-                      onClick={() =>
+                      aria-label={
+                        assistantSelectionOpen
+                          ? completed
+                            ? `不能选择已完成任务：${task.title}`
+                            : effectiveSelectedTaskIds.has(task.id)
+                              ? `取消选择：${task.title}`
+                              : `选择任务：${task.title}`
+                          : completed
+                            ? `重新打开：${task.title}`
+                            : `完成：${task.title}`
+                      }
+                      aria-pressed={
+                        assistantSelectionOpen && !completed
+                          ? effectiveSelectedTaskIds.has(task.id)
+                          : undefined
+                      }
+                      disabled={
+                        pending ||
+                        (assistantSelectionOpen &&
+                          (completed ||
+                            (!effectiveSelectedTaskIds.has(task.id) &&
+                              effectiveSelectedTaskIds.size >= assistantTaskLimit)))
+                      }
+                      onClick={() => {
+                        if (assistantSelectionOpen) {
+                          toggleAssistantTask(task.id);
+                          return;
+                        }
                         void onUpdateStatus(task.id, completed ? 'todo' : 'completed').catch(
                           () => undefined,
-                        )
-                      }
+                        );
+                      }}
                     >
                       {pending ? (
                         <LoaderCircle className="is-spinning" size={19} />
+                      ) : assistantSelectionOpen ? (
+                        effectiveSelectedTaskIds.has(task.id) ? (
+                          <CheckSquare2 size={19} />
+                        ) : (
+                          <Square size={19} />
+                        )
                       ) : completed ? (
                         <CheckCircle2 size={19} />
                       ) : (
@@ -163,7 +264,7 @@ export function TaskPage({
                     <button
                       type="button"
                       className="task-page-row__title"
-                      disabled={pending}
+                      disabled={pending || assistantSelectionOpen}
                       onClick={() => onOpenRename(task)}
                     >
                       <strong>{task.title}</strong>
@@ -186,7 +287,7 @@ export function TaskPage({
                       <span className="sr-only">修改“{task.title}”的状态</span>
                       <select
                         value={task.status}
-                        disabled={pending}
+                        disabled={pending || assistantSelectionOpen}
                         onChange={(event) =>
                           void onUpdateStatus(task.id, event.target.value as TaskStatus).catch(
                             () => undefined,
@@ -205,7 +306,7 @@ export function TaskPage({
                       <span className="sr-only">修改“{task.title}”的安排</span>
                       <select
                         value={planningValue(task, todayDate)}
-                        disabled={pending}
+                        disabled={pending || assistantSelectionOpen}
                         onChange={(event) =>
                           void onUpdatePlanning(task.id, event.target.value as TaskPlanning).catch(
                             () => undefined,
@@ -226,7 +327,7 @@ export function TaskPage({
                       type="button"
                       className="task-page-row__edit"
                       aria-label={`编辑：${task.title}`}
-                      disabled={pending}
+                      disabled={pending || assistantSelectionOpen}
                       onClick={() => onOpenRename(task)}
                     >
                       <Pencil size={14} />

@@ -12,6 +12,7 @@ import {
   Pause,
   Play,
   Plus,
+  MessageSquareText,
   Sparkles,
   Target,
 } from 'lucide-react';
@@ -54,6 +55,7 @@ interface TodayDashboardProps {
   onRetrySchedule: () => void;
   onCreateSchedule: () => void;
   onOpenSchedule: (item: ScheduleItem) => void;
+  onOpenAssistant: () => void;
 }
 
 function formatTimer(seconds: number) {
@@ -91,6 +93,7 @@ export function TodayDashboard({
   onRetrySchedule,
   onCreateSchedule,
   onOpenSchedule,
+  onOpenAssistant,
 }: TodayDashboardProps) {
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
@@ -152,14 +155,21 @@ export function TodayDashboard({
                 : '正在同步今天的任务…'}
           </p>
         </div>
-        <div
-          className="streak-pill"
-          aria-label={`今日已完成 ${completedTasks} 项，共 ${todayTasks.length} 项`}
-        >
-          <CheckCircle2 size={16} aria-hidden="true" />
-          <span>
-            <strong>{taskReady ? `${completedTasks} / ${todayTasks.length}` : '—'}</strong> 今日完成
-          </span>
+        <div className="dashboard-hero__actions">
+          <button type="button" className="assistant-entry-button" onClick={onOpenAssistant}>
+            <MessageSquareText size={15} aria-hidden="true" />
+            询问 AI 今日安排
+          </button>
+          <div
+            className="streak-pill"
+            aria-label={`今日已完成 ${completedTasks} 项，共 ${todayTasks.length} 项`}
+          >
+            <CheckCircle2 size={16} aria-hidden="true" />
+            <span>
+              <strong>{taskReady ? `${completedTasks} / ${todayTasks.length}` : '—'}</strong>{' '}
+              今日完成
+            </span>
+          </div>
         </div>
       </header>
 

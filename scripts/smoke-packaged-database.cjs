@@ -209,6 +209,16 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
   );
   const packageMetadata = JSON.parse(await readFile(path.join(asarPath, 'package.json'), 'utf8'));
   assert.equal(typeof packageMetadata.main, 'string', 'Packaged package.json must declare main.');
+  assert.equal(
+    packageMetadata.dependencies?.openai,
+    undefined,
+    'Packaged app must not pull in an unused OpenAI SDK.',
+  );
+  assert.equal(
+    packageMetadata.dependencies?.['@openai/codex'],
+    undefined,
+    'Packaged app must not pull in the Codex CLI.',
+  );
 
   const normalizedMain = packageMetadata.main.replaceAll('\\', '/');
   const mainPath = path.resolve(asarPath, normalizedMain);
@@ -240,6 +250,13 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'search_data_protection',
     'terminal_workspace_preferences',
     'scheduled_automations',
+    'openai-api-key.v1.bin',
+    'safeStorage',
+    'https://api.openai.com/v1/responses',
+    'response.output_text.delta',
+    'response.completed',
+    'basic_text',
+    'gpt-5.6',
     'database-initialized-v1',
     'database-initializing-v1',
     'schema_migrations',
@@ -273,6 +290,13 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'automation:set-enabled',
     'automation:archive',
     'automation:changed',
+    'assistant:get-credential-status',
+    'assistant:configure-credential',
+    'assistant:remove-credential',
+    'assistant:get-snapshot',
+    'assistant:start',
+    'assistant:cancel',
+    'assistant:changed',
     'workspace:get-snapshot',
     'workspace:update-preferences',
     'inbox:get-snapshot',
@@ -428,6 +452,16 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     false,
     'Packaged Main must not pass an arbitrary working directory into WSL.',
   );
+  for (const forbiddenAssistantConfiguration of [
+    'DAILY_WORKBENCH_ASSISTANT_ENDPOINT',
+    'OPENAI_API_KEY',
+  ]) {
+    assert.equal(
+      mainBundle.includes(forbiddenAssistantConfiguration),
+      false,
+      `Packaged Main must not read assistant configuration from ${forbiddenAssistantConfiguration}.`,
+    );
+  }
   for (const shortcutToken of ['before-input-event', 'isComposing']) {
     assert.ok(
       countOccurrences(mainBundle, shortcutToken) >= 2,
@@ -475,6 +509,13 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'automation:set-enabled',
     'automation:archive',
     'automation:changed',
+    'assistant:get-credential-status',
+    'assistant:configure-credential',
+    'assistant:remove-credential',
+    'assistant:get-snapshot',
+    'assistant:start',
+    'assistant:cancel',
+    'assistant:changed',
     'workspace:get-snapshot',
     'workspace:update-preferences',
     'inbox:get-snapshot',
@@ -562,10 +603,40 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
       `Packaged bundles expose forbidden automation channel ${forbiddenAutomationChannel}.`,
     );
   }
+  for (const forbiddenAssistantChannel of [
+    'assistant:set-endpoint',
+    'assistant:set-model',
+    'assistant:set-system-prompt',
+    'assistant:execute-tool',
+    'assistant:run-command',
+    'assistant:read-file',
+    'assistant:open-url',
+    'assistant:run-automation',
+    'assistant:save-note',
+    'assistant:create-task',
+  ]) {
+    assert.equal(
+      mainBundle.includes(forbiddenAssistantChannel) ||
+        preloadBundle.includes(forbiddenAssistantChannel),
+      false,
+      `Packaged bundles expose forbidden assistant channel ${forbiddenAssistantChannel}.`,
+    );
+  }
 
   const rendererBundle = await readRendererText(
     path.join(asarPath, '.vite', 'renderer', 'main_window'),
   );
+  for (const forbiddenClientProviderToken of [
+    'https://api.openai.com/v1/responses',
+    'OPENAI_API_KEY',
+  ]) {
+    assert.equal(
+      preloadBundle.includes(forbiddenClientProviderToken) ||
+        rendererBundle.includes(forbiddenClientProviderToken),
+      false,
+      `Packaged Preload/Renderer must not own provider configuration ${forbiddenClientProviderToken}.`,
+    );
+  }
   assert.ok(
     rendererBundle.includes('onOpenUrlRequest'),
     'Packaged renderer does not subscribe to trusted browser URL requests.',
@@ -601,6 +672,19 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     assert.ok(
       rendererBundle.includes(requiredAutomationRendererToken),
       `Packaged renderer does not contain automation UI token ${requiredAutomationRendererToken}.`,
+    );
+  }
+  for (const requiredAssistantRendererToken of [
+    'assistant-page',
+    '只使用你为这次问题明确选择的工作区上下文。',
+    '发送前不会自动读取数据。',
+    'OpenAI API 用量单独计费，不包含在 ChatGPT 订阅中。',
+    'AI 助手拒绝降级保存密钥。',
+    '只有点击“保存为笔记”才会写入 SQLite',
+  ]) {
+    assert.ok(
+      rendererBundle.includes(requiredAssistantRendererToken),
+      `Packaged renderer does not contain assistant UI token ${requiredAssistantRendererToken}.`,
     );
   }
   for (const forbiddenToken of [
