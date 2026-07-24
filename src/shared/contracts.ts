@@ -60,6 +60,14 @@ export const IPC_CHANNELS = {
     update: 'schedule:update',
     archive: 'schedule:archive',
   },
+  focus: {
+    getSnapshot: 'focus:get-snapshot',
+    start: 'focus:start',
+    pause: 'focus:pause',
+    resume: 'focus:resume',
+    cancel: 'focus:cancel',
+    changed: 'focus:changed',
+  },
   automation: {
     getSnapshot: 'automation:get-snapshot',
     create: 'automation:create',
@@ -350,6 +358,7 @@ export interface DataImportCounts {
   readonly browserBookmarks: number;
   readonly automations: number;
   readonly enabledAutomations: number;
+  readonly focusSessions: number;
 }
 
 export interface DataImportPreview {
@@ -653,6 +662,48 @@ export interface ScheduleUpdateInput extends ScheduleTargetInput {
   readonly kind: ScheduleKind;
   readonly startMinute: number;
   readonly endMinute: number;
+}
+
+export const FOCUS_STATES = ['running', 'paused', 'completed', 'cancelled'] as const;
+
+export type FocusState = (typeof FOCUS_STATES)[number];
+
+export interface FocusSession {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly workspaceName: string;
+  readonly taskId: string | null;
+  readonly taskTitle: string | null;
+  readonly status: FocusState;
+  readonly remainingSeconds: number;
+  readonly deadlineAt: string | null;
+  readonly revision: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface FocusSnapshot {
+  readonly workspaceId: string;
+  readonly todayDate: string;
+  readonly observedAt: string;
+  readonly session: FocusSession | null;
+  readonly todayCompletedCount: number;
+}
+
+export interface FocusStartInput {
+  readonly workspaceId: string;
+  readonly taskId?: string;
+}
+
+export interface FocusTargetInput {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly expectedRevision: number;
+}
+
+export interface FocusChangedEvent {
+  readonly workspaceId: string;
+  readonly reason: 'transition' | 'timer' | 'external';
 }
 
 export const AUTOMATION_CADENCES = ['daily', 'weekly'] as const;
@@ -1015,6 +1066,14 @@ export interface WorkbenchApi {
     create(input: ScheduleCreateInput): Promise<ScheduleSnapshot>;
     update(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archive(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
+  };
+  focus: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<FocusSnapshot>;
+    start(input: FocusStartInput): Promise<FocusSnapshot>;
+    pause(input: FocusTargetInput): Promise<FocusSnapshot>;
+    resume(input: FocusTargetInput): Promise<FocusSnapshot>;
+    cancel(input: FocusTargetInput): Promise<FocusSnapshot>;
+    onChanged(listener: (event: FocusChangedEvent) => void): Unsubscribe;
   };
   automation: {
     getSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;

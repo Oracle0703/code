@@ -43,11 +43,11 @@ describe('v9 scheduled automation schema', () => {
 
   it('registers v9 after terminal preferences and creates the three state tables', async () => {
     const database = await createDatabase();
-    expect(new MigrationRunner(DEFAULT_MIGRATIONS).apply(database)).toMatchObject({
+    expect(new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 9)).apply(database)).toMatchObject({
       fromVersion: 0,
       toVersion: 9,
     });
-    expect(DEFAULT_MIGRATIONS.at(-1)).toMatchObject({
+    expect(DEFAULT_MIGRATIONS[8]).toMatchObject({
       version: 9,
       name: 'scheduled_automations',
     });
@@ -330,7 +330,7 @@ async function createDatabase(): Promise<SqliteAdapter> {
 
 async function createV9Database(): Promise<SqliteAdapter> {
   const database = await createDatabase();
-  new MigrationRunner(DEFAULT_MIGRATIONS).apply(database);
+  new MigrationRunner(DEFAULT_MIGRATIONS.slice(0, 9)).apply(database);
   return database;
 }
 

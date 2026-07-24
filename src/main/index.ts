@@ -26,6 +26,7 @@ import {
   FileReplacementMarkerPersistence,
 } from './data-management';
 import { DatabaseError, DatabaseService } from './database';
+import { FocusController } from './focus';
 import { registerIpcHandlers } from './ipc/register-handlers';
 import { isAllowedBrowserUrl } from './security/browser-url';
 import {
@@ -34,6 +35,7 @@ import {
   runAfterCloseApproval,
   settleShutdownsBefore,
 } from './shutdown-coordinator';
+import { AsyncSingleFlight, settleStartupStage } from './startup-coordinator';
 import { createTrustedRendererLocation } from './security/trusted-renderer';
 import { TerminalConfigurationService } from './terminal/terminal-configuration-service';
 import { TerminalManager } from './terminal/terminal-manager';
@@ -41,14 +43,17 @@ import { WindowCloseCoordinator } from './window-close-coordinator';
 import { createWorkspaceIpcAdapter } from './workspace-ipc-adapter';
 
 let mainWindow: BrowserWindow | null = null;
+const mainWindowCreation = new AsyncSingleFlight<boolean>();
 let databaseService: DatabaseService | null = null;
 let dataManagementController: DataManagementController | null = null;
 let automationController: AutomationController | null = null;
+let focusController: FocusController | null = null;
 let assistantController: AssistantController | null = null;
 let databaseShutdownPromise: Promise<void> | null = null;
 let replacementPreparationPromise: Promise<void> | null = null;
 let replacementRestartPromise: Promise<void> | null = null;
 let allowQuit = false;
+let applicationQuitRequested = false;
 let startupFailureShown = false;
 const runtimeShutdowns = new Set<() => Promise<void>>();
 const replacementRuntimePreparations = new Set<() => Promise<void>>();
@@ -56,8 +61,38 @@ const closeApprovalRequests = new Set<(reason: WindowCloseReason) => Promise<boo
 const approvedCloseSurfaces = new Set<BrowserWindow>();
 let quitApprovalPromise: Promise<void> | null = null;
 
+interface StartupRuntimeIdentity {
+  readonly database: DatabaseService;
+  readonly data?: DataManagementController;
+  readonly automation?: AutomationController;
+  readonly focus?: FocusController;
+  readonly assistant?: AssistantController;
+}
+
 if (squirrelStartup) {
   app.quit();
+}
+
+function startupCanContinue(expected: StartupRuntimeIdentity): boolean {
+  return (
+    !applicationQuitRequested &&
+    !databaseShutdownPromise &&
+    !replacementPreparationPromise &&
+    !replacementRestartPromise &&
+    databaseService === expected.database &&
+    (expected.data === undefined || dataManagementController === expected.data) &&
+    (expected.automation === undefined || automationController === expected.automation) &&
+    (expected.focus === undefined || focusController === expected.focus) &&
+    (expected.assistant === undefined || assistantController === expected.assistant)
+  );
+}
+
+async function stopDiscardedStartupRuntime(name: string, stop: () => Promise<void>): Promise<void> {
+  try {
+    await stop();
+  } catch (error) {
+    console.error(`Daily Workbench failed to stop a cancelled ${name} startup.`, error);
+  }
 }
 
 function sendToRenderer(channel: string, payload: unknown): void {
@@ -76,9 +111,13 @@ async function createMainWindow(
   database: DatabaseService,
   data: DataManagementController,
   automation: AutomationController,
+  focus: FocusController,
   assistant: AssistantController,
-): Promise<void> {
-  const initialWorkspaceSnapshot = await database.getWorkspaceSnapshot();
+  canContinue: () => boolean = () => true,
+): Promise<boolean> {
+  const snapshotStage = await settleStartupStage(database.getWorkspaceSnapshot(), canContinue);
+  if (snapshotStage.status === 'cancelled') return false;
+  const initialWorkspaceSnapshot = snapshotStage.value;
   let rendererWorkspaceId = initialWorkspaceSnapshot.currentWorkspaceId;
   const rendererHtmlPath = join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`);
   const isDevelopmentRenderer = Boolean(MAIN_WINDOW_VITE_DEV_SERVER_URL);
@@ -190,7 +229,15 @@ async function createMainWindow(
       rendererWorkspaceId = snapshot.currentWorkspaceId;
       assistant.setActiveWorkspace(snapshot.currentWorkspaceId);
     },
-    (workspaceId) => assistant.discardWorkspace(workspaceId),
+    (workspaceId) => {
+      assistant.discardWorkspace(workspaceId);
+      void focus.handleExternalChange().catch((error: unknown) => {
+        console.error(
+          'Daily Workbench failed to reconcile focus after a workspace archive.',
+          error,
+        );
+      });
+    },
   );
   const unregisterIpc = registerIpcHandlers({
     window,
@@ -207,6 +254,13 @@ async function createMainWindow(
     task: database,
     note: database,
     schedule: database,
+    focus: {
+      getSnapshot: (input) => focus.getSnapshot(input),
+      start: (input) => focus.startSession(input),
+      pause: (input) => focus.pauseSession(input),
+      resume: (input) => focus.resumeSession(input),
+      cancel: (input) => focus.cancelSession(input),
+    },
     automation,
     assistant,
     terminal,
@@ -250,7 +304,7 @@ async function createMainWindow(
   });
 
   window.once('ready-to-show', () => {
-    window.show();
+    if (canContinue() && mainWindow === window && !window.isDestroyed()) window.show();
   });
 
   let cleanedUp = false;
@@ -342,10 +396,29 @@ async function createMainWindow(
   });
 
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    await window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+    const loadStage = await settleStartupStage(
+      window.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL),
+      canContinue,
+    );
+    return loadStage.status === 'ready';
   } else {
-    await window.loadFile(rendererHtmlPath);
+    const loadStage = await settleStartupStage(window.loadFile(rendererHtmlPath), canContinue);
+    return loadStage.status === 'ready';
   }
+}
+
+function ensureMainWindow(
+  database: DatabaseService,
+  data: DataManagementController,
+  automation: AutomationController,
+  focus: FocusController,
+  assistant: AssistantController,
+  canContinue: () => boolean,
+): Promise<boolean> {
+  if (mainWindow && !mainWindow.isDestroyed()) return Promise.resolve(true);
+  return mainWindowCreation.run(() =>
+    createMainWindow(database, data, automation, focus, assistant, canContinue),
+  );
 }
 
 function currentWindowForDialog(): BrowserWindow {
@@ -375,6 +448,7 @@ function prepareForDataReplacement(): Promise<void> {
   if (replacementPreparationPromise) return replacementPreparationPromise;
   const activeData = dataManagementController;
   const activeAutomation = automationController;
+  const activeFocus = focusController;
   const activeAssistant = assistantController;
   prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
     console.error('Daily Workbench failed to hide a window before data replacement.', error);
@@ -384,6 +458,7 @@ function prepareForDataReplacement(): Promise<void> {
     ...replacementRuntimePreparations,
     ...(activeAssistant ? [() => activeAssistant.stop()] : []),
     ...(activeAutomation ? [() => activeAutomation.stop()] : []),
+    ...(activeFocus ? [() => activeFocus.stop()] : []),
     ...(activeData ? [() => activeData.stop()] : []),
   ];
   replacementPreparationPromise = (async () => {
@@ -408,6 +483,7 @@ function restartForDataReplacement(): Promise<void> {
   const activeDatabase = databaseService;
   const activeData = dataManagementController;
   const activeAutomation = automationController;
+  const activeFocus = focusController;
   const activeAssistant = assistantController;
   prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
     console.error('Daily Workbench failed to hide a window before data replacement.', error);
@@ -420,6 +496,7 @@ function restartForDataReplacement(): Promise<void> {
           ...runtimeShutdowns,
           ...(activeAssistant ? [() => activeAssistant.stop()] : []),
           ...(activeAutomation ? [() => activeAutomation.stop()] : []),
+          ...(activeFocus ? [() => activeFocus.stop()] : []),
           ...(activeData ? [() => activeData.stop()] : []),
         ],
         () => activeDatabase.close(),
@@ -438,6 +515,7 @@ function restartForDataReplacement(): Promise<void> {
     databaseService = null;
     dataManagementController = null;
     automationController = null;
+    focusController = null;
     assistantController = null;
     allowQuit = true;
     finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
@@ -618,7 +696,11 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('before-quit', (event) => {
-    if (allowQuit || !databaseService) {
+    if (allowQuit) {
+      return;
+    }
+    if (!databaseService) {
+      applicationQuitRequested = true;
       return;
     }
 
@@ -627,10 +709,12 @@ if (!hasSingleInstanceLock) {
       const activeDatabase = databaseService;
       const activeData = dataManagementController;
       const activeAutomation = automationController;
+      const activeFocus = focusController;
       const activeAssistant = assistantController;
       quitApprovalPromise = runAfterCloseApproval(
         [...closeApprovalRequests].map((requestApproval) => () => requestApproval('application')),
         async () => {
+          applicationQuitRequested = true;
           prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
             console.error('Daily Workbench failed to disable a window before quitting.', error);
           });
@@ -639,6 +723,7 @@ if (!hasSingleInstanceLock) {
               ...runtimeShutdowns,
               ...(activeAssistant ? [() => activeAssistant.stop()] : []),
               ...(activeAutomation ? [() => activeAutomation.stop()] : []),
+              ...(activeFocus ? [() => activeFocus.stop()] : []),
               ...(activeData ? [() => activeData.stop()] : []),
             ],
             () => activeDatabase.close(),
@@ -656,6 +741,7 @@ if (!hasSingleInstanceLock) {
               databaseService = null;
               dataManagementController = null;
               automationController = null;
+              focusController = null;
               assistantController = null;
               allowQuit = true;
               finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
@@ -684,7 +770,12 @@ if (!hasSingleInstanceLock) {
       }
 
       const dataDirectory = join(app.getPath('userData'), 'data');
-      const replacementOutcome = await recoverDatabaseReplacement(dataDirectory);
+      const recoveryStage = await settleStartupStage(
+        recoverDatabaseReplacement(dataDirectory),
+        () => !applicationQuitRequested,
+      );
+      if (recoveryStage.status === 'cancelled') return;
+      const replacementOutcome = recoveryStage.value;
       if (replacementOutcome === 'rolled-back') {
         dialog.showErrorBox(
           'Daily Workbench restored your previous data',
@@ -695,14 +786,25 @@ if (!hasSingleInstanceLock) {
         dataDirectory,
       });
       databaseService = database;
-      await database.open();
-      if (databaseShutdownPromise) {
-        return;
-      }
+      const databaseStage = await settleStartupStage(database.open(), () =>
+        startupCanContinue({ database }),
+      );
+      if (databaseStage.status === 'cancelled') return;
 
-      const data = await createDataManagementController(database, dataDirectory);
+      const dataStage = await settleStartupStage(
+        createDataManagementController(database, dataDirectory),
+        () => startupCanContinue({ database }),
+        (discarded) =>
+          stopDiscardedStartupRuntime('data-management controller', () => discarded.stop()),
+      );
+      if (dataStage.status === 'cancelled') return;
+      const data = dataStage.value;
       dataManagementController = data;
-      const workspaceSnapshot = await database.getWorkspaceSnapshot();
+      const workspaceStage = await settleStartupStage(database.getWorkspaceSnapshot(), () =>
+        startupCanContinue({ database, data }),
+      );
+      if (workspaceStage.status === 'cancelled') return;
+      const workspaceSnapshot = workspaceStage.value;
       const assistant = new AssistantController({
         initialWorkspaceId: workspaceSnapshot.currentWorkspaceId,
         contextBuilder: new AssistantContextBuilder(database),
@@ -726,9 +828,44 @@ if (!hasSingleInstanceLock) {
         },
       });
       automationController = automation;
-      await automation.start();
-      await createMainWindow(database, data, automation, assistant);
-      await data.start();
+      const focus = new FocusController({
+        database,
+        onChanged: (event) => {
+          sendToRenderer(IPC_CHANNELS.focus.changed, event);
+        },
+        onError: (error) => {
+          console.error('Daily Workbench focus reconciliation failed.', error);
+        },
+      });
+      focusController = focus;
+      const runtimeIdentity = { database, data, automation, focus, assistant } as const;
+      const focusStage = await settleStartupStage(
+        focus.start(),
+        () => startupCanContinue(runtimeIdentity),
+        () => stopDiscardedStartupRuntime('focus controller', () => focus.stop()),
+      );
+      if (focusStage.status === 'cancelled') return;
+      const automationStage = await settleStartupStage(
+        automation.start(),
+        () => startupCanContinue(runtimeIdentity),
+        () => stopDiscardedStartupRuntime('automation controller', () => automation.stop()),
+      );
+      if (automationStage.status === 'cancelled') return;
+      const windowCreated = await ensureMainWindow(
+        database,
+        data,
+        automation,
+        focus,
+        assistant,
+        () => startupCanContinue(runtimeIdentity),
+      );
+      if (!windowCreated || !startupCanContinue(runtimeIdentity)) return;
+      const dataStartStage = await settleStartupStage(
+        data.start(),
+        () => startupCanContinue(runtimeIdentity),
+        () => stopDiscardedStartupRuntime('data-management controller', () => data.stop()),
+      );
+      if (dataStartStage.status === 'cancelled') return;
 
       powerMonitor.on('resume', () => {
         const activeAutomation = automationController;
@@ -740,26 +877,46 @@ if (!hasSingleInstanceLock) {
             );
           });
         }
+        const activeFocus = focusController;
+        if (activeFocus && !databaseShutdownPromise) {
+          void activeFocus.evaluate().catch((error: unknown) => {
+            console.error('Daily Workbench failed to reconcile focus after system resume.', error);
+          });
+        }
       });
 
       app.on('activate', () => {
         const activeDatabase = databaseService;
         const activeAutomation = automationController;
+        const activeFocus = focusController;
         const activeAssistant = assistantController;
         if (
           activeDatabase &&
           activeAutomation &&
+          activeFocus &&
           activeAssistant &&
+          !applicationQuitRequested &&
           !databaseShutdownPromise &&
+          !replacementPreparationPromise &&
+          !replacementRestartPromise &&
           BrowserWindow.getAllWindows().length === 0
         ) {
           const activeData = dataManagementController;
           if (activeData) {
-            void createMainWindow(
+            const runtimeIdentity = {
+              database: activeDatabase,
+              data: activeData,
+              automation: activeAutomation,
+              focus: activeFocus,
+              assistant: activeAssistant,
+            } as const;
+            void ensureMainWindow(
               activeDatabase,
               activeData,
               activeAutomation,
+              activeFocus,
               activeAssistant,
+              () => startupCanContinue(runtimeIdentity),
             ).catch(quitAfterStartupFailure);
           }
         }

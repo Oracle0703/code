@@ -34,6 +34,9 @@ const TAB_ID = '88888888-8888-4888-8888-888888888888';
 const BOOKMARK_ID = '99999999-9999-4999-8999-999999999999';
 const AUTOMATION_ID = '12121212-3434-4567-8abc-121212121212';
 const AUTOMATION_OUTPUT_NOTE_ID = '74747474-7474-4474-8474-747474747474';
+const PAUSED_FOCUS_ID = '13131313-1313-4131-8131-131313131313';
+const COMPLETED_FOCUS_ID = '14141414-1414-4141-8141-141414141414';
+const CANCELLED_FOCUS_ID = '15151515-1515-4151-8151-151515151515';
 const DATABASE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const EXPORT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const ROUND_TRIP_EXPORT_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -173,6 +176,194 @@ describe('portable database codec', () => {
     database.close();
   });
 
+  it('exports v3 focus history, pauses a running session, omits cancelled rows, and re-imports safely', async () => {
+    const directory = await createTemporaryDirectory();
+    const packageData = createFocusPackage();
+    expect(packageData.manifest).toMatchObject({
+      formatVersion: 3,
+      sourceSchemaVersion: 10,
+      counts: { focusSessions: 2 },
+    });
+    const sourcePath = await stagePackage(
+      directory,
+      '71000000-0000-4000-8000-000000000001',
+      '71000000-0000-4000-8000-000000000002',
+      packageData,
+      createDriver(),
+    );
+    const source = createNodeSqliteAdapter(sourcePath);
+    source.open();
+    expect(
+      source.all<Record<string, unknown>>(
+        `SELECT id, workspace_id, task_id, local_date, state, remaining_seconds,
+                deadline_at, revision, completed_at, cancelled_at
+         FROM focus_sessions
+         ORDER BY id`,
+      ),
+    ).toEqual([
+      {
+        id: PAUSED_FOCUS_ID,
+        workspace_id: ACTIVE_WORKSPACE_ID,
+        task_id: TASK_ID,
+        local_date: '2026-07-23',
+        state: 'paused',
+        remaining_seconds: 900,
+        deadline_at: null,
+        revision: 2,
+        completed_at: null,
+        cancelled_at: null,
+      },
+      {
+        id: COMPLETED_FOCUS_ID,
+        workspace_id: ARCHIVED_WORKSPACE_ID,
+        task_id: null,
+        local_date: '2026-07-22',
+        state: 'completed',
+        remaining_seconds: 0,
+        deadline_at: null,
+        revision: 3,
+        completed_at: T3,
+        cancelled_at: null,
+      },
+    ]);
+    source.run(
+      `UPDATE focus_sessions
+       SET state = 'running', deadline_at = ?, revision = revision + 1, updated_at = ?
+       WHERE id = ?`,
+      ['2026-07-23T08:20:00.000Z', '2026-07-23T08:07:00.000Z', PAUSED_FOCUS_ID],
+    );
+    source.run(
+      `INSERT INTO focus_sessions (
+         id, workspace_id, task_id, local_date, state, remaining_seconds,
+         deadline_at, revision, created_at, updated_at, completed_at, cancelled_at
+       ) VALUES (?, ?, NULL, '2026-07-23', 'cancelled', 600, NULL, 1, ?, ?, NULL, ?)`,
+      [CANCELLED_FOCUS_ID, ACTIVE_WORKSPACE_ID, T1, T6, T6],
+    );
+
+    const exportedRecords = readPortableDatabaseRecords(
+      source,
+      undefined,
+      () => new Date('2026-07-23T08:15:00.000Z'),
+    );
+    const exportedFocus = exportedRecords.filter(({ type }) => type === 'focus-session');
+    expect(exportedFocus).toHaveLength(2);
+    expect(exportedFocus.find(({ data }) => data.id === PAUSED_FOCUS_ID)).toEqual({
+      type: 'focus-session',
+      data: {
+        id: PAUSED_FOCUS_ID,
+        workspaceId: ACTIVE_WORKSPACE_ID,
+        taskId: TASK_ID,
+        status: 'paused',
+        remainingSeconds: 300,
+        revision: 3,
+        localDate: '2026-07-23',
+        createdAt: T1,
+        updatedAt: '2026-07-23T08:07:00.000Z',
+        completedAt: null,
+      },
+    });
+    expect(
+      readPortableDatabaseRecords(
+        source,
+        undefined,
+        () => new Date('2026-07-23T08:21:00.000Z'),
+      ).find(({ data }) => data.id === PAUSED_FOCUS_ID),
+    ).toEqual({
+      type: 'focus-session',
+      data: {
+        id: PAUSED_FOCUS_ID,
+        workspaceId: ACTIVE_WORKSPACE_ID,
+        taskId: TASK_ID,
+        status: 'completed',
+        remainingSeconds: 0,
+        revision: 3,
+        localDate: '2026-07-23',
+        createdAt: T1,
+        updatedAt: '2026-07-23T08:21:00.000Z',
+        completedAt: '2026-07-23T08:21:00.000Z',
+      },
+    });
+    expect(
+      source.get<Record<string, unknown>>(
+        `SELECT state, remaining_seconds, deadline_at, revision
+         FROM focus_sessions
+         WHERE id = ?`,
+        [PAUSED_FOCUS_ID],
+      ),
+    ).toEqual({
+      state: 'running',
+      remaining_seconds: 900,
+      deadline_at: '2026-07-23T08:20:00.000Z',
+      revision: 3,
+    });
+    source.run(
+      `UPDATE focus_sessions
+       SET state = 'paused', deadline_at = NULL, revision = 4, updated_at = ?
+       WHERE id = ?`,
+      ['2026-07-23T09:00:00.000Z', PAUSED_FOCUS_ID],
+    );
+    source.run(
+      `UPDATE focus_sessions
+       SET state = 'running', deadline_at = ?, revision = 5, updated_at = ?
+       WHERE id = ?`,
+      ['2026-07-23T08:20:00.000Z', '2026-07-23T09:00:00.000Z', PAUSED_FOCUS_ID],
+    );
+    expect(
+      readPortableDatabaseRecords(
+        source,
+        undefined,
+        () => new Date('2026-07-23T08:21:00.000Z'),
+      ).find(({ data }) => data.id === PAUSED_FOCUS_ID),
+    ).toMatchObject({
+      data: {
+        status: 'completed',
+        remainingSeconds: 0,
+        revision: 5,
+        updatedAt: '2026-07-23T09:00:00.000Z',
+        completedAt: '2026-07-23T09:00:00.000Z',
+      },
+    });
+    expect(exportedRecords.some(({ data }) => data.id === CANCELLED_FOCUS_ID)).toBe(false);
+    source.close();
+
+    const roundTripPackage = parsePortablePackage(
+      serializePortablePackage({
+        exportId: '71717171-7171-4171-8171-717171717172',
+        exportedAt: BUILD_TIME,
+        sourceAppVersion: '0.1.0',
+        sourceSchemaVersion: 10,
+        records: exportedRecords,
+      }),
+    );
+    expect(roundTripPackage.manifest.counts.focusSessions).toBe(2);
+    const roundTripPath = await stagePackage(
+      directory,
+      '71000000-0000-4000-8000-000000000003',
+      '71000000-0000-4000-8000-000000000004',
+      roundTripPackage,
+      createDriver(),
+    );
+    const roundTrip = createNodeSqliteAdapter(roundTripPath, { readOnly: true });
+    roundTrip.open();
+    expect(
+      roundTrip.get<Record<string, unknown>>(
+        `SELECT state, remaining_seconds, deadline_at, cancelled_at
+         FROM focus_sessions
+         WHERE id = ?`,
+        [PAUSED_FOCUS_ID],
+      ),
+    ).toEqual({
+      state: 'paused',
+      remaining_seconds: 300,
+      deadline_at: null,
+      cancelled_at: null,
+    });
+    expect(
+      readPortableDatabaseRecords(roundTrip).filter(({ type }) => type === 'focus-session'),
+    ).toEqual(exportedFocus);
+    roundTrip.close();
+  });
+
   it('round-trips archived-workspace history without charging it to the active limit', async () => {
     const directory = await createTemporaryDirectory();
     const archivedDefinitions = Array.from({ length: 100 }, (_, index) =>
@@ -289,6 +480,26 @@ describe('portable database codec', () => {
     occurrenceDatabase.close();
     await expect(occurrenceDriver.validate(occurrencePath, packageData)).rejects.toThrow(
       /freshly paused|latest occurrence/u,
+    );
+  });
+
+  it.each([
+    ['trigger', 'focus_sessions_state_transition_is_valid'],
+    ['index', 'focus_sessions_single_open'],
+  ] as const)('rejects a staged database with a weakened focus %s', async (type, name) => {
+    const directory = await createTemporaryDirectory();
+    const packageData = createFocusPackage();
+    const stagingPath = join(directory, `weakened-focus-${type}.sqlite3`);
+    const driver = createDriver();
+    await driver.build(packageData, stagingPath);
+
+    const database = createNodeSqliteAdapter(stagingPath);
+    database.open();
+    database.exec(`DROP ${type.toUpperCase()} ${name}`);
+    database.close();
+
+    await expect(driver.validate(stagingPath, packageData)).rejects.toThrow(
+      /focus session schema is invalid/iu,
     );
   });
 
@@ -507,7 +718,48 @@ describe('portable database codec', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
-  it('accepts v1 schema 7/8 and v2 schema 9 packages but rejects unsupported sources', async () => {
+  it('rejects unsafe or relationally invalid focus records before staging', async () => {
+    const directory = await createTemporaryDirectory();
+    const original = createFocusPackage();
+    const invalidPackages: readonly ParsedPortablePackage[] = [
+      mutateRecord(original, 'focus-session', (data) => ({
+        ...data,
+        status: 'running',
+      })),
+      mutateRecord(original, 'focus-session', (data) => ({
+        ...data,
+        remainingSeconds: 0,
+      })),
+      mutateRecord(original, 'focus-session', (data) => ({
+        ...data,
+        taskId: '16161616-1616-4161-8161-161616161616',
+      })),
+      mutateRecord(original, 'focus-session', (data) => ({
+        ...data,
+        workspaceId: ARCHIVED_WORKSPACE_ID,
+        taskId: null,
+      })),
+      mutateRecord(original, 'focus-session', (data) => ({
+        ...data,
+        localDate: '2026-02-30',
+      })),
+    ];
+
+    for (const [index, packageData] of invalidPackages.entries()) {
+      await expect(
+        stagePackage(
+          directory,
+          `51000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}`,
+          `52000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}`,
+          packageData,
+          createDriver(),
+        ),
+      ).rejects.toBeInstanceOf(DataPackageError);
+    }
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it('accepts exactly v1 schema 7/8, v2 schema 9, and v3 schema 10 packages', async () => {
     const directory = await createTemporaryDirectory();
     const legacyPath = await stagePackage(
       directory,
@@ -519,6 +771,9 @@ describe('portable database codec', () => {
     const legacy = createNodeSqliteAdapter(legacyPath, { readOnly: true });
     legacy.open();
     expect(legacy.get<{ count: number }>('SELECT COUNT(*) AS count FROM automations')).toEqual({
+      count: 0,
+    });
+    expect(legacy.get<{ count: number }>('SELECT COUNT(*) AS count FROM focus_sessions')).toEqual({
       count: 0,
     });
     legacy.close();
@@ -540,6 +795,15 @@ describe('portable database codec', () => {
         createDriver(),
       ),
     ).resolves.toContain('import-50000000-0000-4000-8000-000000000005.sqlite3');
+    await expect(
+      stagePackage(
+        directory,
+        '50000000-0000-4000-8000-00000000000b',
+        '50000000-0000-4000-8000-00000000000c',
+        createFocusPackage(),
+        createDriver(),
+      ),
+    ).resolves.toContain('import-50000000-0000-4000-8000-00000000000b.sqlite3');
     const unsupported = createPackage(8);
     await expect(
       stagePackage(
@@ -587,6 +851,20 @@ describe('portable database codec', () => {
     await expect(expectedDriver.validate(expectedPath, expectedPackage)).rejects.toThrow(
       /logical data does not match/u,
     );
+
+    const expectedFocusPath = join(directory, 'expected-focus.sqlite3');
+    const replacementFocusPath = join(directory, 'replacement-focus.sqlite3');
+    const expectedFocusDriver = createDriver();
+    const replacementFocusDriver = createDriver();
+    const expectedFocusPackage = createFocusPackage(900);
+    const replacementFocusPackage = createFocusPackage(899);
+    await expectedFocusDriver.build(expectedFocusPackage, expectedFocusPath);
+    await replacementFocusDriver.build(replacementFocusPackage, replacementFocusPath);
+    await rm(expectedFocusPath);
+    await rename(replacementFocusPath, expectedFocusPath);
+    await expect(
+      expectedFocusDriver.validate(expectedFocusPath, expectedFocusPackage),
+    ).rejects.toThrow(/logical data does not match/u);
 
     const corruptFtsPath = join(directory, 'corrupt-fts.sqlite3');
     const corruptFtsDriver = createDriver();
@@ -762,6 +1040,53 @@ function createAutomationPackage(): ParsedPortablePackage {
             createdAt: T1,
             updatedAt: T4,
             archivedAt: null,
+          },
+        },
+      ],
+    }),
+  );
+}
+
+function createFocusPackage(
+  pausedRemainingSeconds = 900,
+  pausedTaskId: string | null = TASK_ID,
+): ParsedPortablePackage {
+  return parsePortablePackage(
+    serializePortablePackage({
+      exportId: '71717171-7171-4171-8171-717171717173',
+      exportedAt: BUILD_TIME,
+      sourceAppVersion: '0.1.0',
+      sourceSchemaVersion: 10,
+      records: [
+        ...createRecords(),
+        {
+          type: 'focus-session',
+          data: {
+            id: PAUSED_FOCUS_ID,
+            workspaceId: ACTIVE_WORKSPACE_ID,
+            taskId: pausedTaskId,
+            status: 'paused',
+            remainingSeconds: pausedRemainingSeconds,
+            revision: 2,
+            localDate: '2026-07-23',
+            createdAt: T1,
+            updatedAt: T2,
+            completedAt: null,
+          },
+        },
+        {
+          type: 'focus-session',
+          data: {
+            id: COMPLETED_FOCUS_ID,
+            workspaceId: ARCHIVED_WORKSPACE_ID,
+            taskId: null,
+            status: 'completed',
+            remainingSeconds: 0,
+            revision: 3,
+            localDate: '2026-07-22',
+            createdAt: T1,
+            updatedAt: T4,
+            completedAt: T3,
           },
         },
       ],

@@ -35,6 +35,12 @@ import {
   normalizeInboxId,
 } from '../../shared/inbox-domain';
 import {
+  focusRemainingAt,
+  normalizeFocusRemainingSeconds,
+  normalizeFocusRevision,
+  normalizeFocusSessionId,
+} from '../../shared/focus-domain';
+import {
   normalizeNoteBody,
   normalizeNoteId,
   normalizeNoteRevision,
@@ -74,6 +80,7 @@ import {
   type SqliteAdapterFactory,
 } from '../database/sqlite-adapter';
 import type { Migration } from '../database/types';
+import { FocusRepository } from '../focus/focus-repository';
 import { InboxService } from '../inbox/inbox-service';
 import { NoteService } from '../notes/note-service';
 import { ScheduleService } from '../schedule/schedule-service';
@@ -83,6 +90,7 @@ import { TaskService } from '../tasks/task-service';
 import { TerminalPreferenceRepository } from '../terminal/terminal-preference-repository';
 import { WorkspaceService } from '../workspaces/workspace-service';
 import {
+  AUTOMATION_DATA_PACKAGE_FORMAT_VERSION,
   DATA_PACKAGE_FORMAT,
   DATA_PACKAGE_FORMAT_VERSION,
   LEGACY_DATA_PACKAGE_FORMAT_VERSION,
@@ -96,8 +104,8 @@ import {
 } from './package-format';
 import { DEFAULT_MAX_IMPORT_STAGING_BYTES, type ImportStagingDriver } from './staging';
 
-export const PORTABLE_DATABASE_SCHEMA_VERSION = 9;
-export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8, 9] as const);
+export const PORTABLE_DATABASE_SCHEMA_VERSION = 10;
+export const SUPPORTED_PORTABLE_SOURCE_SCHEMA_VERSIONS = Object.freeze([7, 8, 9, 10] as const);
 const MAX_PORTABLE_LOGICAL_RECORDS = 100_000;
 const MAX_PORTABLE_WORKSPACES = 500;
 const MAX_PORTABLE_BROWSER_TABS = 6_000;
@@ -225,6 +233,19 @@ interface AutomationDefinitionRecord {
   readonly archivedAt: string | null;
 }
 
+interface FocusSessionRecord {
+  readonly id: string;
+  readonly workspaceId: string;
+  readonly taskId: string | null;
+  readonly status: 'paused' | 'completed';
+  readonly remainingSeconds: number;
+  readonly revision: number;
+  readonly localDate: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly completedAt: string | null;
+}
+
 interface PortableDatabaseModel {
   readonly appState: AppStateRecord;
   readonly workspaces: readonly WorkspaceRecord[];
@@ -237,6 +258,7 @@ interface PortableDatabaseModel {
   readonly browserStates: readonly BrowserStateRecord[];
   readonly browserBookmarks: readonly BrowserBookmarkRecord[];
   readonly automations: readonly AutomationDefinitionRecord[];
+  readonly focusSessions: readonly FocusSessionRecord[];
 }
 
 /**
@@ -246,9 +268,10 @@ interface PortableDatabaseModel {
 export function readPortableDatabaseRecords(
   database: SqliteAdapter,
   migrations: readonly Migration[] = DEFAULT_MIGRATIONS,
+  now: () => Date = () => new Date(),
 ): readonly PortableDataRecord[] {
   validateDatabaseSnapshot(database, migrations);
-  const records = readRawPortableRecords(database);
+  const records = readRawPortableRecords(database, readClockDate(now));
   decodePortableRecords(records);
   return records;
 }
@@ -374,7 +397,13 @@ export class DatabaseImportStagingDriver implements ImportStagingDriver {
   }
 }
 
-function readRawPortableRecords(database: SqliteAdapter): PortableDataRecord[] {
+function readRawPortableRecords(
+  database: SqliteAdapter,
+  exportNow = new Date(),
+): PortableDataRecord[] {
+  if (!Number.isFinite(exportNow.getTime())) {
+    throw new TypeError('The portable database clock is invalid.');
+  }
   const records: PortableDataRecord[] = [];
   for (const row of database.all<Record<string, unknown>>(
     `SELECT current_workspace_id AS currentWorkspaceId, updated_at AS updatedAt
@@ -592,6 +621,62 @@ function readRawPortableRecords(database: SqliteAdapter): PortableDataRecord[] {
       }),
     );
   }
+  for (const row of database.all<Record<string, unknown>>(
+    `SELECT id, workspace_id AS workspaceId, task_id AS taskId, state,
+            remaining_seconds AS remainingSeconds, deadline_at AS deadlineAt,
+            revision, local_date AS localDate, created_at AS createdAt,
+            updated_at AS updatedAt, completed_at AS completedAt
+     FROM focus_sessions
+     WHERE state <> 'cancelled'
+     ORDER BY workspace_id, local_date, created_at, id`,
+  )) {
+    const sourceState = readSqlString(row.state, 'focus session state');
+    const storedRemaining = readSqlInteger(row.remainingSeconds, 'focus session remaining time');
+    const storedRevision = readSqlInteger(row.revision, 'focus session revision');
+    const storedUpdatedAt = readSqlString(row.updatedAt, 'focus session update timestamp');
+    const storedCompletedAt = readSqlNullableString(
+      row.completedAt,
+      'focus session completion timestamp',
+    );
+    let status: FocusSessionRecord['status'];
+    let remainingSeconds: number;
+    let updatedAt = storedUpdatedAt;
+    let completedAt = storedCompletedAt;
+    if (sourceState === 'running') {
+      remainingSeconds = focusRemainingAt(
+        storedRemaining,
+        readSqlString(row.deadlineAt, 'focus session deadline'),
+        exportNow,
+      );
+      if (remainingSeconds === 0) {
+        status = 'completed';
+        const exportTimestamp = exportNow.toISOString();
+        updatedAt = storedUpdatedAt > exportTimestamp ? storedUpdatedAt : exportTimestamp;
+        completedAt = updatedAt;
+      } else {
+        status = 'paused';
+      }
+    } else if (sourceState === 'paused' || sourceState === 'completed') {
+      status = sourceState;
+      remainingSeconds = storedRemaining;
+    } else {
+      throw new DatabaseIntegrityError('The portable focus session state is invalid.');
+    }
+    records.push(
+      portableRecord('focus-session', {
+        id: readSqlString(row.id, 'focus session id'),
+        workspaceId: readSqlString(row.workspaceId, 'focus session workspace id'),
+        taskId: readSqlNullableString(row.taskId, 'focus session task id'),
+        status,
+        remainingSeconds,
+        revision: storedRevision,
+        localDate: readSqlString(row.localDate, 'focus session local date'),
+        createdAt: readSqlString(row.createdAt, 'focus session creation timestamp'),
+        updatedAt,
+        completedAt,
+      }),
+    );
+  }
   return records;
 }
 
@@ -602,8 +687,10 @@ function decodePortablePackage(packageData: ParsedPortablePackage): PortableData
     (packageData.manifest.formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION &&
       (packageData.manifest.sourceSchemaVersion === 7 ||
         packageData.manifest.sourceSchemaVersion === 8)) ||
+    (packageData.manifest.formatVersion === AUTOMATION_DATA_PACKAGE_FORMAT_VERSION &&
+      packageData.manifest.sourceSchemaVersion === 9) ||
     (packageData.manifest.formatVersion === DATA_PACKAGE_FORMAT_VERSION &&
-      packageData.manifest.sourceSchemaVersion === 9);
+      packageData.manifest.sourceSchemaVersion === 10);
   if (
     packageData.manifest.format !== DATA_PACKAGE_FORMAT ||
     !formatMatchesSchema ||
@@ -620,6 +707,12 @@ function decodePortablePackage(packageData: ParsedPortablePackage): PortableData
     model.automations.length !== 0
   ) {
     throw new DataPackageError('A legacy data package cannot contain automation definitions.');
+  }
+  if (
+    packageData.manifest.formatVersion !== DATA_PACKAGE_FORMAT_VERSION &&
+    model.focusSessions.length !== 0
+  ) {
+    throw new DataPackageError('An older data package cannot contain focus sessions.');
   }
   const counts = countPortableModel(model);
   if (!sameCounts(packageData.manifest.counts, counts)) {
@@ -647,6 +740,7 @@ function decodePortableRecords(records: readonly PortableDataRecord[]): Portable
   const browserStates: BrowserStateRecord[] = [];
   const browserBookmarks: BrowserBookmarkRecord[] = [];
   const automations: AutomationDefinitionRecord[] = [];
+  const focusSessions: FocusSessionRecord[] = [];
 
   for (const value of records as readonly unknown[]) {
     assertExactObjectKeys(value, ['data', 'type'], 'The data package record is invalid.');
@@ -695,6 +789,9 @@ function decodePortableRecords(records: readonly PortableDataRecord[]): Portable
       case 'automation-definition':
         automations.push(decodeAutomationDefinition(data));
         break;
+      case 'focus-session':
+        focusSessions.push(decodeFocusSession(data));
+        break;
     }
   }
   if (!appState) {
@@ -731,6 +828,10 @@ function decodePortableRecords(records: readonly PortableDataRecord[]): Portable
       automations,
       (item) => `${item.workspaceId}\0${item.createdAt}\0${item.id}`,
     ),
+    focusSessions: sortBy(
+      focusSessions,
+      (item) => `${item.workspaceId}\0${item.localDate}\0${item.createdAt}\0${item.id}`,
+    ),
   };
   validatePortableModelLimits(model);
   validatePortableRelationships(model);
@@ -749,7 +850,8 @@ function validatePortableModelLimits(model: PortableDatabaseModel): void {
     model.browserTabs.length +
     model.browserStates.length +
     model.browserBookmarks.length +
-    model.automations.length;
+    model.automations.length +
+    model.focusSessions.length;
   const activeWorkspaceIds = new Set(
     model.workspaces.filter(({ archivedAt }) => archivedAt === null).map(({ id }) => id),
   );
@@ -1127,6 +1229,74 @@ function decodeAutomationDefinition(value: unknown): AutomationDefinitionRecord 
   };
 }
 
+function decodeFocusSession(value: unknown): FocusSessionRecord {
+  const data = exactPayload(
+    value,
+    [
+      'completedAt',
+      'createdAt',
+      'id',
+      'localDate',
+      'remainingSeconds',
+      'revision',
+      'status',
+      'taskId',
+      'updatedAt',
+      'workspaceId',
+    ],
+    'focus session',
+  );
+  if (data.status !== 'paused' && data.status !== 'completed') {
+    throw new DataPackageError('The portable focus session state is invalid.');
+  }
+  const createdAt = readIsoTimestamp(data.createdAt, 'focus session creation time');
+  const updatedAt = readIsoTimestamp(data.updatedAt, 'focus session update time');
+  const completedAt = readNullableIsoTimestamp(data.completedAt, 'focus session completion time');
+  if (updatedAt < createdAt) {
+    throw new DataPackageError('The focus session update time precedes its creation time.');
+  }
+  if (
+    data.status === 'paused'
+      ? completedAt !== null
+      : completedAt === null || completedAt < createdAt || updatedAt < completedAt
+  ) {
+    throw new DataPackageError('The portable focus session timestamps are invalid.');
+  }
+  let remainingSeconds: number;
+  try {
+    remainingSeconds = normalizeFocusRemainingSeconds(
+      data.remainingSeconds,
+      data.status === 'completed',
+    );
+  } catch (error) {
+    throw new DataPackageError('The portable focus session remaining time is invalid.', {
+      cause: error,
+    });
+  }
+  if (data.status === 'completed' && remainingSeconds !== 0) {
+    throw new DataPackageError('A completed focus session must have no remaining time.');
+  }
+  return {
+    id: normalizedValue(data.id, normalizeFocusSessionId, 'focus session id'),
+    workspaceId: normalizedValue(
+      data.workspaceId,
+      normalizeWorkspaceId,
+      'focus session workspace id',
+    ),
+    taskId:
+      data.taskId === null
+        ? null
+        : normalizedValue(data.taskId, normalizeTaskId, 'focus session task id'),
+    status: data.status,
+    remainingSeconds,
+    revision: normalizedValue(data.revision, normalizeFocusRevision, 'focus session revision'),
+    localDate: normalizedValue(data.localDate, normalizeTaskCivilDate, 'focus session local date'),
+    createdAt,
+    updatedAt,
+    completedAt,
+  };
+}
+
 function validatePortableRelationships(model: PortableDatabaseModel): void {
   if (model.workspaces.length === 0) {
     throw new DataPackageError('The data package contains no workspaces.');
@@ -1168,7 +1338,7 @@ function validatePortableRelationships(model: PortableDatabaseModel): void {
     requireWorkspace(workspaces, entry.workspaceId, 'inbox entry');
   }
 
-  uniqueMap(model.tasks, ({ id }) => id, 'task');
+  const tasks = uniqueMap(model.tasks, ({ id }) => id, 'task');
   uniqueMap(model.notes, ({ id }) => id, 'note');
   const usedInboxSources = new Set<string>();
   for (const items of [model.tasks, model.notes]) {
@@ -1265,6 +1435,30 @@ function validatePortableRelationships(model: PortableDatabaseModel): void {
     }
     enabledAutomationCounts.set(automation.workspaceId, enabled);
   }
+
+  uniqueMap(model.focusSessions, ({ id }) => id, 'focus session');
+  let unfinishedFocusSessions = 0;
+  for (const session of model.focusSessions) {
+    const workspace = requireWorkspace(workspaces, session.workspaceId, 'focus session');
+    if (session.taskId !== null) {
+      const task = tasks.get(session.taskId);
+      if (!task || task.workspaceId !== session.workspaceId) {
+        throw new DataPackageError(
+          'An imported focus session points to a missing or cross-workspace task.',
+        );
+      }
+    }
+    if (session.status !== 'paused') continue;
+    unfinishedFocusSessions += 1;
+    if (workspace.archivedAt !== null) {
+      throw new DataPackageError(
+        'An unfinished focus session cannot belong to an archived workspace.',
+      );
+    }
+  }
+  if (unfinishedFocusSessions > 1) {
+    throw new DataPackageError('The data package contains more than one unfinished focus session.');
+  }
 }
 
 function updateLatestTimestamp(
@@ -1359,6 +1553,26 @@ function insertPortableModel(database: SqliteAdapter, model: PortableDatabaseMod
         task.createdAt,
         task.updatedAt,
         task.completedAt,
+      ],
+    );
+  }
+  for (const session of model.focusSessions) {
+    database.run(
+      `INSERT INTO focus_sessions (
+         id, workspace_id, task_id, state, remaining_seconds, deadline_at,
+         revision, local_date, created_at, updated_at, completed_at, cancelled_at
+       ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL)`,
+      [
+        session.id,
+        session.workspaceId,
+        session.taskId,
+        session.status,
+        session.remainingSeconds,
+        session.revision,
+        session.localDate,
+        session.createdAt,
+        session.updatedAt,
+        session.completedAt,
       ],
     );
   }
@@ -1577,6 +1791,7 @@ function validateDatabaseSnapshot(
   new BrowserService({ execute }).validateSnapshot(database);
   new SearchService({ execute }).validateSnapshot(database);
   new AutomationRepository(database).validateSnapshot();
+  new FocusRepository(database).validateSnapshot();
 
   const backup = new BackupPolicyRepository(database);
   const policy = backup.readPolicy();
@@ -1596,7 +1811,10 @@ function validateDatabaseSnapshot(
   ) {
     throw new DatabaseIntegrityError('The staged database backup run state is not fresh.');
   }
-  if (expectedBackupPolicy) validateImportedAutomationState(database);
+  if (expectedBackupPolicy) {
+    validateImportedAutomationState(database);
+    validateImportedFocusState(database);
+  }
 }
 
 function validateImportedAutomationState(database: SqliteAdapter): void {
@@ -1627,6 +1845,22 @@ function validateImportedAutomationState(database: SqliteAdapter): void {
   if (activeState || runState || occurrence) {
     throw new DatabaseIntegrityError(
       'The staged database automation definitions are not freshly paused.',
+    );
+  }
+}
+
+function validateImportedFocusState(database: SqliteAdapter): void {
+  const invalid = database.get<{ present: unknown }>(
+    `SELECT 1 AS present
+     FROM focus_sessions
+     WHERE state NOT IN ('paused', 'completed')
+        OR deadline_at IS NOT NULL
+        OR cancelled_at IS NOT NULL
+     LIMIT 1`,
+  );
+  if (invalid) {
+    throw new DatabaseIntegrityError(
+      'The staged database focus sessions are not safely paused or completed.',
     );
   }
 }
@@ -1721,6 +1955,7 @@ function digestPortableModel(model: PortableDatabaseModel): string {
   append('browser-state', model.browserStates);
   append('browser-bookmark', model.browserBookmarks);
   append('automation-definition', model.automations);
+  append('focus-session', model.focusSessions);
   return hash.digest('hex');
 }
 
@@ -1759,7 +1994,7 @@ function sqliteSidecarPaths(databasePath: string): readonly string[] {
 function assertCurrentMigrationSet(migrations: readonly Migration[]): void {
   const runner = new MigrationRunner(migrations);
   if (runner.latestVersion !== PORTABLE_DATABASE_SCHEMA_VERSION) {
-    throw new TypeError('The import codec requires the current v9 migration set.');
+    throw new TypeError('The import codec requires the current v10 migration set.');
   }
 }
 
@@ -1807,11 +2042,15 @@ function sameBackupPolicy(left: BackupPolicy, right: BackupPolicy): boolean {
 }
 
 function readClockTimestamp(now: () => Date): string {
+  return readClockDate(now).toISOString();
+}
+
+function readClockDate(now: () => Date): Date {
   const value = now();
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
     throw new TypeError('The import database clock is invalid.');
   }
-  return value.toISOString();
+  return value;
 }
 
 function countPortableModel(model: PortableDatabaseModel): DataImportCounts {
@@ -1826,6 +2065,7 @@ function countPortableModel(model: PortableDatabaseModel): DataImportCounts {
     browserBookmarks: model.browserBookmarks.length,
     automations: model.automations.length,
     enabledAutomations: model.automations.filter(({ enabled }) => enabled).length,
+    focusSessions: model.focusSessions.length,
   };
 }
 
@@ -1837,6 +2077,7 @@ function sameCounts(left: DataImportCounts, right: DataImportCounts): boolean {
     'browserBookmarks',
     'browserTabs',
     'enabledAutomations',
+    'focusSessions',
     'inboxEntries',
     'notes',
     'scheduleItems',

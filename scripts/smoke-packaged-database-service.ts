@@ -20,6 +20,7 @@ import {
   serializePortablePackage,
 } from '../src/main/data-portability';
 import { AutomationController } from '../src/main/automations';
+import { FocusController } from '../src/main/focus';
 import { InboxService } from '../src/main/inbox';
 import { BrowserService } from '../src/main/browser';
 import { NoteService } from '../src/main/notes';
@@ -58,6 +59,7 @@ const DAILY_AUTOMATION_ID = '35353535-3535-4535-8535-353535353535';
 const WEEKLY_AUTOMATION_ID = '36363636-3636-4636-8636-363636363636';
 const AUTOMATION_TASK_ID = '37373737-3737-4737-8737-373737373737';
 const AUTOMATION_NOTE_ID = '38383838-3838-4838-8838-383838383838';
+const FOCUS_SESSION_ID = '40404040-4040-4040-8040-404040404040';
 const FIXED_NOW = new Date('2026-07-22T12:34:56.000Z');
 const FIXED_TODAY = '2026-07-22';
 
@@ -78,8 +80,9 @@ async function main(): Promise<void> {
     await smokeVersionSixUpgrade(join(root, 'legacy v6 数据'));
     await smokeVersionSevenUpgrade(join(root, 'legacy v7 数据'));
     await smokeVersionEightUpgrade(join(root, 'legacy v8 数据'));
+    await smokeVersionNineUpgrade(join(root, 'legacy v9 数据'));
     console.log(
-      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
+      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/focus/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
         `(Electron ${process.versions.electron}, Node ${process.versions.node}, ` +
         `SQLite ${process.versions.sqlite}).`,
     );
@@ -116,12 +119,14 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     automationIdFactory: () => automationIds.shift() ?? '39393939-3939-4939-8939-393939393939',
     automationTaskIdFactory: () => AUTOMATION_TASK_ID,
     automationNoteIdFactory: () => AUTOMATION_NOTE_ID,
+    focusIdFactory: () => FOCUS_SESSION_ID,
+    focusTodayFactory: () => FIXED_TODAY,
   });
 
   try {
     const initialized = await service.open();
     assert.equal(initialized.migration.fromVersion, 0);
-    assert.equal(initialized.migration.toVersion, 9);
+    assert.equal(initialized.migration.toVersion, 10);
     assert.equal(initialized.preMigrationBackup, undefined);
 
     const status = await service.getStatus();
@@ -134,8 +139,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         backupCount: status.backupCount,
       },
       {
-        schemaVersion: 9,
-        appliedMigrations: 9,
+        schemaVersion: 10,
+        appliedMigrations: 10,
         journalMode: 'wal',
         integrityCheck: 'ok',
         backupCount: 0,
@@ -573,6 +578,37 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       (await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).entries,
       [],
     );
+    const focusController = createManualFocusController(service, () => serviceNow);
+    await focusController.start();
+    let focus = await focusController.startSession({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      taskId: CONVERTED_TASK_ID,
+    });
+    assert.equal(focus.session?.id, FOCUS_SESSION_ID);
+    assert.equal(focus.session?.workspaceId, DEFAULT_WORKSPACE_ID);
+    assert.equal(focus.session?.taskId, CONVERTED_TASK_ID);
+    assert.equal(focus.session?.status, 'running');
+    assert.equal(focus.session?.remainingSeconds, 1_500);
+    assert.equal(focus.session?.revision, 1);
+    assert.equal(focus.todayCompletedCount, 0);
+    focus = await focusController.pauseSession({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      sessionId: FOCUS_SESSION_ID,
+      expectedRevision: 1,
+    });
+    assert.equal(focus.session?.status, 'paused');
+    assert.equal(focus.session?.remainingSeconds, 1_500);
+    assert.equal(focus.session?.deadlineAt, null);
+    assert.equal(focus.session?.revision, 2);
+    focus = await focusController.resumeSession({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      sessionId: FOCUS_SESSION_ID,
+      expectedRevision: 2,
+    });
+    assert.equal(focus.session?.status, 'running');
+    assert.equal(focus.session?.remainingSeconds, 1_500);
+    assert.equal(focus.session?.revision, 3);
+    assert.ok(focus.session?.deadlineAt);
     snapshot = await service.activateWorkspace({ workspaceId: SECOND_WORKSPACE_ID });
     assert.deepEqual(
       {
@@ -676,11 +712,11 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
 
     const created = await service.createBackup();
     assert.equal(created.reason, 'manual');
-    assert.equal(created.schemaVersion, 9);
+    assert.equal(created.schemaVersion, 10);
     assert.equal('path' in created, false);
     const scheduled = await service.createScheduledBackup();
     assert.equal(scheduled.reason, 'scheduled');
-    assert.equal(scheduled.schemaVersion, 9);
+    assert.equal(scheduled.schemaVersion, 10);
     assert.equal('path' in scheduled, false);
     assert.deepEqual(await service.validateExistingBackup(scheduled.id, 'scheduled'), scheduled);
     assert.deepEqual(await service.pruneScheduledBackups(scheduled.id), {
@@ -699,14 +735,18 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       service,
       backupPolicy,
       [shortSearch, fullTextSearch],
+      serviceNow,
     );
+    // Deliberately bypass FocusController.stop(): graceful shutdown pauses a
+    // running session, while this close simulates process loss so reopen must
+    // reconcile the expired deadline exactly once.
     await service.close();
     service = undefined;
 
     const backupPath = join(dataDirectory, 'backups', created.fileName);
     const backup = new DatabaseSync(backupPath, { readOnly: true });
     try {
-      assert.equal(backup.prepare('PRAGMA user_version').get()?.user_version, 9);
+      assert.equal(backup.prepare('PRAGMA user_version').get()?.user_version, 10);
       assert.equal(backup.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
       assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM workspaces').get()?.count, 2);
       assert.equal(
@@ -892,6 +932,28 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
           },
         ],
       );
+      assert.equal(backup.prepare('SELECT COUNT(*) AS count FROM focus_sessions').get()?.count, 1);
+      const backupFocusRow = backup
+        .prepare(
+          `SELECT id, workspace_id AS workspaceId, task_id AS taskId,
+                  local_date AS localDate, state, remaining_seconds AS remainingSeconds,
+                  deadline_at AS deadlineAt, revision, completed_at AS completedAt,
+                  cancelled_at AS cancelledAt
+           FROM focus_sessions`,
+        )
+        .get();
+      assert.deepEqual(backupFocusRow ? { ...backupFocusRow } : undefined, {
+        id: FOCUS_SESSION_ID,
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        taskId: CONVERTED_TASK_ID,
+        localDate: FIXED_TODAY,
+        state: 'running',
+        remainingSeconds: 1_500,
+        deadlineAt: new Date(FIXED_NOW.getTime() + 25 * 60_000).toISOString(),
+        revision: 3,
+        completedAt: null,
+        cancelledAt: null,
+      });
     } finally {
       backup.close();
     }
@@ -899,7 +961,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     const scheduledBackupPath = join(dataDirectory, 'backups', scheduled.fileName);
     const scheduledBackup = new DatabaseSync(scheduledBackupPath, { readOnly: true });
     try {
-      assert.equal(scheduledBackup.prepare('PRAGMA user_version').get()?.user_version, 9);
+      assert.equal(scheduledBackup.prepare('PRAGMA user_version').get()?.user_version, 10);
       assert.equal(scheduledBackup.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
       assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM tasks').get()?.count, 5);
       assert.equal(scheduledBackup.prepare('SELECT COUNT(*) AS count FROM notes').get()?.count, 4);
@@ -907,6 +969,10 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         scheduledBackup.prepare('SELECT COUNT(*) AS count FROM automation_occurrences').get()
           ?.count,
         2,
+      );
+      assert.equal(
+        scheduledBackup.prepare('SELECT COUNT(*) AS count FROM focus_sessions').get()?.count,
+        1,
       );
     } finally {
       scheduledBackup.close();
@@ -917,11 +983,20 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       now: () => serviceNow,
       taskTodayFactory: () => FIXED_TODAY,
       scheduleTodayFactory: () => FIXED_TODAY,
+      focusTodayFactory: () => FIXED_TODAY,
     });
     const reopened = await service.open();
-    assert.equal(reopened.migration.fromVersion, 9);
-    assert.equal(reopened.migration.toVersion, 9);
+    assert.equal(reopened.migration.fromVersion, 10);
+    assert.equal(reopened.migration.toVersion, 10);
     assert.equal(reopened.migration.applied.length, 0);
+    const reopenedFocusController = createManualFocusController(service, () => serviceNow);
+    await reopenedFocusController.start();
+    const completedFocus = await reopenedFocusController.getSnapshot({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+    });
+    assert.equal(completedFocus.session, null);
+    assert.equal(completedFocus.todayCompletedCount, 1);
+    await reopenedFocusController.stop();
     const reopenedAutomationController = createManualAutomationController(
       service,
       () => serviceNow,
@@ -1136,6 +1211,17 @@ function createManualAutomationController(
   });
 }
 
+function createManualFocusController(service: DatabaseService, now: () => Date): FocusController {
+  return new FocusController({
+    database: service,
+    now,
+    timer: {
+      set: () => Symbol('focus-smoke-timer'),
+      clear: () => undefined,
+    },
+  });
+}
+
 function formatLocalCivilDate(value: Date): string {
   return [
     value.getFullYear().toString().padStart(4, '0'),
@@ -1149,22 +1235,31 @@ async function smokePortableRoundTrip(
   source: DatabaseService,
   localBackupPolicy: BackupPolicy,
   expectedSearches: readonly SearchSnapshot[],
+  exportedAt: Date,
 ): Promise<void> {
   await mkdir(directory, { recursive: true });
   const sourceRecords = await source.readPortableRecords();
+  const sourceFocusRecords = sourceRecords.filter(({ type }) => type === 'focus-session');
+  assert.equal(sourceFocusRecords.length, 1);
+  assert.equal(sourceFocusRecords[0]?.data.status, 'completed');
+  assert.equal(sourceFocusRecords[0]?.data.remainingSeconds, 0);
+  assert.equal(sourceFocusRecords[0]?.data.completedAt, exportedAt.toISOString());
+  assert.equal('deadlineAt' in (sourceFocusRecords[0]?.data ?? {}), false);
+  assert.equal('cancelledAt' in (sourceFocusRecords[0]?.data ?? {}), false);
   const packageBytes = serializePortablePackage({
     exportId: PORTABLE_EXPORT_ID,
-    exportedAt: FIXED_NOW.toISOString(),
+    exportedAt: exportedAt.toISOString(),
     sourceAppVersion: '0.1.0',
-    sourceSchemaVersion: 9,
+    sourceSchemaVersion: 10,
     records: sourceRecords,
   });
   const parsedPackage = parsePortablePackage(packageBytes);
-  assert.equal(parsedPackage.manifest.formatVersion, 2);
+  assert.equal(parsedPackage.manifest.formatVersion, 3);
   assert.equal(parsedPackage.manifest.recordCount, sourceRecords.length);
-  assert.equal(parsedPackage.manifest.sourceSchemaVersion, 9);
+  assert.equal(parsedPackage.manifest.sourceSchemaVersion, 10);
   assert.equal(parsedPackage.manifest.counts.automations, 2);
   assert.equal(parsedPackage.manifest.counts.enabledAutomations, 2);
+  assert.equal(parsedPackage.manifest.counts.focusSessions, 1);
   assert.deepEqual(parsedPackage.records, sourceRecords);
   const pausedRecords = pausePortableAutomationDefinitions(sourceRecords);
 
@@ -1192,12 +1287,13 @@ async function smokePortableRoundTrip(
     now: () => FIXED_NOW,
     taskTodayFactory: () => FIXED_TODAY,
     scheduleTodayFactory: () => FIXED_TODAY,
+    focusTodayFactory: () => FIXED_TODAY,
   });
   try {
     const initialized = await imported.open();
     assert.deepEqual(initialized.migration, {
-      fromVersion: 9,
-      toVersion: 9,
+      fromVersion: 10,
+      toVersion: 10,
       applied: [],
     });
     assert.deepEqual(await imported.readPortableRecords(), pausedRecords);
@@ -1213,6 +1309,9 @@ async function smokePortableRoundTrip(
       importedAutomations.items.every(({ lastRun }) => lastRun.status === 'never'),
       true,
     );
+    const importedFocus = await imported.getFocusSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
+    assert.equal(importedFocus.session, null);
+    assert.equal(importedFocus.todayCompletedCount, 1);
     assert.deepEqual((await imported.getBackupSchedulerState()).policy, localBackupPolicy);
     assert.deepEqual(await imported.getTerminalPreferences(DEFAULT_WORKSPACE_ID), {
       workspaceId: DEFAULT_WORKSPACE_ID,
@@ -1239,8 +1338,10 @@ async function smokePortableRoundTrip(
     await imported?.close().catch(() => undefined);
   }
 
-  const legacyRecords = sourceRecords.filter(({ type }) => type !== 'automation-definition');
-  for (const sourceSchemaVersion of [7, 8] as const) {
+  const v2Records = sourceRecords.filter(({ type }) => type !== 'focus-session');
+  const legacyRecords = v2Records.filter(({ type }) => type !== 'automation-definition');
+  for (const sourceSchemaVersion of [7, 8, 9] as const) {
+    const compatibilityRecords = sourceSchemaVersion === 9 ? v2Records : legacyRecords;
     const legacyDirectory = join(directory, `legacy v${sourceSchemaVersion} package`);
     await mkdir(legacyDirectory, { recursive: true });
     const legacyBytes = serializePortablePackage({
@@ -1248,7 +1349,7 @@ async function smokePortableRoundTrip(
       exportedAt: FIXED_NOW.toISOString(),
       sourceAppVersion: '0.1.0',
       sourceSchemaVersion,
-      records: legacyRecords,
+      records: compatibilityRecords,
     });
     const legacyManifestLine = Buffer.from(legacyBytes)
       .toString('utf8')
@@ -1256,10 +1357,14 @@ async function smokePortableRoundTrip(
     const rawLegacyManifest = JSON.parse(legacyManifestLine) as {
       readonly counts: Record<string, unknown>;
     };
-    assert.equal('automations' in rawLegacyManifest.counts, false);
-    assert.equal('enabledAutomations' in rawLegacyManifest.counts, false);
+    assert.equal('focusSessions' in rawLegacyManifest.counts, false);
+    if (sourceSchemaVersion !== 9) {
+      assert.equal('automations' in rawLegacyManifest.counts, false);
+      assert.equal('enabledAutomations' in rawLegacyManifest.counts, false);
+    }
     const legacyPackage = parsePortablePackage(legacyBytes);
-    assert.equal(legacyPackage.manifest.formatVersion, 1);
+    assert.equal(legacyPackage.manifest.formatVersion, sourceSchemaVersion === 9 ? 2 : 1);
+    assert.equal(legacyPackage.manifest.counts.focusSessions, 0);
     assert.equal(legacyPackage.manifest.sourceSchemaVersion, sourceSchemaVersion);
     const legacyDestinationPath = join(legacyDirectory, `import-${PORTABLE_IMPORT_ID}.sqlite3`);
     const legacyStager = new AtomicImportStager({
@@ -1285,18 +1390,36 @@ async function smokePortableRoundTrip(
       now: () => FIXED_NOW,
       taskTodayFactory: () => FIXED_TODAY,
       scheduleTodayFactory: () => FIXED_TODAY,
+      focusTodayFactory: () => FIXED_TODAY,
     });
     try {
       const initialized = await legacyImported.open();
       assert.deepEqual(initialized.migration, {
-        fromVersion: 9,
-        toVersion: 9,
+        fromVersion: 10,
+        toVersion: 10,
         applied: [],
       });
-      assert.deepEqual(await legacyImported.readPortableRecords(), legacyRecords);
       assert.deepEqual(
-        (await legacyImported.getAutomationSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).items,
-        [],
+        await legacyImported.readPortableRecords(),
+        sourceSchemaVersion === 9 ? pausePortableAutomationDefinitions(v2Records) : legacyRecords,
+      );
+      const compatibilityAutomations = (
+        await legacyImported.getAutomationSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })
+      ).items;
+      assert.equal(compatibilityAutomations.length, sourceSchemaVersion === 9 ? 2 : 0);
+      assert.equal(
+        compatibilityAutomations.every(({ enabled }) => !enabled),
+        true,
+      );
+      assert.deepEqual(
+        await legacyImported.getFocusSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID }),
+        {
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          todayDate: FIXED_TODAY,
+          observedAt: FIXED_NOW.toISOString(),
+          session: null,
+          todayCompletedCount: 0,
+        },
       );
       assert.equal(
         (await legacyImported.getTerminalPreferences(DEFAULT_WORKSPACE_ID)).preferredProfileId,
@@ -1349,7 +1472,7 @@ async function smokeVersionOneUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 1);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 1);
     assert.equal((await service.getWorkspaceSnapshot()).currentWorkspaceId, DEFAULT_WORKSPACE_ID);
     assert.deepEqual(
@@ -1417,7 +1540,7 @@ async function smokeVersionTwoUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 2);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 2);
     assert.deepEqual(
       (await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).entries,
@@ -1514,7 +1637,7 @@ async function smokeVersionThreeUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 3);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 3);
     const beforeConversion = await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(beforeConversion.todayDate, FIXED_TODAY);
@@ -1627,7 +1750,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 4);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 4);
     const preservedInbox = await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(preservedInbox.entries.length, 1);
@@ -1700,7 +1823,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
       scheduleTodayFactory: () => FIXED_TODAY,
     });
     const reopened = await service.open();
-    assert.deepEqual(reopened.migration, { fromVersion: 9, toVersion: 9, applied: [] });
+    assert.deepEqual(reopened.migration, { fromVersion: 10, toVersion: 10, applied: [] });
     assert.equal(
       (await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).tasks[0]?.id,
       FIRST_TASK_ID,
@@ -1771,7 +1894,7 @@ async function smokeVersionFiveUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 5);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 5);
     assert.equal(
       (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]?.id,
@@ -1868,7 +1991,7 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await service.open();
     assert.equal(upgraded.migration.fromVersion, 6);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 6);
     assert.equal(
       (await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]?.id,
@@ -1904,7 +2027,7 @@ async function smokeVersionSixUpgrade(dataDirectory: string): Promise<void> {
     service = undefined;
     const upgradedSnapshot = new DatabaseSync(databasePath, { readOnly: true });
     try {
-      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 9);
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 10);
       assert.equal(
         upgradedSnapshot
           .prepare("SELECT COUNT(*) AS count FROM notes_search WHERE notes_search MATCH '搜索索引'")
@@ -1961,7 +2084,7 @@ async function smokeVersionSevenUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await upgradedService.open();
     assert.equal(upgraded.migration.fromVersion, 7);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 7);
     assert.equal(
       (await upgradedService.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).notes[0]
@@ -2003,7 +2126,7 @@ async function smokeVersionSevenUpgrade(dataDirectory: string): Promise<void> {
       readOnly: true,
     });
     try {
-      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 9);
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 10);
       assert.equal(
         upgradedSnapshot
           .prepare('SELECT COUNT(*) AS count FROM workspace_terminal_preferences')
@@ -2053,7 +2176,7 @@ async function smokeVersionEightUpgrade(dataDirectory: string): Promise<void> {
   try {
     const upgraded = await upgradedService.open();
     assert.equal(upgraded.migration.fromVersion, 8);
-    assert.equal(upgraded.migration.toVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
     assert.equal(upgraded.preMigrationBackup?.schemaVersion, 8);
     assert.equal(
       (await upgradedService.getTerminalPreferences(DEFAULT_WORKSPACE_ID)).preferredProfileId,
@@ -2088,6 +2211,84 @@ async function smokeVersionEightUpgrade(dataDirectory: string): Promise<void> {
     }
   } finally {
     await upgradedService.close().catch(() => undefined);
+  }
+}
+
+async function smokeVersionNineUpgrade(dataDirectory: string): Promise<void> {
+  let legacy: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    migrations: DEFAULT_MIGRATIONS.slice(0, 9),
+    now: () => FIXED_NOW,
+    workspaceIdFactory: () => DEFAULT_WORKSPACE_ID,
+    taskIdFactory: () => FIRST_TASK_ID,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+    browserTabIdFactory: () => FIRST_BROWSER_TAB_ID,
+  });
+  try {
+    const initialized = await legacy.open();
+    assert.equal(initialized.migration.toVersion, 9);
+    await legacy.createTask({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      title: 'v9 → v10 专注迁移保留任务',
+      planning: 'today',
+    });
+    await legacy.close();
+    legacy = undefined;
+  } finally {
+    await legacy?.close().catch(() => undefined);
+  }
+
+  let upgradedService: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    now: () => FIXED_NOW,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+  });
+  try {
+    const upgraded = await upgradedService.open();
+    assert.equal(upgraded.migration.fromVersion, 9);
+    assert.equal(upgraded.migration.toVersion, 10);
+    assert.equal(upgraded.preMigrationBackup?.schemaVersion, 9);
+    assert.equal(
+      (await upgradedService.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).tasks[0]
+        ?.title,
+      'v9 → v10 专注迁移保留任务',
+    );
+
+    const backup = upgraded.preMigrationBackup;
+    assert.ok(backup);
+    const legacySnapshot = new DatabaseSync(join(dataDirectory, 'backups', backup.fileName), {
+      readOnly: true,
+    });
+    try {
+      assert.equal(legacySnapshot.prepare('PRAGMA user_version').get()?.user_version, 9);
+      assert.equal(
+        legacySnapshot
+          .prepare("SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'focus_sessions'")
+          .get()?.count,
+        0,
+      );
+    } finally {
+      legacySnapshot.close();
+    }
+
+    await upgradedService.close();
+    upgradedService = undefined;
+    const upgradedSnapshot = new DatabaseSync(join(dataDirectory, 'daily-workbench.sqlite3'), {
+      readOnly: true,
+    });
+    try {
+      assert.equal(upgradedSnapshot.prepare('PRAGMA user_version').get()?.user_version, 10);
+      assert.equal(
+        upgradedSnapshot.prepare('SELECT COUNT(*) AS count FROM focus_sessions').get()?.count,
+        0,
+      );
+    } finally {
+      upgradedSnapshot.close();
+    }
+  } finally {
+    await upgradedService?.close().catch(() => undefined);
   }
 }
 

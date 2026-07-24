@@ -155,6 +155,9 @@ jobs:
       - name: Test assistant ownership and protocol
         run: npm run test:assistant
 
+      - name: Test focus persistence and protocol
+        run: npm run test:focus
+
       - name: Build real Electron download smoke bundle
         run: npm run build:electron-download-smoke
 

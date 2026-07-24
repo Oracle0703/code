@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  AUTOMATION_DATA_PACKAGE_FORMAT_VERSION,
   DATA_PACKAGE_FORMAT_VERSION,
   DEFAULT_MAX_PACKAGE_BYTES,
   DEFAULT_MAX_RECORD_BYTES,
@@ -15,6 +16,7 @@ import {
 
 const WORKSPACE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const AUTOMATION_ID = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const FOCUS_SESSION_ID = '12121212-1212-4121-8121-121212121212';
 
 const records: readonly PortableDataRecord[] = [
   {
@@ -76,6 +78,22 @@ const automationRecord: PortableDataRecord = {
   },
 };
 
+const focusSessionRecord: PortableDataRecord = {
+  type: 'focus-session',
+  data: {
+    id: FOCUS_SESSION_ID,
+    workspaceId: WORKSPACE_ID,
+    taskId: null,
+    status: 'paused',
+    remainingSeconds: 900,
+    revision: 2,
+    localDate: '2026-07-22',
+    createdAt: '2026-07-22T11:00:00.000Z',
+    updatedAt: '2026-07-22T11:10:00.000Z',
+    completedAt: null,
+  },
+};
+
 describe('portable data package', () => {
   it('round-trips canonical NDJSON with verified counts and digest', () => {
     const bytes = serializePortablePackage({
@@ -95,6 +113,7 @@ describe('portable data package', () => {
       browserBookmarks: 1,
       automations: 0,
       enabledAutomations: 0,
+      focusSessions: 0,
     });
     expect(parsed.packageSha256).toMatch(/^[0-9a-f]{64}$/u);
   });
@@ -109,7 +128,7 @@ describe('portable data package', () => {
     });
     const parsedV2 = parsePortablePackage(v2);
     expect(parsedV2.manifest).toMatchObject({
-      formatVersion: DATA_PACKAGE_FORMAT_VERSION,
+      formatVersion: AUTOMATION_DATA_PACKAGE_FORMAT_VERSION,
       sourceSchemaVersion: 9,
       counts: {
         automations: 1,
@@ -117,6 +136,12 @@ describe('portable data package', () => {
       },
     });
     expect(parsedV2.records.at(-1)).toEqual(automationRecord);
+    const rawV2Manifest = JSON.parse(v2.toString('utf8').split('\n', 1)[0]) as Record<
+      string,
+      unknown
+    >;
+    expect(rawV2Manifest.counts).not.toHaveProperty('focusSessions');
+    expect(parsedV2.manifest.counts.focusSessions).toBe(0);
 
     const v1 = serializePortablePackage({
       exportId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
@@ -135,7 +160,30 @@ describe('portable data package', () => {
     expect(parsePortablePackage(v1).manifest.counts).toMatchObject({
       automations: 0,
       enabledAutomations: 0,
+      focusSessions: 0,
     });
+  });
+
+  it('emits v3 focus sessions with exact counts and graph validation', () => {
+    const bytes = serializePortablePackage({
+      exportId: '13131313-1313-4131-8131-131313131313',
+      exportedAt: '2026-07-22T12:00:00.000Z',
+      sourceAppVersion: '0.1.0',
+      sourceSchemaVersion: 10,
+      records: [...records, automationRecord, focusSessionRecord],
+    });
+    const parsed = parsePortablePackage(bytes);
+
+    expect(parsed.manifest).toMatchObject({
+      formatVersion: DATA_PACKAGE_FORMAT_VERSION,
+      sourceSchemaVersion: 10,
+      counts: {
+        automations: 1,
+        enabledAutomations: 1,
+        focusSessions: 1,
+      },
+    });
+    expect(parsed.records.at(-1)).toEqual(focusSessionRecord);
   });
 
   it('binds formats to schemas and rejects automation runtime or extra action fields', () => {
@@ -224,6 +272,90 @@ describe('portable data package', () => {
           return { ...manifest, counts };
         }),
       ),
+    ).toThrow(DataPackageError);
+  });
+
+  it('rejects focus sessions in old formats and invalid portable focus state', () => {
+    for (const sourceSchemaVersion of [8, 9]) {
+      expect(() =>
+        serializePortablePackage({
+          exportId: '14141414-1414-4141-8141-141414141414',
+          exportedAt: '2026-07-22T12:00:00.000Z',
+          sourceAppVersion: '0.1.0',
+          sourceSchemaVersion,
+          records: [...records, focusSessionRecord],
+        }),
+      ).toThrow(DataPackageError);
+    }
+
+    const invalidRecords: readonly PortableDataRecord[] = [
+      {
+        ...focusSessionRecord,
+        data: { ...focusSessionRecord.data, status: 'running' },
+      },
+      {
+        ...focusSessionRecord,
+        data: { ...focusSessionRecord.data, status: 'cancelled' },
+      },
+      {
+        ...focusSessionRecord,
+        data: { ...focusSessionRecord.data, remainingSeconds: 1_501 },
+      },
+      {
+        ...focusSessionRecord,
+        data: { ...focusSessionRecord.data, remainingSeconds: 0 },
+      },
+      {
+        ...focusSessionRecord,
+        data: {
+          ...focusSessionRecord.data,
+          status: 'completed',
+          remainingSeconds: 1,
+          completedAt: '2026-07-22T11:10:00.000Z',
+        },
+      },
+      {
+        ...focusSessionRecord,
+        data: { ...focusSessionRecord.data, deadlineAt: '2026-07-22T11:25:00.000Z' },
+      },
+      {
+        ...focusSessionRecord,
+        data: {
+          ...focusSessionRecord.data,
+          taskId: '15151515-1515-4151-8151-151515151515',
+        },
+      },
+    ];
+    for (const record of invalidRecords) {
+      expect(() =>
+        serializePortablePackage({
+          exportId: '16161616-1616-4161-8161-161616161616',
+          exportedAt: '2026-07-22T12:00:00.000Z',
+          sourceAppVersion: '0.1.0',
+          sourceSchemaVersion: 10,
+          records: [...records, record],
+        }),
+      ).toThrow(DataPackageError);
+    }
+
+    expect(() =>
+      serializePortablePackage({
+        exportId: '17171717-1717-4171-8171-171717171717',
+        exportedAt: '2026-07-22T12:00:00.000Z',
+        sourceAppVersion: '0.1.0',
+        sourceSchemaVersion: 10,
+        records: [
+          ...records,
+          focusSessionRecord,
+          {
+            ...focusSessionRecord,
+            data: {
+              ...focusSessionRecord.data,
+              id: '18181818-1818-4181-8181-181818181818',
+            },
+          },
+        ],
+      }),
     ).toThrow(DataPackageError);
   });
 

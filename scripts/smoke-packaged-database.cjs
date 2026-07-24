@@ -250,6 +250,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'search_data_protection',
     'terminal_workspace_preferences',
     'scheduled_automations',
+    'focus_sessions',
     'openai-api-key.v1.bin',
     'safeStorage',
     'https://api.openai.com/v1/responses',
@@ -270,11 +271,23 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'CREATE TABLE automations',
     'CREATE TABLE automation_run_state',
     'CREATE TABLE automation_occurrences',
+    'CREATE TABLE focus_sessions',
+    'remaining_seconds BETWEEN 0 AND 1500',
     'terminal preference revision must advance exactly once',
     'archived workspace terminal preferences are immutable',
     'automation revision must advance exactly once',
     'automation occurrences are immutable',
     'automation output does not match its workspace or action',
+    'focus session revision must advance exactly once',
+    'focus sessions cannot be permanently deleted',
+    'focus session task must belong to its workspace',
+    'focus-session',
+    'An unfinished focus session cannot belong to an archived workspace.',
+    'The staged database focus sessions are not safely paused or completed.',
+    'The import codec requires the current v10 migration set.',
+    'A focus task must be unfinished and planned for today in this workspace.',
+    'Focus wake delay must be an integer from 1 to 60000 milliseconds.',
+    'Focus remaining time must be an integer between',
     'CREATE VIRTUAL TABLE notes_search',
     'database:get-management-snapshot',
     'database:update-backup-policy',
@@ -290,6 +303,12 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'automation:set-enabled',
     'automation:archive',
     'automation:changed',
+    'focus:get-snapshot',
+    'focus:start',
+    'focus:pause',
+    'focus:resume',
+    'focus:cancel',
+    'focus:changed',
     'assistant:get-credential-status',
     'assistant:configure-credential',
     'assistant:remove-credential',
@@ -509,6 +528,12 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'automation:set-enabled',
     'automation:archive',
     'automation:changed',
+    'focus:get-snapshot',
+    'focus:start',
+    'focus:pause',
+    'focus:resume',
+    'focus:cancel',
+    'focus:changed',
     'assistant:get-credential-status',
     'assistant:configure-credential',
     'assistant:remove-credential',
@@ -603,6 +628,19 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
       `Packaged bundles expose forbidden automation channel ${forbiddenAutomationChannel}.`,
     );
   }
+  for (const forbiddenFocusChannel of [
+    'focus:set-duration',
+    'focus:update-duration',
+    'focus:set-reminder',
+    'focus:notify',
+    'focus:complete',
+  ]) {
+    assert.equal(
+      mainBundle.includes(forbiddenFocusChannel) || preloadBundle.includes(forbiddenFocusChannel),
+      false,
+      `Packaged bundles expose forbidden focus channel ${forbiddenFocusChannel}.`,
+    );
+  }
   for (const forbiddenAssistantChannel of [
     'assistant:set-endpoint',
     'assistant:set-model',
@@ -672,6 +710,25 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     assert.ok(
       rendererBundle.includes(requiredAutomationRendererToken),
       `Packaged renderer does not contain automation UI token ${requiredAutomationRendererToken}.`,
+    );
+  }
+  for (const requiredFocusRendererToken of [
+    'focus-card',
+    'focus-session-dialog',
+    '任务关联是可选的；本轮完成后会计入今天的专注轮次。',
+    '开始专注',
+    '自由专注',
+  ]) {
+    assert.ok(
+      rendererBundle.includes(requiredFocusRendererToken),
+      `Packaged renderer does not contain focus UI token ${requiredFocusRendererToken}.`,
+    );
+  }
+  for (const forbiddenFocusRendererToken of ['自定义时长', '桌面通知', '专注提醒']) {
+    assert.equal(
+      rendererBundle.includes(forbiddenFocusRendererToken),
+      false,
+      `Packaged renderer exposes out-of-scope focus UI ${forbiddenFocusRendererToken}.`,
     );
   }
   for (const requiredAssistantRendererToken of [

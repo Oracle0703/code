@@ -65,6 +65,67 @@ describe('DataPortabilityController', () => {
     });
   });
 
+  it('exports schema 10 records as v3 with exact focus-session counts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'daily-workbench-focus-export-'));
+    temporaryDirectories.push(directory);
+    const destination = join(directory, 'focus-export.dwbx');
+    const database = createDatabase();
+    const records = await database.readPortableRecords();
+    database.getStatus.mockResolvedValue({
+      schemaVersion: 10,
+      appliedMigrations: 10,
+      sqliteVersion: '3.53.1',
+      journalMode: 'wal',
+      integrityCheck: 'ok',
+      backupCount: 0,
+    });
+    database.readPortableRecords.mockResolvedValue([
+      ...records,
+      {
+        type: 'focus-session',
+        data: {
+          id: '66666666-6666-4666-8666-666666666666',
+          workspaceId: WORKSPACE_ID,
+          taskId: null,
+          status: 'paused',
+          remainingSeconds: 900,
+          revision: 2,
+          localDate: '2026-07-23',
+          createdAt: NOW,
+          updatedAt: NOW,
+          completedAt: null,
+        },
+      },
+    ]);
+    const controller = new DataPortabilityController({
+      database,
+      dialogs: {
+        chooseExportPath: async () => destination,
+        chooseImportPath: async () => undefined,
+      },
+      quarantine: createQuarantine(),
+      markerStore: new ReplacementMarkerStore(new MemoryMarkerPersistence()),
+      appVersion: '0.1.0',
+      requestDestructiveConfirmation: async () => true,
+      requestReplacementApproval: async () => true,
+      prepareReplacement: async () => undefined,
+      scheduleRestart: async () => undefined,
+      now: () => new Date(NOW),
+      idFactory: sequentialIds(EXPORT_ID, TEMPORARY_ID),
+    });
+
+    await expect(controller.exportData()).resolves.toMatchObject({
+      status: 'exported',
+      recordCount: 3,
+    });
+    expect(parsePortablePackage(await readFile(destination)).manifest).toMatchObject({
+      formatVersion: 3,
+      sourceSchemaVersion: 10,
+      recordCount: 3,
+      counts: { focusSessions: 1 },
+    });
+  });
+
   it('reports export durability failure without deleting an already published file', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'daily-workbench-export-durability-'));
     temporaryDirectories.push(directory);

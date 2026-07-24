@@ -19,6 +19,8 @@ import {
   parseBrowserWorkspaceInput,
   parseDataImportCommitInput,
   parseDataImportTargetInput,
+  parseFocusStartInput,
+  parseFocusTargetInput,
   parseInboxCategorizeInput,
   parseInboxCreateInput,
   parseInboxTargetInput,
@@ -64,6 +66,7 @@ const BOOKMARK_ID = '823e4567-e89b-42d3-a456-426614174000';
 const DOWNLOAD_ID = '923e4567-e89b-42d3-a456-426614174000';
 const IMPORT_ID = 'a23e4567-e89b-42d3-a456-426614174000';
 const AUTOMATION_ID = 'b23e4567-e89b-42d3-a456-426614174000';
+const FOCUS_SESSION_ID = 'c23e4567-e89b-42d3-a456-426614174000';
 const WSL_DISTRIBUTION_ID = `wsl-${'a'.repeat(64)}`;
 
 describe('IPC validation', () => {
@@ -982,6 +985,69 @@ describe('IPC validation', () => {
         startMinute: 1,
         endMinute: 2,
         scheduledFor: '2026-07-22',
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts only workspace-bound focus commands with an optional task id', () => {
+    expect(parseFocusStartInput({ workspaceId: WORKSPACE_ID })).toEqual({
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(
+      parseFocusStartInput({
+        workspaceId: WORKSPACE_ID,
+        taskId: TASK_ID,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      taskId: TASK_ID,
+    });
+    expect(
+      parseFocusTargetInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId: FOCUS_SESSION_ID,
+        expectedRevision: 3,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      sessionId: FOCUS_SESSION_ID,
+      expectedRevision: 3,
+    });
+  });
+
+  it('rejects forged focus timing, state, identity, and surplus fields', () => {
+    expect(() =>
+      parseFocusStartInput({
+        workspaceId: WORKSPACE_ID,
+        taskId: null,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseFocusStartInput({
+        workspaceId: WORKSPACE_ID,
+        durationSeconds: 60,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseFocusTargetInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId: FOCUS_SESSION_ID,
+        expectedRevision: 0,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseFocusTargetInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId: FOCUS_SESSION_ID.toUpperCase(),
+        expectedRevision: 1,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseFocusTargetInput({
+        workspaceId: WORKSPACE_ID,
+        sessionId: FOCUS_SESSION_ID,
+        expectedRevision: 1,
+        state: 'completed',
       }),
     ).toThrow(TypeError);
   });

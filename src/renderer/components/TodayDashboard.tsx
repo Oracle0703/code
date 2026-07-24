@@ -9,15 +9,18 @@ import {
   Clock3,
   Inbox,
   LoaderCircle,
+  LogIn,
   Pause,
   Play,
   Plus,
   MessageSquareText,
   Sparkles,
   Target,
+  XCircle,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import type {
+  FocusSnapshot,
   ScheduleItem,
   ScheduleSnapshot,
   Task,
@@ -25,10 +28,12 @@ import type {
   TaskStatus,
 } from '../../shared/contracts';
 import { INBOX_CONTENT_MAX_LENGTH } from '../../shared/inbox-domain';
+import { describeFocusTimer, FOCUS_DURATION_SECONDS, formatFocusTimer } from '../focus-state';
 import { formatScheduleInputMinute } from '../schedule-state';
 import { toLocalDateKey } from '../task-state';
+import { FocusSessionDialog } from './FocusSessionDialog';
 
-interface TodayDashboardProps {
+export interface TodayDashboardProps {
   inboxStatus: 'loading' | 'ready' | 'error';
   inboxCount: number | null;
   uncategorizedCount: number | null;
@@ -46,6 +51,11 @@ interface TodayDashboardProps {
   scheduleOperationError: string | null;
   pendingScheduleItemIds: ReadonlySet<string>;
   scheduleCreatePending: boolean;
+  focusSnapshot: FocusSnapshot | null;
+  focusStatus: 'loading' | 'ready' | 'error';
+  focusError: string | null;
+  focusOperation: 'start' | 'pause' | 'resume' | 'cancel' | null;
+  focusRemainingSeconds: number;
   onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
   onOpenTasks: () => void;
@@ -56,14 +66,13 @@ interface TodayDashboardProps {
   onCreateSchedule: () => void;
   onOpenSchedule: (item: ScheduleItem) => void;
   onOpenAssistant: () => void;
-}
-
-function formatTimer(seconds: number) {
-  const minutes = Math.floor(seconds / 60)
-    .toString()
-    .padStart(2, '0');
-  const remainingSeconds = (seconds % 60).toString().padStart(2, '0');
-  return `${minutes}:${remainingSeconds}`;
+  onRetryFocus: () => void;
+  onStartFocus: (taskId?: string) => Promise<void>;
+  onPauseFocus: () => Promise<void>;
+  onResumeFocus: () => Promise<void>;
+  onCancelFocus: () => Promise<void>;
+  onSwitchFocusWorkspace: (workspaceId: string) => void;
+  onFocusDialogOpenChange: (open: boolean) => void;
 }
 
 export function TodayDashboard({
@@ -84,6 +93,11 @@ export function TodayDashboard({
   scheduleOperationError,
   pendingScheduleItemIds,
   scheduleCreatePending,
+  focusSnapshot,
+  focusStatus,
+  focusError,
+  focusOperation,
+  focusRemainingSeconds,
   onCapture,
   onOpenInbox,
   onOpenTasks,
@@ -94,12 +108,18 @@ export function TodayDashboard({
   onCreateSchedule,
   onOpenSchedule,
   onOpenAssistant,
+  onRetryFocus,
+  onStartFocus,
+  onPauseFocus,
+  onResumeFocus,
+  onCancelFocus,
+  onSwitchFocusWorkspace,
+  onFocusDialogOpenChange,
 }: TodayDashboardProps) {
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [focusRunning, setFocusRunning] = useState(false);
-  const [focusSeconds, setFocusSeconds] = useState(25 * 60);
+  const [focusDialogOpen, setFocusDialogOpen] = useState(false);
   const captureLength = Array.from(capture.trim()).length;
   const captureTooLong = captureLength > INBOX_CONTENT_MAX_LENGTH;
   const todayDate =
@@ -112,14 +132,32 @@ export function TodayDashboard({
   const completedTasks = todayTasks.length - remainingTasks;
   const progress = todayTasks.length === 0 ? 0 : (completedTasks / todayTasks.length) * 100;
   const taskReady = taskSnapshot !== null;
+  const unfinishedTodayTasks = todayTasks.filter(({ status }) => status !== 'completed');
+  const focusSession = focusSnapshot?.session ?? null;
+  const focusSessionIsCurrent =
+    focusSession !== null && focusSession.workspaceId === focusSnapshot?.workspaceId;
+  const foreignFocusSession = focusSession !== null && !focusSessionIsCurrent ? focusSession : null;
+  const focusReady = focusStatus === 'ready' && focusSnapshot !== null;
+  const focusBusy = focusOperation !== null;
+  const displayedFocusSeconds = focusReady ? focusRemainingSeconds : FOCUS_DURATION_SECONDS;
+  const focusAnnouncement = focusStatusMessage(focusSnapshot, focusStatus, focusRemainingSeconds);
 
-  useEffect(() => {
-    if (!focusRunning || focusSeconds <= 0) return;
-    const timer = window.setInterval(() => {
-      setFocusSeconds((seconds) => Math.max(0, seconds - 1));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [focusRunning, focusSeconds]);
+  useEffect(
+    () => () => {
+      onFocusDialogOpenChange(false);
+    },
+    [onFocusDialogOpenChange],
+  );
+
+  const openFocusDialog = () => {
+    onFocusDialogOpenChange(true);
+    setFocusDialogOpen(true);
+  };
+
+  const closeFocusDialog = () => {
+    onFocusDialogOpenChange(false);
+    setFocusDialogOpen(false);
+  };
 
   const addCapture = async (event: FormEvent) => {
     event.preventDefault();
@@ -373,43 +411,145 @@ export function TodayDashboard({
         </section>
 
         <div className="dashboard-side-stack">
-          <section className="focus-card" aria-labelledby="focus-session-heading">
+          <section
+            className={`focus-card${focusSession?.status === 'paused' ? ' is-paused' : ''}`}
+            aria-labelledby="focus-session-heading"
+            aria-busy={focusStatus === 'loading' || focusBusy}
+          >
             <div className="focus-card__topline">
-              <span>
+              <span id="focus-session-heading">
                 <Target size={14} /> 专注模式
               </span>
-              <small>25 分钟</small>
+              <small>
+                今日完成 {focusSnapshot?.todayCompletedCount ?? 0} 轮 ·{' '}
+                {FOCUS_DURATION_SECONDS / 60} 分钟
+              </small>
             </div>
-            <h2 id="focus-session-heading">{formatTimer(focusSeconds)}</h2>
-            <p>
-              {focusRunning && focusSeconds > 0
-                ? '保持节奏，暂时忽略其他事情。'
-                : remainingTasks > 0
-                  ? `从 ${remainingTasks} 项今日任务中选一项开始。`
-                  : '安排一项今日任务，再开始专注。'}
-            </p>
-            <button
-              type="button"
-              onClick={() => {
-                if (focusSeconds === 0) {
-                  setFocusSeconds(25 * 60);
-                  setFocusRunning(true);
-                  return;
+            <h2>
+              <span
+                role="timer"
+                aria-live="off"
+                aria-label={
+                  focusReady ? describeFocusTimer(displayedFocusSeconds) : '专注计时器正在同步'
                 }
-                setFocusRunning((running) => !running);
-              }}
-            >
-              {focusRunning && focusSeconds > 0 ? (
-                <Pause size={15} fill="currentColor" />
-              ) : (
-                <Play size={15} fill="currentColor" />
-              )}
-              {focusRunning && focusSeconds > 0
-                ? '暂停专注'
-                : focusSeconds === 0
-                  ? '再来一次'
-                  : '开始专注'}
-            </button>
+              >
+                {focusReady ? formatFocusTimer(displayedFocusSeconds) : '––:––'}
+              </span>
+            </h2>
+
+            {focusStatus === 'loading' && !focusSnapshot ? (
+              <p className="focus-card__state">
+                <LoaderCircle className="is-spinning" size={13} aria-hidden="true" />
+                正在同步专注会话…
+              </p>
+            ) : focusStatus === 'error' && !focusSnapshot ? (
+              <div className="focus-card__error" role="alert">
+                <span>{focusError ?? '专注会话暂时无法读取。'}</span>
+                <button type="button" onClick={onRetryFocus}>
+                  重试
+                </button>
+              </div>
+            ) : foreignFocusSession ? (
+              <>
+                <p>
+                  <strong>{foreignFocusSession.workspaceName}</strong>{' '}
+                  {foreignFocusSession.status === 'paused' ? '专注已暂停' : '正在专注'}
+                  {foreignFocusSession.taskTitle ? ` · ${foreignFocusSession.taskTitle}` : ''}。
+                </p>
+                <div className="focus-card__actions">
+                  <button
+                    type="button"
+                    onClick={() => onSwitchFocusWorkspace(foreignFocusSession.workspaceId)}
+                  >
+                    <LogIn size={14} aria-hidden="true" />
+                    切换到该工作区
+                  </button>
+                </div>
+              </>
+            ) : focusSession && focusSessionIsCurrent ? (
+              <>
+                <p>
+                  {focusSession.taskTitle ? (
+                    <>
+                      当前任务：<strong>{focusSession.taskTitle}</strong>
+                    </>
+                  ) : focusSession.status === 'paused' ? (
+                    '本轮专注已暂停，可以稍后继续。'
+                  ) : (
+                    '保持节奏，暂时忽略其他事情。'
+                  )}
+                </p>
+                <div className="focus-card__actions">
+                  {focusSession.status === 'running' ? (
+                    <button
+                      type="button"
+                      onClick={() => void onPauseFocus().catch(() => undefined)}
+                      disabled={focusBusy}
+                    >
+                      {focusOperation === 'pause' ? (
+                        <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+                      ) : (
+                        <Pause size={14} fill="currentColor" aria-hidden="true" />
+                      )}
+                      {focusOperation === 'pause' ? '暂停中…' : '暂停'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void onResumeFocus().catch(() => undefined)}
+                      disabled={focusBusy}
+                    >
+                      {focusOperation === 'resume' ? (
+                        <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+                      ) : (
+                        <Play size={14} fill="currentColor" aria-hidden="true" />
+                      )}
+                      {focusOperation === 'resume' ? '继续中…' : '继续'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="focus-card__cancel"
+                    onClick={() => void onCancelFocus().catch(() => undefined)}
+                    disabled={focusBusy}
+                  >
+                    {focusOperation === 'cancel' ? (
+                      <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+                    ) : (
+                      <XCircle size={14} aria-hidden="true" />
+                    )}
+                    {focusOperation === 'cancel' ? '取消中…' : '取消本轮'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p>
+                  {remainingTasks > 0
+                    ? `可从 ${remainingTasks} 项今日任务中选择一项，或开始自由专注。`
+                    : '今天没有未完成任务，仍可开始一轮自由专注。'}
+                </p>
+                <div className="focus-card__actions">
+                  <button
+                    type="button"
+                    onClick={openFocusDialog}
+                    disabled={!focusReady || focusBusy}
+                  >
+                    <Play size={14} fill="currentColor" aria-hidden="true" />
+                    开始专注
+                  </button>
+                </div>
+              </>
+            )}
+
+            {focusError && focusSnapshot ? (
+              <p className="focus-card__operation-error" role="alert">
+                {focusError}
+              </p>
+            ) : null}
+            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {focusAnnouncement}
+            </p>
             <div className="focus-card__glow" aria-hidden="true" />
           </section>
 
@@ -493,6 +633,13 @@ export function TodayDashboard({
           </section>
         </div>
       </div>
+      {focusDialogOpen ? (
+        <FocusSessionDialog
+          tasks={unfinishedTodayTasks}
+          onClose={closeFocusDialog}
+          onStart={onStartFocus}
+        />
+      ) : null}
     </div>
   );
 }
@@ -519,4 +666,25 @@ function scheduleKindLabel(kind: ScheduleItem['kind']): string {
   if (kind === 'review') return '回顾';
   if (kind === 'personal') return '个人';
   return '专注';
+}
+
+function focusStatusMessage(
+  snapshot: FocusSnapshot | null,
+  status: TodayDashboardProps['focusStatus'],
+  remainingSeconds: number,
+): string {
+  if (status === 'loading') return '正在同步专注会话。';
+  if (status === 'error' && !snapshot) return '专注会话暂时不可用。';
+  const session = snapshot?.session;
+  if (!session) {
+    return `当前没有专注会话，今天已完成 ${snapshot?.todayCompletedCount ?? 0} 轮。`;
+  }
+  const task = session.taskTitle ? `，任务：${session.taskTitle}` : '';
+  const workspace =
+    session.workspaceId === snapshot?.workspaceId ? '' : `，工作区：${session.workspaceName}`;
+  if (session.status === 'paused') {
+    return `专注会话已暂停${workspace}${task}。`;
+  }
+  if (remainingSeconds === 0) return `专注时间已结束${workspace}${task}。`;
+  return `专注会话进行中${workspace}${task}。`;
 }

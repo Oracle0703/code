@@ -23,6 +23,8 @@ import {
   type BrowserWorkspaceInput,
   type DataImportCommitInput,
   type DataImportTargetInput,
+  type FocusStartInput,
+  type FocusTargetInput,
   type InboxCategorizeInput,
   type InboxCreateInput,
   type InboxTargetInput,
@@ -72,6 +74,7 @@ import {
   normalizeTerminalProfileId,
   normalizeWslDistributionId,
 } from '../../shared/terminal-domain';
+import { normalizeFocusRevision, normalizeFocusSessionId } from '../../shared/focus-domain';
 import {
   normalizeInboxCategory,
   normalizeInboxContent,
@@ -635,6 +638,27 @@ export function parseScheduleUpdateInput(value: unknown): ScheduleUpdateInput {
     title: normalizeScheduleTitle(value.title),
     kind: normalizeScheduleKind(value.kind),
     ...range,
+  };
+}
+
+export function parseFocusStartInput(value: unknown): FocusStartInput {
+  if (!isRecord(value)) throw new TypeError('Focus start input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'taskId']);
+  const workspaceId = normalizeWorkspaceId(value.workspaceId);
+  if (value.taskId === undefined) return { workspaceId };
+  return {
+    workspaceId,
+    taskId: normalizeTaskId(value.taskId),
+  };
+}
+
+export function parseFocusTargetInput(value: unknown): FocusTargetInput {
+  if (!isRecord(value)) throw new TypeError('Focus target input must be an object');
+  assertOnlyKeys(value, ['workspaceId', 'sessionId', 'expectedRevision']);
+  return {
+    workspaceId: normalizeWorkspaceId(value.workspaceId),
+    sessionId: normalizeFocusSessionId(value.sessionId),
+    expectedRevision: normalizeFocusRevision(value.expectedRevision),
   };
 }
 

@@ -254,6 +254,7 @@ function importPreview(): DataImportPreview {
       browserBookmarks: 8,
       automations: 9,
       enabledAutomations: 2,
+      focusSessions: 10,
     },
     includesArchivedData: true,
     includesBrowserData: true,
