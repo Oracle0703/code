@@ -16,6 +16,8 @@ const IMPORT_ID = '22222222-2222-4222-8222-222222222222';
 const BACKUP_ID = '33333333-3333-4333-8333-333333333333';
 const EXPORT_ID = '44444444-4444-4444-8444-444444444444';
 const TEMPORARY_ID = '55555555-5555-4555-8555-555555555555';
+const RESTORE_ID = '66666666-6666-4666-8666-666666666666';
+const RESTORE_BACKUP_ID = '77777777-7777-4777-8777-777777777777';
 const NOW = '2026-07-23T12:34:56.000Z';
 
 afterEach(async () => {
@@ -529,6 +531,199 @@ describe('DataPortabilityController', () => {
     deferredTasks[0]?.();
     await vi.waitFor(() => expect(scheduleRestart).toHaveBeenCalledTimes(1));
   });
+
+  it('stages an exact backup token before confirmation and publishes the refreshed restore', async () => {
+    const persistence = new MemoryMarkerPersistence();
+    const database = createDatabase();
+    const deferredTasks: Array<() => void> = [];
+    const scheduleRestart = vi.fn(async () => undefined);
+    const operationOrder: string[] = [];
+    database.prepareBackupRestore.mockImplementation(async () => {
+      operationOrder.push('prepare-staging');
+      return createPreparedBackupRestore();
+    });
+    database.refreshBackupRestore.mockImplementation(async () => {
+      operationOrder.push('refresh-staging');
+      return {
+        ...createPreparedBackupRestore(),
+        stagingDigest: 'e'.repeat(64),
+      };
+    });
+    database.createPreImportBackup.mockImplementation(async () => {
+      operationOrder.push('safety-backup');
+      return {
+        id: BACKUP_ID,
+        fileName: 'backup.sqlite3',
+        createdAt: NOW,
+        sizeBytes: 100,
+        reason: 'pre-import',
+        schemaVersion: 11,
+      };
+    });
+    database.validateExistingBackup.mockImplementation(async () => {
+      operationOrder.push('validate-safety-backup');
+      return {
+        id: BACKUP_ID,
+        fileName: 'backup.sqlite3',
+        createdAt: NOW,
+        sizeBytes: 100,
+        reason: 'pre-import',
+        schemaVersion: 11,
+      };
+    });
+    const requestBackupRestoreConfirmation = vi.fn(async () => {
+      operationOrder.push('native-confirmation');
+      return true;
+    });
+    const controller = new DataPortabilityController({
+      database,
+      dialogs: {
+        chooseExportPath: async () => undefined,
+        chooseImportPath: async () => undefined,
+      },
+      quarantine: createQuarantine(),
+      markerStore: new ReplacementMarkerStore(persistence),
+      appVersion: '0.1.0',
+      requestDestructiveConfirmation: async () => true,
+      requestBackupRestoreConfirmation,
+      requestReplacementApproval: async () => {
+        operationOrder.push('close-approval');
+        return true;
+      },
+      prepareReplacement: async () => {
+        operationOrder.push('freeze-writers');
+      },
+      scheduleRestart,
+      now: () => new Date(NOW),
+      idFactory: () => RESTORE_ID,
+      defer: (task) => deferredTasks.push(task),
+    });
+    const input = createBackupRestoreInput();
+
+    await expect(controller.restoreBackup(input)).resolves.toEqual({ status: 'restarting' });
+    expect(database.prepareBackupRestore).toHaveBeenCalledExactlyOnceWith(input, RESTORE_ID);
+    expect(requestBackupRestoreConfirmation).toHaveBeenCalledExactlyOnceWith(
+      createPreparedBackupRestore(),
+    );
+    expect(operationOrder).toEqual([
+      'prepare-staging',
+      'native-confirmation',
+      'close-approval',
+      'freeze-writers',
+      'refresh-staging',
+      'safety-backup',
+      'validate-safety-backup',
+    ]);
+    expect(database.discardBackupRestore).not.toHaveBeenCalled();
+    await expect(new ReplacementMarkerStore(persistence).read()).resolves.toMatchObject({
+      phase: 'ready',
+      replacementId: RESTORE_ID,
+      stagingFileName: `import-${RESTORE_ID}.sqlite3`,
+      stagingSha256: 'e'.repeat(64),
+      preImportBackupId: BACKUP_ID,
+    });
+    expect(scheduleRestart).not.toHaveBeenCalled();
+    deferredTasks[0]?.();
+    await vi.waitFor(() => expect(scheduleRestart).toHaveBeenCalledTimes(1));
+  });
+
+  it('discards the staged restore when Main confirmation is cancelled', async () => {
+    const database = createDatabase();
+    const requestReplacementApproval = vi.fn(async () => true);
+    const prepareReplacement = vi.fn(async () => undefined);
+    const scheduleRestart = vi.fn(async () => undefined);
+    const controller = new DataPortabilityController({
+      database,
+      dialogs: {
+        chooseExportPath: async () => undefined,
+        chooseImportPath: async () => undefined,
+      },
+      quarantine: createQuarantine(),
+      markerStore: new ReplacementMarkerStore(new MemoryMarkerPersistence()),
+      appVersion: '0.1.0',
+      requestDestructiveConfirmation: async () => true,
+      requestBackupRestoreConfirmation: async () => false,
+      requestReplacementApproval,
+      prepareReplacement,
+      scheduleRestart,
+      idFactory: () => RESTORE_ID,
+    });
+
+    await expect(controller.restoreBackup(createBackupRestoreInput())).resolves.toEqual({
+      status: 'cancelled',
+    });
+    expect(database.discardBackupRestore).toHaveBeenCalledExactlyOnceWith(
+      createPreparedBackupRestore(),
+    );
+    expect(requestReplacementApproval).not.toHaveBeenCalled();
+    expect(prepareReplacement).not.toHaveBeenCalled();
+    expect(database.createPreImportBackup).not.toHaveBeenCalled();
+    expect(scheduleRestart).not.toHaveBeenCalled();
+  });
+
+  it('rejects backup restore while an import preview owns quarantine state', async () => {
+    const database = createDatabase();
+    const quarantine = {
+      ...createQuarantine(),
+      hasActiveSession: vi.fn(() => true),
+    };
+    const controller = new DataPortabilityController({
+      database,
+      dialogs: {
+        chooseExportPath: async () => undefined,
+        chooseImportPath: async () => undefined,
+      },
+      quarantine,
+      markerStore: new ReplacementMarkerStore(new MemoryMarkerPersistence()),
+      appVersion: '0.1.0',
+      requestDestructiveConfirmation: async () => true,
+      requestBackupRestoreConfirmation: async () => true,
+      requestReplacementApproval: async () => true,
+      prepareReplacement: async () => undefined,
+      scheduleRestart: async () => undefined,
+      idFactory: () => RESTORE_ID,
+    });
+
+    await expect(controller.restoreBackup(createBackupRestoreInput())).rejects.toThrow(
+      /cancel the active data import preview/iu,
+    );
+    expect(database.prepareBackupRestore).not.toHaveBeenCalled();
+  });
+
+  it('discards staging and forces a clean restart if refresh fails after writer freeze', async () => {
+    const database = createDatabase();
+    database.refreshBackupRestore.mockRejectedValue(new Error('staged restore changed'));
+    const deferredTasks: Array<() => void> = [];
+    const scheduleRestart = vi.fn(async () => undefined);
+    const controller = new DataPortabilityController({
+      database,
+      dialogs: {
+        chooseExportPath: async () => undefined,
+        chooseImportPath: async () => undefined,
+      },
+      quarantine: createQuarantine(),
+      markerStore: new ReplacementMarkerStore(new MemoryMarkerPersistence()),
+      appVersion: '0.1.0',
+      requestDestructiveConfirmation: async () => true,
+      requestBackupRestoreConfirmation: async () => true,
+      requestReplacementApproval: async () => true,
+      prepareReplacement: async () => undefined,
+      scheduleRestart,
+      idFactory: () => RESTORE_ID,
+      defer: (task) => deferredTasks.push(task),
+    });
+
+    await expect(controller.restoreBackup(createBackupRestoreInput())).rejects.toThrow(
+      /staged restore changed/u,
+    );
+    expect(database.discardBackupRestore).toHaveBeenCalledExactlyOnceWith(
+      createPreparedBackupRestore(),
+    );
+    expect(database.createPreImportBackup).not.toHaveBeenCalled();
+    expect(scheduleRestart).not.toHaveBeenCalled();
+    deferredTasks[0]?.();
+    await vi.waitFor(() => expect(scheduleRestart).toHaveBeenCalledTimes(1));
+  });
 });
 
 function createDatabase() {
@@ -572,6 +767,9 @@ function createDatabase() {
       reason: 'pre-import' as const,
       schemaVersion: 7,
     })),
+    prepareBackupRestore: vi.fn(async () => createPreparedBackupRestore()),
+    refreshBackupRestore: vi.fn(async () => createPreparedBackupRestore()),
+    discardBackupRestore: vi.fn(async () => undefined),
   };
 }
 
@@ -593,6 +791,33 @@ function createPreparedImport() {
     packageDigest: 'b'.repeat(64),
     stagingPath: `/controlled/import-${IMPORT_ID}.sqlite3`,
     stagingDigest: 'c'.repeat(64),
+  };
+}
+
+function createPreparedBackupRestore() {
+  return {
+    restoreId: RESTORE_ID,
+    backup: {
+      id: RESTORE_BACKUP_ID,
+      fileName: 'backup.sqlite3',
+      createdAt: NOW,
+      sizeBytes: 100,
+      reason: 'manual' as const,
+      schemaVersion: 7,
+    },
+    sourceDigest: 'c'.repeat(64),
+    stagingFileName: `import-${RESTORE_ID}.sqlite3`,
+    stagingDigest: 'd'.repeat(64),
+  };
+}
+
+function createBackupRestoreInput() {
+  return {
+    backupId: RESTORE_BACKUP_ID,
+    expectedReason: 'manual' as const,
+    expectedCreatedAt: NOW,
+    expectedSizeBytes: 100,
+    expectedSchemaVersion: 7,
   };
 }
 

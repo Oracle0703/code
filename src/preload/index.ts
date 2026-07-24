@@ -31,6 +31,8 @@ import {
   type DataImportTargetInput,
   type DataManagementSnapshot,
   type DatabaseBackupInfo,
+  type DatabaseBackupRestoreInput,
+  type DatabaseBackupRestoreResult,
   type DatabaseStatus,
   type FocusChangedEvent,
   type FocusSnapshot,
@@ -181,6 +183,8 @@ const workbenchApi: WorkbenchApi = Object.freeze({
     getStatus: () => invoke<DatabaseStatus>(IPC_CHANNELS.database.getStatus),
     createBackup: () => invoke<DatabaseBackupInfo>(IPC_CHANNELS.database.createBackup),
     listBackups: () => invoke<DatabaseBackupInfo[]>(IPC_CHANNELS.database.listBackups),
+    restoreBackup: (input: DatabaseBackupRestoreInput) =>
+      invoke<DatabaseBackupRestoreResult>(IPC_CHANNELS.database.restoreBackup, input),
     getManagementSnapshot: () =>
       invoke<DataManagementSnapshot>(IPC_CHANNELS.database.getManagementSnapshot),
     updateBackupPolicy: (input: BackupPolicyUpdateInput) =>
