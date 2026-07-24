@@ -164,27 +164,30 @@ describe('portable data package', () => {
     });
   });
 
-  it('emits v3 focus sessions with exact counts and graph validation', () => {
-    const bytes = serializePortablePackage({
-      exportId: '13131313-1313-4131-8131-131313131313',
-      exportedAt: '2026-07-22T12:00:00.000Z',
-      sourceAppVersion: '0.1.0',
-      sourceSchemaVersion: 10,
-      records: [...records, automationRecord, focusSessionRecord],
-    });
-    const parsed = parsePortablePackage(bytes);
+  it.each([10, 11] as const)(
+    'emits v3 focus sessions for source schema %i with exact counts and graph validation',
+    (sourceSchemaVersion) => {
+      const bytes = serializePortablePackage({
+        exportId: '13131313-1313-4131-8131-131313131313',
+        exportedAt: '2026-07-22T12:00:00.000Z',
+        sourceAppVersion: '0.1.0',
+        sourceSchemaVersion,
+        records: [...records, automationRecord, focusSessionRecord],
+      });
+      const parsed = parsePortablePackage(bytes);
 
-    expect(parsed.manifest).toMatchObject({
-      formatVersion: DATA_PACKAGE_FORMAT_VERSION,
-      sourceSchemaVersion: 10,
-      counts: {
-        automations: 1,
-        enabledAutomations: 1,
-        focusSessions: 1,
-      },
-    });
-    expect(parsed.records.at(-1)).toEqual(focusSessionRecord);
-  });
+      expect(parsed.manifest).toMatchObject({
+        formatVersion: DATA_PACKAGE_FORMAT_VERSION,
+        sourceSchemaVersion,
+        counts: {
+          automations: 1,
+          enabledAutomations: 1,
+          focusSessions: 1,
+        },
+      });
+      expect(parsed.records.at(-1)).toEqual(focusSessionRecord);
+    },
+  );
 
   it('binds formats to schemas and rejects automation runtime or extra action fields', () => {
     expect(() =>

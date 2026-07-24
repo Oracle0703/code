@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
+  ArchivedWorkspaceInfo,
+  WorkspaceArchiveSnapshot,
   WorkspaceColor,
   WorkspacePreferencesPatch,
   WorkspaceSnapshot,
@@ -12,9 +14,20 @@ import {
   rebaseWorkspaceMutationSnapshot,
   removeCommittedWorkspacePreferencePatch,
 } from '../../shared/workspace-preference-state';
+import {
+  WorkspaceArchiveRequestGate,
+  type WorkspaceArchiveStatus,
+} from '../workspace-archive-state';
 
-type WorkspaceOperation = 'create' | 'rename' | 'activate' | 'archive' | null;
+type WorkspaceOperation = 'create' | 'rename' | 'activate' | 'archive' | 'restore' | null;
 export type WorkspaceSaveStatus = 'saved' | 'saving' | 'error';
+
+export interface WorkspaceArchiveManager {
+  readonly open: boolean;
+  readonly status: WorkspaceArchiveStatus;
+  readonly workspaces: readonly ArchivedWorkspaceInfo[];
+  readonly loadError: string | null;
+}
 
 export interface WorkspaceController {
   readonly status: 'loading' | 'ready' | 'error';
@@ -25,6 +38,7 @@ export interface WorkspaceController {
   readonly saveStatus: WorkspaceSaveStatus;
   readonly pendingOperation: WorkspaceOperation;
   readonly pendingWorkspaceId: string | null;
+  readonly archiveManager: WorkspaceArchiveManager;
   readonly canRetry: boolean;
   retry(): void;
   retryPreferences(): void;
@@ -32,6 +46,10 @@ export interface WorkspaceController {
   rename(workspaceId: string, name: string): Promise<void>;
   activate(workspaceId: string): Promise<void>;
   archive(workspaceId: string): Promise<void>;
+  openArchiveManager(): void;
+  closeArchiveManager(): void;
+  retryArchiveManager(): void;
+  restore(workspaceId: string, expectedRevision: number, name: string): Promise<void>;
   updatePreferences(
     patch: WorkspacePreferencesPatch,
     persist?: boolean,
@@ -54,6 +72,12 @@ export function useWorkspaceController(): WorkspaceController {
   const [dirtyPreferenceCount, setDirtyPreferenceCount] = useState(0);
   const [pendingOperation, setPendingOperation] = useState<WorkspaceOperation>(null);
   const [pendingWorkspaceId, setPendingWorkspaceId] = useState<string | null>(null);
+  const [archiveManager, setArchiveManager] = useState<WorkspaceArchiveManager>({
+    open: false,
+    status: 'idle',
+    workspaces: [],
+    loadError: null,
+  });
   const [loadGeneration, setLoadGeneration] = useState(0);
   const snapshotRef = useRef<WorkspaceSnapshot | null>(null);
   const mutationInFlightRef = useRef(false);
@@ -64,6 +88,8 @@ export function useWorkspaceController(): WorkspaceController {
   const retryPreferencesRef = useRef<Promise<boolean> | null>(null);
   const deferPreferenceWritesRef = useRef(false);
   const legacyImportWorkspaceIdRef = useRef<string | null>(null);
+  const archiveRequestGateRef = useRef(new WorkspaceArchiveRequestGate());
+  const archiveLoadTaskRef = useRef<Promise<void> | null>(null);
 
   const applySnapshot = useCallback((nextSnapshot: WorkspaceSnapshot) => {
     snapshotRef.current = nextSnapshot;
@@ -201,6 +227,92 @@ export function useWorkspaceController(): WorkspaceController {
     };
   }, [applySnapshot, loadGeneration, workspaceApi]);
 
+  const loadArchiveManager = useCallback(async (): Promise<void> => {
+    const gate = archiveRequestGateRef.current;
+    const request = gate.beginLoad();
+    if (!request) {
+      await (archiveLoadTaskRef.current ?? Promise.resolve());
+      return;
+    }
+
+    setArchiveManager((current) =>
+      current.open
+        ? {
+            ...current,
+            status: 'loading',
+            loadError: null,
+          }
+        : current,
+    );
+
+    const task = (async () => {
+      if (!workspaceApi) {
+        if (gate.finishLoad(request)) {
+          setArchiveManager((current) => ({
+            ...current,
+            status: 'error',
+            loadError: '桌面工作区桥接不可用，请重新启动应用。',
+          }));
+        }
+        return;
+      }
+      try {
+        const archiveSnapshot = await workspaceApi.getArchiveSnapshot();
+        if (!gate.finishLoad(request)) return;
+        setArchiveManager({
+          open: true,
+          status: 'ready',
+          workspaces: archiveSnapshot.archivedWorkspaces,
+          loadError: null,
+        });
+      } catch {
+        if (!gate.finishLoad(request)) return;
+        setArchiveManager((current) => ({
+          ...current,
+          status: 'error',
+          loadError: '无法读取归档工作区，请重试。',
+        }));
+      }
+    })();
+    archiveLoadTaskRef.current = task;
+    await task;
+    if (archiveLoadTaskRef.current === task) archiveLoadTaskRef.current = null;
+  }, [workspaceApi]);
+
+  const openArchiveManager = useCallback(() => {
+    const { opened } = archiveRequestGateRef.current.open();
+    if (!opened) return;
+    setArchiveManager({
+      open: true,
+      status: 'loading',
+      workspaces: [],
+      loadError: null,
+    });
+    void loadArchiveManager();
+  }, [loadArchiveManager]);
+
+  const closeArchiveManager = useCallback(() => {
+    if (!archiveRequestGateRef.current.close()) return;
+    setArchiveManager({
+      open: false,
+      status: 'idle',
+      workspaces: [],
+      loadError: null,
+    });
+  }, []);
+
+  const retryArchiveManager = useCallback(() => {
+    if (!archiveRequestGateRef.current.isOpen()) return;
+    void loadArchiveManager();
+  }, [loadArchiveManager]);
+
+  useEffect(
+    () => () => {
+      archiveRequestGateRef.current.dispose();
+    },
+    [],
+  );
+
   const runMutation = useCallback(
     async (
       operation: Exclude<WorkspaceOperation, null>,
@@ -292,6 +404,43 @@ export function useWorkspaceController(): WorkspaceController {
     [runMutation, workspaceApi],
   );
 
+  const restore = useCallback(
+    async (workspaceId: string, expectedRevision: number, name: string) => {
+      if (!workspaceApi) throw new Error('桌面工作区桥接不可用。');
+      const request = archiveRequestGateRef.current.beginRestore(workspaceId);
+      if (!request) {
+        throw new Error('另一项归档工作区操作正在进行，请稍候。');
+      }
+
+      const completed = {
+        archiveSnapshot: null as WorkspaceArchiveSnapshot | null,
+      };
+      try {
+        await runMutation('restore', workspaceId, async () => {
+          const result = await workspaceApi.restore({ workspaceId, expectedRevision, name });
+          completed.archiveSnapshot = result.archiveSnapshot;
+          return result.workspaceSnapshot;
+        });
+        if (
+          !archiveRequestGateRef.current.finishRestore(request) ||
+          completed.archiveSnapshot === null
+        ) {
+          return;
+        }
+        setArchiveManager({
+          open: true,
+          status: 'ready',
+          workspaces: completed.archiveSnapshot.archivedWorkspaces,
+          loadError: null,
+        });
+      } catch (error) {
+        archiveRequestGateRef.current.finishRestore(request);
+        throw error;
+      }
+    },
+    [runMutation, workspaceApi],
+  );
+
   const updatePreferences = useCallback(
     (patch: WorkspacePreferencesPatch, persist = true, requestedWorkspaceId?: string) => {
       const current = snapshotRef.current;
@@ -330,6 +479,7 @@ export function useWorkspaceController(): WorkspaceController {
     saveStatus,
     pendingOperation,
     pendingWorkspaceId,
+    archiveManager,
     canRetry: Boolean(workspaceApi),
     retry: () => {
       if (!workspaceApi) {
@@ -348,6 +498,10 @@ export function useWorkspaceController(): WorkspaceController {
     rename,
     activate,
     archive,
+    openArchiveManager,
+    closeArchiveManager,
+    retryArchiveManager,
+    restore,
     updatePreferences,
   };
 }
@@ -358,13 +512,19 @@ function workspaceErrorMessage(error: unknown): string {
     return '请先重试保存工作区设置，再继续此操作。';
   }
   if (message.includes('already uses this name')) {
-    return '已有同名的活动工作区，请换一个名称。';
+    return '已有同名的活动工作区，请修改名称后重试。';
+  }
+  if (message.includes('archived workspace changed')) {
+    return '归档记录已发生变化，请重新加载后再恢复。';
+  }
+  if (message.includes('active automation limit')) {
+    return '恢复后会超过活动自动化数量上限，请先归档一些自动化。';
   }
   if (message.includes('last active workspace')) {
     return '至少需要保留一个活动工作区。';
   }
   if (message.includes('unavailable')) {
-    return '这个工作区已归档或不存在。';
+    return '这个工作区已归档、不再可用或已经恢复。';
   }
   return '工作区操作失败，原有数据未被更改。';
 }

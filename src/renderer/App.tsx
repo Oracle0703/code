@@ -9,6 +9,7 @@ import {
 import {
   AppWindow,
   Archive,
+  ArchiveRestore,
   Bot,
   CheckSquare2,
   Command,
@@ -53,6 +54,7 @@ import {
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { findCurrentWorkspace } from '../shared/workspace-domain';
 import { ActivityRail } from './components/ActivityRail';
+import { ArchivedWorkspacesDialog } from './components/ArchivedWorkspacesDialog';
 import { AssistantPage } from './components/AssistantPage';
 import { AutomationDialog, type AutomationDialogState } from './components/AutomationDialog';
 import { AutomationPage } from './components/AutomationPage';
@@ -169,6 +171,7 @@ export function App() {
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
   const snapshot = workspaceController.snapshot;
+  const archiveManager = workspaceController.archiveManager;
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -232,6 +235,7 @@ export function App() {
   const activeSurface: AppSurfaceId = assistantSurfaceOpen ? 'assistant' : activeView;
   const overlayOpen =
     paletteOpen ||
+    archiveManager.open ||
     workspaceDialog !== null ||
     quickCaptureTarget !== null ||
     taskDialog !== null ||
@@ -321,6 +325,7 @@ export function App() {
   const openQuickCapture = useCallback(() => {
     if (
       !activeWorkspace ||
+      archiveManager.open ||
       workspaceDialog !== null ||
       taskDialog !== null ||
       scheduleDialog !== null ||
@@ -338,6 +343,7 @@ export function App() {
     );
   }, [
     activeWorkspace,
+    archiveManager.open,
     automationDialog,
     scheduleDialog,
     dataState.importPreview,
@@ -351,6 +357,7 @@ export function App() {
     (planning: TaskPlanning) => {
       if (
         !activeWorkspace ||
+        archiveManager.open ||
         (planning !== 'none' &&
           !taskController.snapshot?.planningDays.some(({ token }) => token === planning)) ||
         workspaceDialog !== null ||
@@ -373,6 +380,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      archiveManager.open,
       automationDialog,
       focusDialogOpen,
       quickCaptureTarget,
@@ -388,6 +396,7 @@ export function App() {
     (expectedDate: string) => {
       if (
         !activeWorkspace ||
+        archiveManager.open ||
         !scheduleController.snapshot ||
         !scheduleController.snapshot.planningDays.some(({ date }) => date === expectedDate) ||
         workspaceDialog !== null ||
@@ -418,6 +427,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      archiveManager.open,
       automationDialog,
       quickCaptureTarget,
       scheduleController.snapshot,
@@ -433,6 +443,7 @@ export function App() {
   const openAutomationCreate = useCallback(() => {
     if (
       !activeWorkspace ||
+      archiveManager.open ||
       workspaceDialog !== null ||
       quickCaptureTarget !== null ||
       taskDialog !== null ||
@@ -452,6 +463,7 @@ export function App() {
     });
   }, [
     activeWorkspace,
+    archiveManager.open,
     automationDialog,
     dataState.importPreview,
     focusDialogOpen,
@@ -466,6 +478,7 @@ export function App() {
     (item: AutomationItem) => {
       if (
         !activeWorkspace ||
+        archiveManager.open ||
         workspaceDialog !== null ||
         quickCaptureTarget !== null ||
         taskDialog !== null ||
@@ -487,6 +500,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      archiveManager.open,
       automationDialog,
       dataState.importPreview,
       focusDialogOpen,
@@ -586,6 +600,7 @@ export function App() {
     if (!snapshot) return;
     const handleShortcut = (event: KeyboardEvent) => {
       if (
+        archiveManager.open ||
         workspaceDialog !== null ||
         taskDialog !== null ||
         scheduleDialog !== null ||
@@ -646,6 +661,7 @@ export function App() {
     window.addEventListener('keydown', handleShortcut);
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [
+    archiveManager.open,
     browserOpen,
     automationDialog,
     dataState.importPreview,
@@ -924,6 +940,18 @@ export function App() {
         },
       },
       {
+        id: 'workspace:archives',
+        label: '管理归档工作区',
+        description: '查看并恢复保留在本机的工作区',
+        group: '工作区',
+        icon: ArchiveRestore,
+        keywords: '工作区 归档 恢复 restore archive',
+        disabled: workspaceController.pendingOperation !== null,
+        disabledReason:
+          workspaceController.pendingOperation !== null ? '另一项工作区操作正在进行' : undefined,
+        action: workspaceController.openArchiveManager,
+      },
+      {
         id: 'workspace:rename',
         label: '重命名当前工作区',
         description: activeWorkspace.name,
@@ -1060,6 +1088,8 @@ export function App() {
     terminalOpen,
     theme,
     updatePreferences,
+    workspaceController.openArchiveManager,
+    workspaceController.pendingOperation,
   ]);
 
   const beginBrowserResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1272,6 +1302,7 @@ export function App() {
                 switchesWorkspace: workspace.id === snapshot.currentWorkspaceId,
               });
             }}
+            onManageArchivedWorkspaces={workspaceController.openArchiveManager}
           />
         </div>
 
@@ -1697,6 +1728,21 @@ export function App() {
         onSelectSearchResult={selectSearchResult}
         onClose={() => setPaletteOpen(false)}
       />
+      {archiveManager.open ? (
+        <ArchivedWorkspacesDialog
+          status={archiveManager.status}
+          workspaces={archiveManager.workspaces}
+          loadError={archiveManager.loadError}
+          pendingWorkspaceId={
+            workspaceController.pendingOperation === 'restore'
+              ? workspaceController.pendingWorkspaceId
+              : null
+          }
+          onClose={workspaceController.closeArchiveManager}
+          onRetry={workspaceController.retryArchiveManager}
+          onRestore={workspaceController.restore}
+        />
+      ) : null}
       {workspaceDialog ? (
         <WorkspaceDialog
           state={workspaceDialog}

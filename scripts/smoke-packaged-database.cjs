@@ -251,6 +251,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'terminal_workspace_preferences',
     'scheduled_automations',
     'focus_sessions',
+    'workspace_recovery',
     'openai-api-key.v1.bin',
     'safeStorage',
     'https://api.openai.com/v1/responses',
@@ -272,6 +273,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'CREATE TABLE automation_run_state',
     'CREATE TABLE automation_occurrences',
     'CREATE TABLE focus_sessions',
+    'CREATE TABLE workspace_recovery_revisions',
     'remaining_seconds BETWEEN 0 AND 1500',
     'terminal preference revision must advance exactly once',
     'archived workspace terminal preferences are immutable',
@@ -281,10 +283,14 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'focus session revision must advance exactly once',
     'focus sessions cannot be permanently deleted',
     'focus session task must belong to its workspace',
+    'workspace recovery revision must match the archive transition',
+    'restored workspace would exceed active automation limit',
+    'archived workspace automation state is immutable',
+    'automation occurrence requires an active workspace',
     'focus-session',
     'An unfinished focus session cannot belong to an archived workspace.',
     'The staged database focus sessions are not safely paused or completed.',
-    'The import codec requires the current v10 migration set.',
+    'The import codec requires the current v11 migration set.',
     'A focus task must be unfinished and planned for today in this workspace.',
     'Focus wake delay must be an integer from 1 to 60000 milliseconds.',
     'Focus remaining time must be an integer between',
@@ -317,6 +323,8 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'assistant:cancel',
     'assistant:changed',
     'workspace:get-snapshot',
+    'workspace:get-archive-snapshot',
+    'workspace:restore',
     'workspace:update-preferences',
     'inbox:get-snapshot',
     'inbox:create',
@@ -542,6 +550,8 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'assistant:cancel',
     'assistant:changed',
     'workspace:get-snapshot',
+    'workspace:get-archive-snapshot',
+    'workspace:restore',
     'workspace:update-preferences',
     'inbox:get-snapshot',
     'inbox:create',
@@ -641,6 +651,18 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
       `Packaged bundles expose forbidden focus channel ${forbiddenFocusChannel}.`,
     );
   }
+  for (const forbiddenWorkspaceChannel of [
+    'workspace:delete',
+    'workspace:purge',
+    'workspace:set-archived-at',
+  ]) {
+    assert.equal(
+      mainBundle.includes(forbiddenWorkspaceChannel) ||
+        preloadBundle.includes(forbiddenWorkspaceChannel),
+      false,
+      `Packaged bundles expose forbidden workspace channel ${forbiddenWorkspaceChannel}.`,
+    );
+  }
   for (const forbiddenAssistantChannel of [
     'assistant:set-endpoint',
     'assistant:set-model',
@@ -683,6 +705,16 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     rendererBundle.includes('onCloseRequest'),
     'Packaged renderer does not participate in the close-approval handshake.',
   );
+  for (const archiveRecoveryToken of [
+    '管理归档工作区',
+    '恢复后的名称',
+    '已取消的专注会话不会恢复',
+  ]) {
+    assert.ok(
+      rendererBundle.includes(archiveRecoveryToken),
+      `Packaged renderer does not contain workspace recovery UI token ${archiveRecoveryToken}.`,
+    );
+  }
   for (const requiredTerminalRendererToken of [
     'terminal-tab__select',
     'terminal-cwd-summary',

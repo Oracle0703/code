@@ -78,9 +78,12 @@ import {
   type WindowCloseResponse,
   type WorkbenchApi,
   type WorkspaceCreateInput,
+  type WorkspaceArchiveSnapshot,
   type WorkspacePreferences,
   type WorkspacePreferencesInput,
   type WorkspaceRenameInput,
+  type WorkspaceRestoreInput,
+  type WorkspaceRestoreResult,
   type WorkspaceSnapshot,
   type WorkspaceTargetInput,
 } from '../shared/contracts';
@@ -196,6 +199,8 @@ const workbenchApi: WorkbenchApi = Object.freeze({
   }),
   workspace: Object.freeze({
     getSnapshot: () => invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.getSnapshot),
+    getArchiveSnapshot: () =>
+      invoke<WorkspaceArchiveSnapshot>(IPC_CHANNELS.workspace.getArchiveSnapshot),
     create: (input: WorkspaceCreateInput) =>
       invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.create, input),
     rename: (input: WorkspaceRenameInput) =>
@@ -204,6 +209,8 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.activate, input),
     archive: (input: WorkspaceTargetInput) =>
       invoke<WorkspaceSnapshot>(IPC_CHANNELS.workspace.archive, input),
+    restore: (input: WorkspaceRestoreInput) =>
+      invoke<WorkspaceRestoreResult>(IPC_CHANNELS.workspace.restore, input),
     updatePreferences: (input: WorkspacePreferencesInput) =>
       invoke<WorkspacePreferences>(IPC_CHANNELS.workspace.updatePreferences, input),
   }),

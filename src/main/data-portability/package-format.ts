@@ -696,7 +696,7 @@ function formatVersionForSchema(schemaVersion: number): PortablePackageFormatVer
     return LEGACY_DATA_PACKAGE_FORMAT_VERSION;
   }
   if (schemaVersion === 9) return AUTOMATION_DATA_PACKAGE_FORMAT_VERSION;
-  if (schemaVersion === 10) return DATA_PACKAGE_FORMAT_VERSION;
+  if (schemaVersion === 10 || schemaVersion === 11) return DATA_PACKAGE_FORMAT_VERSION;
   throw new DataPackageError('The data package source schema version is not supported.');
 }
 

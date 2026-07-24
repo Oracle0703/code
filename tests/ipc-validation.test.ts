@@ -51,6 +51,7 @@ import {
   parseWorkspaceCreateInput,
   parseWorkspacePreferencesInput,
   parseWorkspaceRenameInput,
+  parseWorkspaceRestoreInput,
   parseWorkspaceTargetInput,
 } from '../src/main/ipc/validation';
 import { PLANNING_DAY_TOKENS, WORKSPACE_COLORS } from '../src/shared/contracts';
@@ -630,6 +631,54 @@ describe('IPC validation', () => {
     expect(() => parseWorkspaceTargetInput({ workspaceId: WORKSPACE_ID, extra: true })).toThrow(
       TypeError,
     );
+  });
+
+  it('accepts only exact workspace restore inputs with a valid revision and bounded name', () => {
+    expect(
+      parseWorkspaceRestoreInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 3,
+        name: '  Ａlpha 工作区  ',
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      expectedRevision: 3,
+      name: 'Alpha 工作区',
+    });
+
+    for (const expectedRevision of [0, -1, 1.5, Number.NaN, '3', undefined]) {
+      expect(() =>
+        parseWorkspaceRestoreInput({
+          workspaceId: WORKSPACE_ID,
+          expectedRevision,
+          name: '恢复工作区',
+        }),
+      ).toThrow(TypeError);
+    }
+    for (const name of ['', '  ', 'line one\nline two', '\u0000', 'x'.repeat(81)]) {
+      expect(() =>
+        parseWorkspaceRestoreInput({
+          workspaceId: WORKSPACE_ID,
+          expectedRevision: 1,
+          name,
+        }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      parseWorkspaceRestoreInput({
+        workspaceId: WORKSPACE_ID.toUpperCase(),
+        expectedRevision: 1,
+        name: '恢复工作区',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseWorkspaceRestoreInput({
+        workspaceId: WORKSPACE_ID,
+        expectedRevision: 1,
+        name: '恢复工作区',
+        archivedAt: '2026-07-24T12:00:00.000Z',
+      }),
+    ).toThrow(TypeError);
   });
 
   it('accepts non-empty preference patches and rejects coercion or unknown keys', () => {

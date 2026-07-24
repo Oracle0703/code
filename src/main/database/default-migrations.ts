@@ -8,6 +8,7 @@ import searchDataProtectionSql from '../../../migrations/0007_search_data_protec
 import terminalWorkspacePreferencesSql from '../../../migrations/0008_terminal_workspace_preferences.sql?raw';
 import scheduledAutomationsSql from '../../../migrations/0009_scheduled_automations.sql?raw';
 import focusSessionsSql from '../../../migrations/0010_focus_sessions.sql?raw';
+import workspaceRecoverySql from '../../../migrations/0011_workspace_recovery.sql?raw';
 import type { Migration } from './types';
 
 export const DEFAULT_MIGRATIONS: readonly Migration[] = Object.freeze([
@@ -60,5 +61,10 @@ export const DEFAULT_MIGRATIONS: readonly Migration[] = Object.freeze([
     version: 10,
     name: 'focus_sessions',
     sql: focusSessionsSql,
+  }),
+  Object.freeze({
+    version: 11,
+    name: 'workspace_recovery',
+    sql: workspaceRecoverySql,
   }),
 ]);

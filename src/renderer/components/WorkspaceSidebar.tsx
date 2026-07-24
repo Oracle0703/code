@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Archive,
+  ArchiveRestore,
   CheckSquare2,
   ChevronDown,
   Clock3,
@@ -36,6 +37,7 @@ interface WorkspaceSidebarProps {
   onCreateWorkspace: () => void;
   onRenameWorkspace: (workspace: WorkspaceInfo) => void;
   onArchiveWorkspace: (workspace: WorkspaceInfo) => void;
+  onManageArchivedWorkspaces: () => void;
 }
 
 const sidebarLinks: Array<{
@@ -67,6 +69,7 @@ export function WorkspaceSidebar({
   onCreateWorkspace,
   onRenameWorkspace,
   onArchiveWorkspace,
+  onManageArchivedWorkspaces,
 }: WorkspaceSidebarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -188,6 +191,20 @@ export function WorkspaceSidebar({
                 <Plus size={14} />
               </span>
               新建工作区
+            </button>
+            <button
+              type="button"
+              className="workspace-menu__archive-manager"
+              disabled={busy}
+              onClick={() => {
+                setMenuOpen(false);
+                onManageArchivedWorkspaces();
+              }}
+            >
+              <span>
+                <ArchiveRestore size={14} aria-hidden="true" />
+              </span>
+              管理归档工作区
             </button>
           </div>
         ) : null}

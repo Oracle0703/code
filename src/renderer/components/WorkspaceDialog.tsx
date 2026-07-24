@@ -89,7 +89,7 @@ export function WorkspaceDialog({
             <h2 id="workspace-dialog-title">{title}</h2>
             <p>
               {state.mode === 'archive'
-                ? '归档会保留 SQLite 数据并从活动列表隐藏；当前版本尚无恢复入口。'
+                ? '归档会保留 SQLite 数据并从活动列表隐藏；以后可从“管理归档工作区”恢复。'
                 : '工作区名称和布局只保存在这台设备。'}
             </p>
           </div>
@@ -105,6 +105,9 @@ export function WorkspaceDialog({
               {state.switchesWorkspace
                 ? '这是当前工作区。归档后会自动切换到另一个活动工作区。'
                 : '归档后当前工作区不会改变。'}
+            </p>
+            <p>
+              自动化会被停用，进行中或暂停的专注会话会被取消；以后恢复工作区时不会自动启用或复活。
             </p>
           </div>
         ) : (

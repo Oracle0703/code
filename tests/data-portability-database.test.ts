@@ -176,12 +176,12 @@ describe('portable database codec', () => {
     database.close();
   });
 
-  it('exports v3 focus history, pauses a running session, omits cancelled rows, and re-imports safely', async () => {
+  it('exports current v3 focus history, pauses a running session, omits cancelled rows, and re-imports safely', async () => {
     const directory = await createTemporaryDirectory();
     const packageData = createFocusPackage();
     expect(packageData.manifest).toMatchObject({
       formatVersion: 3,
-      sourceSchemaVersion: 10,
+      sourceSchemaVersion: 11,
       counts: { focusSessions: 2 },
     });
     const sourcePath = await stagePackage(
@@ -331,7 +331,7 @@ describe('portable database codec', () => {
         exportId: '71717171-7171-4171-8171-717171717172',
         exportedAt: BUILD_TIME,
         sourceAppVersion: '0.1.0',
-        sourceSchemaVersion: 10,
+        sourceSchemaVersion: 11,
         records: exportedRecords,
       }),
     );
@@ -363,6 +363,40 @@ describe('portable database codec', () => {
     ).toEqual(exportedFocus);
     roundTrip.close();
   });
+
+  it.each([10, 11] as const)(
+    'accepts a v3 source schema %i package into a current v11 staging database',
+    async (sourceSchemaVersion) => {
+      const directory = await createTemporaryDirectory();
+      const packageData = createFocusPackage(900, TASK_ID, sourceSchemaVersion);
+      expect(packageData.manifest).toMatchObject({
+        formatVersion: 3,
+        sourceSchemaVersion,
+      });
+
+      const destinationPath = await stagePackage(
+        directory,
+        `71111111-1111-4111-8111-${String(sourceSchemaVersion).padStart(12, '0')}`,
+        `72222222-2222-4222-8222-${String(sourceSchemaVersion).padStart(12, '0')}`,
+        packageData,
+        createDriver(),
+      );
+      const database = createNodeSqliteAdapter(destinationPath, { readOnly: true });
+      database.open();
+      expect(database.get<{ user_version: number }>('PRAGMA user_version')).toEqual({
+        user_version: 11,
+      });
+      expect(
+        database.get<{ count: number }>('SELECT COUNT(*) AS count FROM focus_sessions'),
+      ).toEqual({ count: 2 });
+      expect(
+        database.get<{ count: number }>(
+          'SELECT COUNT(*) AS count FROM workspace_recovery_revisions',
+        ),
+      ).toEqual({ count: 2 });
+      database.close();
+    },
+  );
 
   it('round-trips archived-workspace history without charging it to the active limit', async () => {
     const directory = await createTemporaryDirectory();
@@ -718,6 +752,36 @@ describe('portable database codec', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
+  it('rejects reversed workspace timestamps during portable record decoding', async () => {
+    const directory = await createTemporaryDirectory();
+    const original = createPackage();
+    const invalidPackages: readonly ParsedPortablePackage[] = [
+      mutateRecord(original, 'workspace', (data) => ({
+        ...data,
+        createdAt: T2,
+        updatedAt: T1,
+      })),
+      mutateRecord(original, 'workspace', (data) => ({
+        ...data,
+        updatedAt: T4,
+        archivedAt: T5,
+      })),
+    ];
+
+    for (const [index, packageData] of invalidPackages.entries()) {
+      await expect(
+        stagePackage(
+          directory,
+          `11000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}`,
+          `21000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}`,
+          packageData,
+          createDriver(),
+        ),
+      ).rejects.toThrow('The data package workspace timestamp ordering is invalid.');
+    }
+    expect(await readdir(directory)).toEqual([]);
+  });
+
   it('rejects unsafe or relationally invalid focus records before staging', async () => {
     const directory = await createTemporaryDirectory();
     const original = createFocusPackage();
@@ -759,7 +823,7 @@ describe('portable database codec', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
-  it('accepts exactly v1 schema 7/8, v2 schema 9, and v3 schema 10 packages', async () => {
+  it('accepts exactly v1 schema 7/8, v2 schema 9, and v3 schema 10/11 packages', async () => {
     const directory = await createTemporaryDirectory();
     const legacyPath = await stagePackage(
       directory,
@@ -1050,13 +1114,14 @@ function createAutomationPackage(): ParsedPortablePackage {
 function createFocusPackage(
   pausedRemainingSeconds = 900,
   pausedTaskId: string | null = TASK_ID,
+  sourceSchemaVersion: 10 | 11 = 11,
 ): ParsedPortablePackage {
   return parsePortablePackage(
     serializePortablePackage({
       exportId: '71717171-7171-4171-8171-717171717173',
       exportedAt: BUILD_TIME,
       sourceAppVersion: '0.1.0',
-      sourceSchemaVersion: 10,
+      sourceSchemaVersion,
       records: [
         ...createRecords(),
         {
@@ -1147,7 +1212,7 @@ function createRecords(): readonly PortableDataRecord[] {
         id: ACTIVE_WORKSPACE_ID,
         name: '共享工作区',
         color: '#7b6ee8',
-        createdAt: T1,
+        createdAt: T0,
         updatedAt: T0,
         archivedAt: null,
       },
