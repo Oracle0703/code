@@ -2,6 +2,8 @@ import { useCallback, useEffect, useReducer, useRef } from 'react';
 import type {
   BackupPolicyUpdateInput,
   DataImportPreview,
+  DatabaseBackupRestoreInput,
+  DatabaseBackupRestoreResult,
   WorkbenchApi,
 } from '../../shared/contracts';
 import {
@@ -25,6 +27,7 @@ export interface DataManagementController {
   readonly state: DataManagementState;
   load(): Promise<void>;
   createBackup(): Promise<void>;
+  restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult>;
   updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<void>;
   exportData(): Promise<void>;
   chooseImport(): Promise<void>;
@@ -145,6 +148,36 @@ export function useDataManagementController({
       throw failOperation(operation, error, '备份创建失败；现有数据未被更改。');
     }
   }, [beginOperation, databaseApi, failOperation, finishOperation]);
+
+  const restoreBackup = useCallback(
+    async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult> => {
+      const operation = beginOperation('restore-backup');
+      if (!databaseApi) {
+        throw failOperation(operation, null, '桌面数据桥接不可用，请重新启动应用。');
+      }
+      const lockedInput = Object.freeze({ ...input });
+      try {
+        const result = await databaseApi.restoreBackup(lockedInput);
+        if (!finishOperation(operation)) return result;
+        dispatch({
+          type: 'operation-succeeded',
+          generation: operation.generation,
+          message:
+            result.status === 'restarting'
+              ? '备份恢复已安全提交，应用正在重启。'
+              : '已取消备份恢复；当前数据未被更改。',
+        });
+        return result;
+      } catch (error) {
+        throw failOperation(
+          operation,
+          error,
+          '备份恢复失败；当前数据库、目标备份与安全副本均已保留。',
+        );
+      }
+    },
+    [beginOperation, databaseApi, failOperation, finishOperation],
+  );
 
   const updateBackupPolicy = useCallback(
     async (input: BackupPolicyUpdateInput): Promise<void> => {
@@ -270,6 +303,7 @@ export function useDataManagementController({
     state,
     load,
     createBackup,
+    restoreBackup,
     updateBackupPolicy,
     exportData,
     chooseImport,

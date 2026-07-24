@@ -48,6 +48,7 @@ describe('preload data and search API', () => {
       'getStatus',
       'listBackups',
       'onBackupStateChange',
+      'restoreBackup',
       'updateBackupPolicy',
     ]);
     expect(Object.keys(api.search)).toEqual(['query']);
@@ -70,8 +71,16 @@ describe('preload data and search API', () => {
       query: '项目 搜索',
       scope: 'all' as const,
     };
+    const restore = {
+      backupId: '323e4567-e89b-42d3-a456-426614174000',
+      expectedReason: 'manual' as const,
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 2_097_152,
+      expectedSchemaVersion: 11,
+    };
 
     await api.database.getManagementSnapshot();
+    await api.database.restoreBackup(restore);
     await api.database.updateBackupPolicy(policy);
     await api.database.exportData();
     await api.database.chooseImport();
@@ -81,6 +90,7 @@ describe('preload data and search API', () => {
 
     expect(electron.invoke.mock.calls).toEqual([
       ['database:get-management-snapshot'],
+      ['database:restore-backup', restore],
       ['database:update-backup-policy', policy],
       ['database:export-data'],
       ['database:choose-import'],

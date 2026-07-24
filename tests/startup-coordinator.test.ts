@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AsyncSingleFlight, settleStartupStage } from '../src/main/startup-coordinator';
+import {
+  AsyncSingleFlight,
+  decideBeforeQuit,
+  settleStartupStage,
+} from '../src/main/startup-coordinator';
 
 describe('startup coordinator', () => {
   it('discards a completed stage if shutdown won the asynchronous boundary', async () => {
@@ -51,5 +55,29 @@ describe('startup coordinator', () => {
     const failure = new Error('load failed');
     await expect(singleFlight.run(async () => Promise.reject(failure))).rejects.toBe(failure);
     await expect(singleFlight.run(async () => 'recovered')).resolves.toBe('recovered');
+  });
+
+  it('lets an active database replacement own quit without starting a second approval', () => {
+    expect(
+      decideBeforeQuit({
+        allowQuit: false,
+        databaseAvailable: true,
+        replacementActive: true,
+      }),
+    ).toBe('replacement-owned');
+    expect(
+      decideBeforeQuit({
+        allowQuit: false,
+        databaseAvailable: true,
+        replacementActive: false,
+      }),
+    ).toBe('request-approval');
+    expect(
+      decideBeforeQuit({
+        allowQuit: true,
+        databaseAvailable: true,
+        replacementActive: true,
+      }),
+    ).toBe('allow');
   });
 });

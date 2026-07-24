@@ -12,6 +12,7 @@ import type {
   BackupPolicyUpdateInput,
   BackupRunErrorCode,
   DatabaseBackupInfo,
+  DatabaseBackupRestoreInput,
   DatabaseStatus,
   FocusSnapshot,
   FocusStartInput,
@@ -84,6 +85,7 @@ import type {
 import { WORKSPACE_RECOVERY_SCHEMA_VERSION, WorkspaceService } from '../workspaces';
 import { BackupManager, toDatabaseBackupInfo } from './backup-manager';
 import { BackupPolicyRepository } from './backup-policy-repository';
+import { BackupRestoreStager, type BackupRestoreLocalState } from './backup-restore-stager';
 import type { BackupSchedulerPersistentState } from './backup-scheduler';
 import { DEFAULT_MIGRATIONS } from './default-migrations';
 import {
@@ -114,6 +116,7 @@ import type {
   DatabaseHealth,
   DatabaseInitializationResult,
   Migration,
+  PreparedBackupRestore,
 } from './types';
 
 const DATABASE_INITIALIZATION_INTENT = 'database-initializing-v1';
@@ -152,6 +155,11 @@ export interface DatabaseServiceOptions {
   readonly dataDirectory: string;
   readonly databaseFileName?: string;
   readonly migrations?: readonly Migration[];
+  /**
+   * `retained-source-copy` is only for an isolated migration copy whose
+   * canonical source is already retained by the application backup manager.
+   */
+  readonly preMigrationBackupMode?: 'required' | 'retained-source-copy';
   readonly adapterFactory?: SqliteAdapterFactory;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
@@ -179,6 +187,7 @@ export class DatabaseService implements TerminalPreferenceStore {
   readonly #paths;
   readonly #adapterFactory: SqliteAdapterFactory;
   readonly #migrationRunner: MigrationRunner;
+  readonly #preMigrationBackupMode: 'required' | 'retained-source-copy';
   readonly #now: () => Date;
   readonly #idFactory: () => string;
   readonly #workspaceService: WorkspaceService;
@@ -190,6 +199,7 @@ export class DatabaseService implements TerminalPreferenceStore {
   readonly #automationService: AutomationService;
   readonly #searchService: SearchService;
   readonly #browserService: BrowserService;
+  readonly #backupRestoreStager: BackupRestoreStager;
   #state: ServiceState = 'closed';
   #database: SqliteAdapter | undefined;
   #backupManager: BackupManager | undefined;
@@ -203,6 +213,7 @@ export class DatabaseService implements TerminalPreferenceStore {
     dataDirectory,
     databaseFileName,
     migrations = DEFAULT_MIGRATIONS,
+    preMigrationBackupMode = 'required',
     adapterFactory = createNodeSqliteAdapter,
     now = () => new Date(),
     idFactory = randomUUID,
@@ -223,9 +234,16 @@ export class DatabaseService implements TerminalPreferenceStore {
     browserTabIdFactory = randomUUID,
     browserBookmarkIdFactory = randomUUID,
   }: DatabaseServiceOptions) {
+    if (
+      preMigrationBackupMode !== 'required' &&
+      preMigrationBackupMode !== 'retained-source-copy'
+    ) {
+      throw new TypeError('The pre-migration backup mode is invalid.');
+    }
     this.#paths = resolveDatabasePaths(dataDirectory, databaseFileName);
     this.#adapterFactory = adapterFactory;
     this.#migrationRunner = new MigrationRunner(migrations);
+    this.#preMigrationBackupMode = preMigrationBackupMode;
     this.#now = now;
     this.#idFactory = idFactory;
     this.#workspaceService = new WorkspaceService({
@@ -287,6 +305,36 @@ export class DatabaseService implements TerminalPreferenceStore {
       tabIdFactory: browserTabIdFactory,
       bookmarkIdFactory: browserBookmarkIdFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#backupRestoreStager = new BackupRestoreStager({
+      dataDirectory: this.#paths.dataDirectory,
+      migrations,
+      adapterFactory,
+      validateSnapshot: (database, version) => this.#validateSnapshot(database, version),
+      validateContentIntegrity: (database) =>
+        this.#searchService.validateContentIntegrity(database),
+      initializeCopiedDatabase: async (stagingDataDirectory) => {
+        const stagingService = new DatabaseService({
+          dataDirectory: stagingDataDirectory,
+          migrations,
+          preMigrationBackupMode: 'retained-source-copy',
+          adapterFactory,
+          now,
+        });
+        try {
+          const initialized = await stagingService.open();
+          if (initialized.preMigrationBackup) {
+            throw new DatabaseIntegrityError(
+              'The retained database restore copy created a redundant migration backup.',
+            );
+          }
+          return initialized.migration;
+        } finally {
+          await stagingService.close();
+        }
+      },
+      now,
+      idFactory,
     });
   }
 
@@ -474,6 +522,30 @@ export class DatabaseService implements TerminalPreferenceStore {
         'A database backup cannot be validated while the database is changing state.',
       ),
     );
+  }
+
+  prepareBackupRestore(
+    input: DatabaseBackupRestoreInput,
+    restoreId: string,
+  ): Promise<PreparedBackupRestore> {
+    return this.#enqueue((database, backups) =>
+      this.#backupRestoreStager.prepare(
+        input,
+        restoreId,
+        readBackupRestoreLocalState(database),
+        backups,
+      ),
+    );
+  }
+
+  refreshBackupRestore(prepared: PreparedBackupRestore): Promise<PreparedBackupRestore> {
+    return this.#enqueue((database, backups) =>
+      this.#backupRestoreStager.refresh(prepared, readBackupRestoreLocalState(database), backups),
+    );
+  }
+
+  discardBackupRestore(prepared: PreparedBackupRestore): Promise<void> {
+    return this.#enqueue(() => this.#backupRestoreStager.discard(prepared));
   }
 
   readPortableRecords(): Promise<readonly PortableDataRecord[]> {
@@ -786,6 +858,11 @@ export class DatabaseService implements TerminalPreferenceStore {
     const existed = await databaseFileExists(this.#paths.databasePath);
     const existingEntry = existed ? await lstat(this.#paths.databasePath) : undefined;
     const existingSize = existingEntry?.size ?? 0;
+    if (this.#preMigrationBackupMode === 'retained-source-copy' && existingSize === 0) {
+      throw new DatabaseOpenError(
+        'A retained migration source must be an existing nonempty database copy.',
+      );
+    }
     const backups = this.#createBackupManager();
     const recognizedBackupCount = legacyBackupDirectoryExisted ? await backups.count() : 0;
     const retryingInitialization =
@@ -832,7 +909,12 @@ export class DatabaseService implements TerminalPreferenceStore {
 
       const plan = this.#migrationRunner.plan(database);
       let preMigrationBackup: BackupResult | undefined;
-      if (existingSize > 0 && plan.pending.length > 0 && !retryingInitialization) {
+      if (
+        existingSize > 0 &&
+        plan.pending.length > 0 &&
+        !retryingInitialization &&
+        this.#preMigrationBackupMode === 'required'
+      ) {
         preMigrationBackup = await backups.create(database, 'pre-migration', plan.currentVersion);
       }
 
@@ -1299,6 +1381,14 @@ function readTextValue(database: SqliteAdapter, sql: string): string {
     throw new DatabaseIntegrityError('SQLite returned an invalid text status value.');
   }
   return row.value;
+}
+
+function readBackupRestoreLocalState(database: SqliteAdapter): BackupRestoreLocalState {
+  const repository = new BackupPolicyRepository(database);
+  return {
+    policy: repository.readPolicy(),
+    runState: repository.readRunState(),
+  };
 }
 
 function readPragmaText(database: SqliteAdapter, pragma: 'journal_mode'): string {

@@ -19,6 +19,8 @@ import {
   type DataImportTargetInput,
   type DataManagementSnapshot,
   type DatabaseBackupInfo,
+  type DatabaseBackupRestoreInput,
+  type DatabaseBackupRestoreResult,
   type DatabaseStatus,
   type FocusSnapshot,
   type FocusStartInput,
@@ -92,6 +94,7 @@ import {
   parseBrowserWorkspaceInput,
   parseDataImportCommitInput,
   parseDataImportTargetInput,
+  parseDatabaseBackupRestoreInput,
   parseFocusStartInput,
   parseFocusTargetInput,
   parseInboxCategorizeInput,
@@ -136,11 +139,12 @@ interface IpcDependencies {
   browser: BrowserController;
   database: {
     getStatus(): Promise<DatabaseStatus>;
-    createBackup(): Promise<DatabaseBackupInfo>;
     listBackups(): Promise<DatabaseBackupInfo[]>;
   };
   data: {
+    createBackup(): Promise<DatabaseBackupInfo>;
     getManagementSnapshot(): Promise<DataManagementSnapshot>;
+    restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult>;
     updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<DataManagementSnapshot>;
     exportData(): Promise<DataExportResult>;
     chooseImport(): Promise<DataImportSelection>;
@@ -285,11 +289,15 @@ export function registerIpcHandlers({
   });
   register(IPC_CHANNELS.database.createBackup, (_event, ...args) => {
     assertNoArguments(args, 'Creating a database backup');
-    return database.createBackup();
+    return data.createBackup();
   });
   register(IPC_CHANNELS.database.listBackups, (_event, ...args) => {
     assertNoArguments(args, 'Listing database backups');
     return database.listBackups();
+  });
+  register(IPC_CHANNELS.database.restoreBackup, (_event, input, ...args) => {
+    assertNoArguments(args, 'Restoring a database backup');
+    return data.restoreBackup(parseDatabaseBackupRestoreInput(input));
   });
   register(IPC_CHANNELS.database.getManagementSnapshot, (_event, ...args) => {
     assertNoArguments(args, 'Getting data management state');

@@ -3,6 +3,8 @@ import type {
   BackupPolicyUpdateInput,
   BackupRunErrorCode,
   DataExportResult,
+  DatabaseBackupRestoreInput,
+  DatabaseBackupRestoreResult,
   DataImportCommitInput,
   DataImportCommitResult,
   DataImportSelection,
@@ -22,6 +24,7 @@ import type { BackupRetentionResult } from '../database/types';
 
 export interface DataManagementDatabase {
   getStatus(): Promise<DatabaseStatus>;
+  createBackup(): Promise<DatabaseBackupInfo>;
   listBackups(): Promise<DatabaseBackupInfo[]>;
   getBackupSchedulerState(): Promise<BackupSchedulerPersistentState>;
   updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<BackupPolicy>;
@@ -41,6 +44,7 @@ export interface DataPortabilityOperations {
   chooseImport(): Promise<DataImportSelection>;
   commitImport(input: DataImportCommitInput): Promise<DataImportCommitResult>;
   cancelImport(input: DataImportTargetInput): Promise<void>;
+  restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult>;
 }
 
 export interface DataManagementControllerOptions {
@@ -60,6 +64,8 @@ export class DataManagementController implements DataPortabilityOperations {
   readonly #onStateChange: (snapshot: DataManagementSnapshot) => void;
   readonly #onError: (error: unknown) => void;
   #notificationGeneration = 0;
+  #operation: string | null = null;
+  #stopped = false;
 
   constructor({
     database,
@@ -96,13 +102,16 @@ export class DataManagementController implements DataPortabilityOperations {
   }
 
   async start(): Promise<DataManagementSnapshot> {
+    this.#stopped = false;
     const schedule = await this.#scheduler.start();
     return this.#readSnapshot(schedule);
   }
 
-  stop(): Promise<void> {
+  async stop(): Promise<void> {
+    this.#stopped = true;
     this.#notificationGeneration += 1;
-    return this.#scheduler.stop();
+    await this.#scheduler.stop();
+    this.#notificationGeneration += 1;
   }
 
   async getManagementSnapshot(): Promise<DataManagementSnapshot> {
@@ -110,29 +119,39 @@ export class DataManagementController implements DataPortabilityOperations {
     return this.#readSnapshot(schedule);
   }
 
-  async updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<DataManagementSnapshot> {
-    await this.#database.updateBackupPolicy(input);
-    await this.#scheduler.evaluate();
-    const schedule = await this.#scheduler.evaluate();
-    const snapshot = await this.#readSnapshot(schedule);
-    this.#emit(snapshot);
-    return snapshot;
+  createBackup(): Promise<DatabaseBackupInfo> {
+    return this.#exclusive('manual-backup', () => this.#database.createBackup());
+  }
+
+  updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<DataManagementSnapshot> {
+    return this.#exclusive('update-policy', async () => {
+      await this.#database.updateBackupPolicy(input);
+      await this.#scheduler.evaluate();
+      const schedule = await this.#scheduler.evaluate();
+      const snapshot = await this.#readSnapshot(schedule);
+      this.#emit(snapshot);
+      return snapshot;
+    });
   }
 
   exportData(): Promise<DataExportResult> {
-    return this.#portability.exportData();
+    return this.#exclusive('export', () => this.#portability.exportData());
   }
 
   chooseImport(): Promise<DataImportSelection> {
-    return this.#portability.chooseImport();
+    return this.#exclusive('choose-import', () => this.#portability.chooseImport());
   }
 
   commitImport(input: DataImportCommitInput): Promise<DataImportCommitResult> {
-    return this.#portability.commitImport(input);
+    return this.#exclusive('commit-import', () => this.#portability.commitImport(input));
   }
 
   cancelImport(input: DataImportTargetInput): Promise<void> {
-    return this.#portability.cancelImport(input);
+    return this.#exclusive('cancel-import', () => this.#portability.cancelImport(input));
+  }
+
+  restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult> {
+    return this.#exclusive('restore-backup', () => this.#portability.restoreBackup(input));
   }
 
   async #readSnapshot(schedule: DataManagementSnapshot['schedule']) {
@@ -144,19 +163,34 @@ export class DataManagementController implements DataPortabilityOperations {
   }
 
   #queueNotification(schedule: DataManagementSnapshot['schedule']): void {
+    if (this.#stopped) return;
     const generation = ++this.#notificationGeneration;
     void this.#readSnapshot(schedule)
       .then((snapshot) => {
-        if (generation === this.#notificationGeneration) this.#emit(snapshot);
+        if (!this.#stopped && generation === this.#notificationGeneration) this.#emit(snapshot);
       })
       .catch(this.#onError);
   }
 
   #emit(snapshot: DataManagementSnapshot): void {
+    if (this.#stopped) return;
     try {
       this.#onStateChange(snapshot);
     } catch (error) {
       this.#onError(error);
     }
+  }
+
+  #exclusive<T>(operation: string, task: () => Promise<T>): Promise<T> {
+    if (this.#stopped) {
+      return Promise.reject(new Error('Data management has stopped for application shutdown.'));
+    }
+    if (this.#operation) {
+      return Promise.reject(new Error('Another data management operation is already running.'));
+    }
+    this.#operation = operation;
+    return task().finally(() => {
+      if (this.#operation === operation) this.#operation = null;
+    });
   }
 }

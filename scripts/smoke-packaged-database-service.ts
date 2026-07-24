@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { WORKSPACE_COLORS, type BackupPolicy, type SearchSnapshot } from '../src/shared/contracts';
 import { createRollingPlanningDays } from '../src/shared/planning-domain';
+import {
+  DatabaseReplacementRecovery,
+  FileReplacementMarkerPersistence,
+} from '../src/main/data-management';
 import { DatabaseService } from '../src/main/database';
 import { DEFAULT_MIGRATIONS } from '../src/main/database/default-migrations';
 import { MetadataRepository } from '../src/main/database/metadata-repository';
@@ -16,6 +21,7 @@ import {
 import {
   AtomicImportStager,
   DatabaseImportStagingDriver,
+  ReplacementMarkerStore,
   type PortableDataRecord,
   parsePortablePackage,
   serializePortablePackage,
@@ -61,6 +67,12 @@ const WEEKLY_AUTOMATION_ID = '36363636-3636-4636-8636-363636363636';
 const AUTOMATION_TASK_ID = '37373737-3737-4737-8737-373737373737';
 const AUTOMATION_NOTE_ID = '38383838-3838-4838-8838-383838383838';
 const FOCUS_SESSION_ID = '40404040-4040-4040-8040-404040404040';
+const BACKUP_RESTORE_TASK_ID = '51515151-5151-4151-8151-515151515151';
+const BACKUP_RESTORE_AUTOMATION_ID = '52525252-5252-4252-8252-525252525252';
+const BACKUP_RESTORE_FOCUS_ID = '53535353-5353-4353-8353-535353535353';
+const BACKUP_RESTORE_POST_TASK_ID = '54545454-5454-4454-8454-545454545454';
+const BACKUP_RESTORE_PAUSED_ID = '56565656-5656-4656-8656-565656565656';
+const BACKUP_RESTORE_COMMITTED_ID = '57575757-5757-4757-8757-575757575757';
 const FIXED_NOW = new Date('2026-07-22T12:34:56.000Z');
 const FIXED_TODAY = '2026-07-22';
 const FIXED_DAY_SIX = '2026-07-28';
@@ -86,8 +98,9 @@ async function main(): Promise<void> {
     await smokeVersionEightUpgrade(join(root, 'legacy v8 数据'));
     await smokeVersionNineUpgrade(join(root, 'legacy v9 数据'));
     await smokeVersionTenUpgrade(join(root, 'legacy v10 数据'));
+    await smokeBackupPointInTimeRestore(join(root, 'backup restore 数据'));
     console.log(
-      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/focus/migration/scheduled-backup/portable-round-trip/reopen smoke test passed ` +
+      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/focus/migration/scheduled-backup/backup-restore/portable-round-trip/reopen smoke test passed ` +
         `(Electron ${process.versions.electron}, Node ${process.versions.node}, ` +
         `SQLite ${process.versions.sqlite}).`,
     );
@@ -2626,6 +2639,402 @@ async function smokeVersionTenUpgrade(dataDirectory: string): Promise<void> {
   } finally {
     await upgradedService?.close().catch(() => undefined);
   }
+}
+
+async function smokeBackupPointInTimeRestore(dataDirectory: string): Promise<void> {
+  await mkdir(dataDirectory, { recursive: true });
+  let serviceNow = new Date(FIXED_NOW);
+  let legacyBackup: Awaited<ReturnType<DatabaseService['createBackup']>> | undefined;
+  let legacy: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    migrations: DEFAULT_MIGRATIONS.slice(0, 10),
+    now: () => serviceNow,
+    workspaceIdFactory: () => DEFAULT_WORKSPACE_ID,
+    taskIdFactory: () => BACKUP_RESTORE_TASK_ID,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+    automationIdFactory: () => BACKUP_RESTORE_AUTOMATION_ID,
+    focusIdFactory: () => BACKUP_RESTORE_FOCUS_ID,
+    focusTodayFactory: () => FIXED_TODAY,
+    browserTabIdFactory: () => FIRST_BROWSER_TAB_ID,
+  });
+  try {
+    const initialized = await legacy.open();
+    assert.equal(initialized.migration.toVersion, 10);
+    await legacy.updateWorkspacePreferences({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      patch: {
+        activeView: 'tasks',
+        browserOpen: true,
+        terminalOpen: true,
+      },
+    });
+    await legacy.createTask({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      title: '来自 v10 备份的恢复目标',
+      planning: 'day-0',
+    });
+    let automations = await legacy.createAutomation({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      name: '恢复后必须停用的自动化',
+      schedule: {
+        cadence: 'daily',
+        localTimeMinute: 9 * 60,
+        weekday: null,
+      },
+      action: {
+        kind: 'create-note',
+        title: '恢复 smoke 自动化',
+        body: '不得在数据库恢复后自行运行。',
+      },
+    });
+    const automation = automations.items.find(({ id }) => id === BACKUP_RESTORE_AUTOMATION_ID);
+    assert.ok(automation);
+    automations = await legacy.setAutomationEnabled({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      automationId: automation.id,
+      expectedRevision: automation.revision,
+      enabled: true,
+    });
+    assert.equal(
+      automations.items.find(({ id }) => id === BACKUP_RESTORE_AUTOMATION_ID)?.enabled,
+      true,
+    );
+    const focus = await legacy.startFocusSession({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+    });
+    assert.equal(focus.session?.id, BACKUP_RESTORE_FOCUS_ID);
+    assert.equal(focus.session?.status, 'running');
+
+    legacyBackup = await legacy.createBackup();
+    assert.equal(legacyBackup.schemaVersion, 10);
+    assert.equal(legacyBackup.reason, 'manual');
+    await legacy.close();
+    legacy = undefined;
+  } finally {
+    await legacy?.close().catch(() => undefined);
+  }
+
+  assert.ok(legacyBackup);
+  const sourceBackupPath = join(dataDirectory, 'backups', legacyBackup.fileName);
+  const sourceDigest = await sha256File(sourceBackupPath);
+  const restoreInput = {
+    backupId: legacyBackup.id,
+    expectedReason: legacyBackup.reason,
+    expectedCreatedAt: legacyBackup.createdAt,
+    expectedSizeBytes: legacyBackup.sizeBytes,
+    expectedSchemaVersion: legacyBackup.schemaVersion,
+  } as const;
+
+  serviceNow = new Date(FIXED_NOW.getTime() + 5 * 60_000);
+  let current: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    now: () => serviceNow,
+    taskIdFactory: () => BACKUP_RESTORE_POST_TASK_ID,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+    focusTodayFactory: () => FIXED_TODAY,
+  });
+  let committedStaging: Awaited<ReturnType<DatabaseService['prepareBackupRestore']>> | undefined;
+  let safetyBackup: Awaited<ReturnType<DatabaseService['createPreImportBackup']>> | undefined;
+  let currentBackupState:
+    Awaited<ReturnType<DatabaseService['getBackupSchedulerState']>> | undefined;
+  try {
+    const upgraded = await current.open();
+    assert.equal(upgraded.migration.fromVersion, 10);
+    assert.equal(upgraded.migration.toVersion, 11);
+    await current.createTask({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      title: '恢复后不应保留的较新任务',
+      planning: 'none',
+    });
+
+    const initialBackupState = await current.getBackupSchedulerState();
+    await current.updateBackupPolicy({
+      enabled: true,
+      cadence: 'weekly',
+      localTimeMinute: 8 * 60 + 45,
+      weekday: 5,
+      retentionCount: 23,
+      expectedRevision: initialBackupState.policy.revision,
+    });
+    const attemptedAt = new Date(serviceNow.getTime() + 1_000).toISOString();
+    const completedAt = new Date(serviceNow.getTime() + 2_000).toISOString();
+    await current.recordBackupAttempt(attemptedAt);
+    await current.recordBackupResult({
+      attemptedAt,
+      completedAt,
+      successfulBucket: 'weekly:2026-07-17',
+    });
+    currentBackupState = await current.getBackupSchedulerState();
+    assert.equal(currentBackupState.policy.cadence, 'weekly');
+    assert.equal(currentBackupState.lastSuccessBucket, 'weekly:2026-07-17');
+
+    const pausedStaging = await current.prepareBackupRestore(
+      restoreInput,
+      BACKUP_RESTORE_PAUSED_ID,
+    );
+    assert.deepEqual(pausedStaging.backup, legacyBackup);
+    assert.equal(pausedStaging.sourceDigest, sourceDigest);
+    assertPreparedBackupRestore(
+      join(dataDirectory, 'imports', pausedStaging.stagingFileName),
+      'paused',
+      currentBackupState,
+    );
+    assert.equal(await sha256File(sourceBackupPath), sourceDigest);
+    await current.discardBackupRestore(pausedStaging);
+
+    serviceNow = new Date(FIXED_NOW.getTime() + 30 * 60_000);
+    committedStaging = await current.prepareBackupRestore(
+      restoreInput,
+      BACKUP_RESTORE_COMMITTED_ID,
+    );
+    assert.equal(committedStaging.sourceDigest, sourceDigest);
+    assertPreparedBackupRestore(
+      join(dataDirectory, 'imports', committedStaging.stagingFileName),
+      'completed',
+      currentBackupState,
+    );
+    assert.equal(await sha256File(sourceBackupPath), sourceDigest);
+
+    committedStaging = await current.refreshBackupRestore(committedStaging);
+    assert.equal(committedStaging.sourceDigest, sourceDigest);
+    assertPreparedBackupRestore(
+      join(dataDirectory, 'imports', committedStaging.stagingFileName),
+      'completed',
+      currentBackupState,
+    );
+    safetyBackup = await current.createPreImportBackup();
+    assert.equal(safetyBackup.reason, 'pre-import');
+    assert.deepEqual(
+      await current.validateExistingBackup(safetyBackup.id, 'pre-import'),
+      safetyBackup,
+    );
+
+    await current.close();
+    current = undefined;
+  } finally {
+    await current?.close().catch(() => undefined);
+  }
+
+  assert.ok(committedStaging);
+  assert.ok(safetyBackup);
+  assert.ok(currentBackupState);
+  const markerStore = new ReplacementMarkerStore(
+    new FileReplacementMarkerPersistence({ dataDirectory }),
+  );
+  await markerStore.create({
+    replacementId: committedStaging.restoreId,
+    timestamp: serviceNow.toISOString(),
+    databaseFileName: 'daily-workbench.sqlite3',
+    stagingFileName: committedStaging.stagingFileName,
+    rollbackFileName: `rollback-${committedStaging.restoreId}.sqlite3`,
+    stagingSha256: committedStaging.stagingDigest,
+    preImportBackupId: safetyBackup.id,
+  });
+  const recovery = new DatabaseReplacementRecovery({
+    dataDirectory,
+    markerStore,
+    checkpointCurrentDatabase: async () => {
+      let checkpoint: DatabaseService | undefined = new DatabaseService({
+        dataDirectory,
+        now: () => serviceNow,
+        taskTodayFactory: () => FIXED_TODAY,
+        scheduleTodayFactory: () => FIXED_TODAY,
+        focusTodayFactory: () => FIXED_TODAY,
+      });
+      try {
+        await checkpoint.open();
+        await checkpoint.close();
+        checkpoint = undefined;
+      } finally {
+        await checkpoint?.close().catch(() => undefined);
+      }
+    },
+    validateInstalledDatabase: () =>
+      new DatabaseService({ dataDirectory, now: () => serviceNow }).validateExistingFile(),
+    validatePreImportBackup: async (backupId) => {
+      const validated = await new DatabaseService({
+        dataDirectory,
+        now: () => serviceNow,
+      }).validateExistingBackup(backupId, 'pre-import');
+      assert.equal(validated.id, safetyBackup?.id);
+    },
+    validateRecoveryDatabase: (fileName) =>
+      new DatabaseService({
+        dataDirectory,
+        databaseFileName: fileName,
+        now: () => serviceNow,
+      }).validateExistingFile(),
+    now: () => serviceNow,
+  });
+  assert.deepEqual(await recovery.recover(), {
+    outcome: 'committed',
+    preImportBackupId: safetyBackup.id,
+  });
+  assert.equal(await sha256File(sourceBackupPath), sourceDigest);
+
+  let restored: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    now: () => serviceNow,
+    taskTodayFactory: () => FIXED_TODAY,
+    scheduleTodayFactory: () => FIXED_TODAY,
+    focusTodayFactory: () => FIXED_TODAY,
+  });
+  try {
+    const reopened = await restored.open();
+    assert.deepEqual(reopened.migration, {
+      fromVersion: 11,
+      toVersion: 11,
+      applied: [],
+    });
+    const tasks = await restored.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
+    assert.equal(
+      tasks.tasks.find(({ id }) => id === BACKUP_RESTORE_TASK_ID)?.title,
+      '来自 v10 备份的恢复目标',
+    );
+    assert.equal(
+      tasks.tasks.some(({ id }) => id === BACKUP_RESTORE_POST_TASK_ID),
+      false,
+    );
+    const workspace = await restored.getWorkspaceSnapshot();
+    assert.equal(workspace.preferences.browserOpen, false);
+    assert.equal(workspace.preferences.terminalOpen, false);
+    const automations = await restored.getAutomationSnapshot({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+    });
+    assert.equal(automations.items.length, 1);
+    assert.equal(automations.items[0]?.enabled, false);
+    assert.deepEqual(await restored.getBackupSchedulerState(), currentBackupState);
+    assert.equal(
+      (await restored.listBackups()).some(({ id }) => id === legacyBackup.id),
+      true,
+    );
+    assert.deepEqual(
+      await restored.validateExistingBackup(safetyBackup.id, 'pre-import'),
+      safetyBackup,
+    );
+    await restored.close();
+    restored = undefined;
+  } finally {
+    await restored?.close().catch(() => undefined);
+  }
+
+  const installed = new DatabaseSync(join(dataDirectory, 'daily-workbench.sqlite3'), {
+    readOnly: true,
+  });
+  try {
+    assert.equal(installed.prepare('PRAGMA user_version').get()?.user_version, 11);
+    const focus = installed
+      .prepare(
+        `SELECT state, remaining_seconds AS remainingSeconds,
+                deadline_at AS deadlineAt, completed_at AS completedAt
+         FROM focus_sessions
+         WHERE id = ?`,
+      )
+      .get(BACKUP_RESTORE_FOCUS_ID);
+    assert.equal(focus?.state, 'completed');
+    assert.equal(focus?.remainingSeconds, 0);
+    assert.equal(focus?.deadlineAt, null);
+    assert.equal(focus?.completedAt, serviceNow.toISOString());
+  } finally {
+    installed.close();
+  }
+}
+
+function assertPreparedBackupRestore(
+  path: string,
+  expectedFocusState: 'paused' | 'completed',
+  expectedBackupState: Awaited<ReturnType<DatabaseService['getBackupSchedulerState']>>,
+): void {
+  const staging = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal(staging.prepare('PRAGMA user_version').get()?.user_version, 11);
+    assert.equal(staging.prepare('PRAGMA quick_check').get()?.quick_check, 'ok');
+    assert.equal(
+      staging.prepare('SELECT title FROM tasks WHERE id = ?').get(BACKUP_RESTORE_TASK_ID)?.title,
+      '来自 v10 备份的恢复目标',
+    );
+    assert.equal(
+      staging
+        .prepare(
+          'SELECT COUNT(*) AS count FROM automations WHERE enabled = 1 OR effective_at IS NOT NULL',
+        )
+        .get()?.count,
+      0,
+    );
+    assert.equal(
+      staging
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM workspace_preferences
+           WHERE browser_open = 1 OR terminal_open = 1`,
+        )
+        .get()?.count,
+      0,
+    );
+
+    const focus = staging
+      .prepare(
+        `SELECT state, remaining_seconds AS remainingSeconds,
+                deadline_at AS deadlineAt, completed_at AS completedAt
+         FROM focus_sessions
+         WHERE id = ?`,
+      )
+      .get(BACKUP_RESTORE_FOCUS_ID);
+    assert.equal(focus?.state, expectedFocusState);
+    assert.equal(focus?.remainingSeconds, expectedFocusState === 'paused' ? 20 * 60 : 0);
+    assert.equal(focus?.deadlineAt, null);
+    assert.equal(
+      focus?.completedAt,
+      expectedFocusState === 'completed'
+        ? new Date(FIXED_NOW.getTime() + 30 * 60_000).toISOString()
+        : null,
+    );
+
+    const policy = staging
+      .prepare(
+        `SELECT enabled, cadence, local_time_minute AS localTimeMinute,
+                weekday, retention_count AS retentionCount, revision,
+                updated_at AS updatedAt
+         FROM backup_policy
+         WHERE singleton = 1`,
+      )
+      .get();
+    assert.deepEqual(
+      policy
+        ? {
+            ...policy,
+            enabled: policy.enabled === 1,
+          }
+        : undefined,
+      expectedBackupState.policy,
+    );
+    const runState = staging
+      .prepare(
+        `SELECT last_attempt_at AS lastAttemptAt, last_success_at AS lastSuccessAt,
+                last_success_bucket AS lastSuccessBucket, last_error_code AS lastErrorCode,
+                consecutive_failures AS consecutiveFailures
+         FROM backup_run_state
+         WHERE singleton = 1`,
+      )
+      .get();
+    assert.deepEqual(runState ? { ...runState } : undefined, {
+      lastAttemptAt: expectedBackupState.lastAttemptAt,
+      lastSuccessAt: expectedBackupState.lastSuccessAt,
+      lastSuccessBucket: expectedBackupState.lastSuccessBucket,
+      lastErrorCode: expectedBackupState.lastErrorCode,
+      consecutiveFailures: expectedBackupState.consecutiveFailures,
+    });
+  } finally {
+    staging.close();
+  }
+}
+
+async function sha256File(path: string): Promise<string> {
+  return createHash('sha256')
+    .update(await readFile(path))
+    .digest('hex');
 }
 
 async function removeSmokeDirectory(root: string): Promise<void> {
