@@ -7,6 +7,7 @@ import {
   type AssistantStartInput,
   IPC_CHANNELS,
   type AutomationCreateInput,
+  type AutomationRunNowResult,
   type AutomationSetEnabledInput,
   type AutomationSnapshot,
   type AutomationTargetInput,
@@ -204,6 +205,7 @@ interface IpcDependencies {
     create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
     update(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
     setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
+    runNow(input: AutomationTargetInput): Promise<AutomationRunNowResult>;
     archive(input: AutomationTargetInput): Promise<AutomationSnapshot>;
   };
   assistant: {
@@ -482,6 +484,10 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.automation.setEnabled, (_event, input, ...args) => {
     assertNoArguments(args, 'Changing an automation state');
     return automation.setEnabled(parseAutomationSetEnabledInput(input));
+  });
+  register(IPC_CHANNELS.automation.runNow, (_event, input, ...args) => {
+    assertNoArguments(args, 'Running an automation immediately');
+    return automation.runNow(parseAutomationTargetInput(input));
   });
   register(IPC_CHANNELS.automation.archive, (_event, input, ...args) => {
     assertNoArguments(args, 'Archiving an automation');

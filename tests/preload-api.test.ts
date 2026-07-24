@@ -418,6 +418,7 @@ describe('preload automation API', () => {
       'create',
       'getSnapshot',
       'onChanged',
+      'runNow',
       'setEnabled',
       'update',
     ]);
@@ -446,10 +447,15 @@ describe('preload automation API', () => {
       expectedRevision: 2,
       enabled: true,
     });
-    await api.automation.archive({
+    await api.automation.runNow({
       workspaceId,
       automationId,
       expectedRevision: 3,
+    });
+    await api.automation.archive({
+      workspaceId,
+      automationId,
+      expectedRevision: 4,
     });
 
     expect(electron.invoke.mock.calls).toEqual([
@@ -467,7 +473,8 @@ describe('preload automation API', () => {
         },
       ],
       ['automation:set-enabled', { workspaceId, automationId, expectedRevision: 2, enabled: true }],
-      ['automation:archive', { workspaceId, automationId, expectedRevision: 3 }],
+      ['automation:run-now', { workspaceId, automationId, expectedRevision: 3 }],
+      ['automation:archive', { workspaceId, automationId, expectedRevision: 4 }],
     ]);
   });
 

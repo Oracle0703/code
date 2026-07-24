@@ -7,10 +7,12 @@ import type {
   AutomationSnapshot,
 } from '../../shared/contracts';
 import {
+  automationRunFeedbackForCurrentWorkspace,
   isAutomationRequestLatest,
   isAutomationSequenceCurrent,
   isAutomationWorkspaceCurrent,
   sortAutomationItems,
+  type AutomationRunFeedback,
 } from '../automation-state';
 
 type AutomationControllerStatus = 'loading' | 'ready' | 'error';
@@ -38,6 +40,8 @@ export function useAutomationController(
     readonly message: string;
   } | null>(null);
   const [pendingItemIds, setPendingItemIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [runningItemIds, setRunningItemIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [runFeedbackState, setRunFeedbackState] = useState<AutomationRunFeedback | null>(null);
   const [pendingCreateWorkspaces, setPendingCreateWorkspaces] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -47,6 +51,7 @@ export function useAutomationController(
   const latestRequestSequenceRef = useRef(new Map<string, number>());
   const appliedSequenceRef = useRef(new Map<string, number>());
   const pendingItemIdsRef = useRef(new Set<string>());
+  const runningItemIdsRef = useRef(new Set<string>());
   const pendingCreateWorkspacesRef = useRef(new Set<string>());
 
   useEffect(() => {
@@ -99,6 +104,10 @@ export function useAutomationController(
 
   useEffect(() => {
     activeWorkspaceRef.current = workspaceId;
+    const targetWorkspaceId = workspaceId;
+    queueMicrotask(() => {
+      if (activeWorkspaceRef.current === targetWorkspaceId) setRunFeedbackState(null);
+    });
     if (workspaceId) void load(workspaceId);
   }, [load, workspaceId]);
 
@@ -145,6 +154,18 @@ export function useAutomationController(
     next.delete(automationId);
     pendingItemIdsRef.current = next;
     setPendingItemIds(next);
+  }, []);
+
+  const beginRunningItem = useCallback((automationId: string): void => {
+    runningItemIdsRef.current = new Set(runningItemIdsRef.current).add(automationId);
+    setRunningItemIds(runningItemIdsRef.current);
+  }, []);
+
+  const endRunningItem = useCallback((automationId: string): void => {
+    const next = new Set(runningItemIdsRef.current);
+    next.delete(automationId);
+    runningItemIdsRef.current = next;
+    setRunningItemIds(next);
   }, []);
 
   const operationFailure = useCallback(
@@ -246,6 +267,45 @@ export function useAutomationController(
     [runItemMutation],
   );
 
+  const runNow = useCallback(
+    async (item: AutomationItem): Promise<void> => {
+      const targetWorkspaceId = activeWorkspaceRef.current;
+      if (!targetWorkspaceId || !beginPendingItem(item.id)) {
+        throw new Error('这条自动化正在运行或保存。');
+      }
+      beginRunningItem(item.id);
+      setOperationErrorState(null);
+      setRunFeedbackState(null);
+      try {
+        const result = await window.workbench.automation.runNow({
+          workspaceId: targetWorkspaceId,
+          automationId: item.id,
+          expectedRevision: item.revision,
+        });
+        const feedback = automationRunFeedbackForCurrentWorkspace(
+          activeWorkspaceRef.current,
+          targetWorkspaceId,
+          item,
+          result,
+        );
+        if (activeWorkspaceRef.current === targetWorkspaceId && feedback === null) {
+          throw new Error('自动化立即运行返回了不匹配的结果。');
+        }
+        if (feedback) setRunFeedbackState(feedback);
+      } catch (error) {
+        const message = toMessage(error, '自动化立即运行失败，请重试。');
+        if (activeWorkspaceRef.current === targetWorkspaceId) {
+          setOperationErrorState({ workspaceId: targetWorkspaceId, message });
+        }
+        throw new Error(message, { cause: error });
+      } finally {
+        endRunningItem(item.id);
+        endPendingItem(item.id);
+      }
+    },
+    [beginPendingItem, beginRunningItem, endPendingItem, endRunningItem],
+  );
+
   const snapshot =
     storedSnapshot?.workspaceId === workspaceId && workspaceId !== null ? storedSnapshot : null;
   const items = useMemo(
@@ -265,7 +325,12 @@ export function useAutomationController(
     loadError,
     operationError:
       operationErrorState?.workspaceId === workspaceId ? operationErrorState.message : null,
+    runFeedback:
+      runFeedbackState?.workspaceId === workspaceId && workspaceId !== null
+        ? runFeedbackState
+        : null,
     pendingItemIds,
+    runningItemIds,
     pendingCreate: workspaceId ? pendingCreateWorkspaces.has(workspaceId) : false,
     retry: () => {
       if (workspaceId) void load(workspaceId);
@@ -278,6 +343,7 @@ export function useAutomationController(
     update,
     setEnabled,
     archive,
+    runNow,
   };
 }
 

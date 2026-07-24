@@ -2,6 +2,7 @@ import type {
   AutomationAction,
   AutomationItem,
   AutomationLastRun,
+  AutomationRunNowResult,
   AutomationSchedule,
   AutomationSnapshot,
 } from '../shared/contracts';
@@ -16,6 +17,16 @@ export const AUTOMATION_WEEKDAY_LABELS = [
   '星期五',
   '星期六',
 ] as const;
+
+export interface AutomationRunFeedback {
+  readonly workspaceId: string;
+  readonly automationId: string;
+  readonly outputKind: 'task' | 'note';
+  readonly outputId: string;
+  readonly message: string;
+}
+
+export type AutomationRunNowConfirmation = (message: string) => boolean;
 
 const RUN_ERROR_LABELS = {
   'action-failed': '动作执行失败',
@@ -77,15 +88,68 @@ export function describeAutomationAction(action: AutomationAction): string {
     : `创建笔记：${action.title}`;
 }
 
+export function automationRunNowConfirmation(item: AutomationItem): string {
+  const action =
+    item.action.kind === 'create-today-task'
+      ? `创建今日任务“${item.action.title}”。`
+      : `创建 Markdown 笔记“${item.action.title}”，正文逐字使用当前保存的模板：\n${item.action.body}`;
+  return [
+    `立即运行自动化“${item.name}”？`,
+    '',
+    `已保存动作：${action}`,
+    '',
+    '这次手动运行不会改变启用状态、重复计划或计划运行记录。',
+  ].join('\n');
+}
+
+export async function requestAutomationRunNow(
+  item: AutomationItem,
+  runNow: (item: AutomationItem) => void | Promise<void>,
+  confirm: AutomationRunNowConfirmation = (message) => window.confirm(message),
+): Promise<boolean> {
+  if (!confirm(automationRunNowConfirmation(item))) return false;
+  await runNow(item);
+  return true;
+}
+
+export function automationRunFeedbackForCurrentWorkspace(
+  activeWorkspaceId: string | null,
+  targetWorkspaceId: string,
+  item: AutomationItem,
+  result: AutomationRunNowResult,
+): AutomationRunFeedback | null {
+  const expectedOutputKind = item.action.kind === 'create-today-task' ? 'task' : 'note';
+  if (
+    activeWorkspaceId !== targetWorkspaceId ||
+    result.workspaceId !== targetWorkspaceId ||
+    result.automationId !== item.id ||
+    result.outputKind !== expectedOutputKind ||
+    typeof result.outputId !== 'string' ||
+    result.outputId.length === 0
+  ) {
+    return null;
+  }
+  return {
+    workspaceId: result.workspaceId,
+    automationId: result.automationId,
+    outputKind: result.outputKind,
+    outputId: result.outputId,
+    message:
+      result.outputKind === 'task'
+        ? `已立即创建今日任务：${item.action.title}`
+        : `已立即创建笔记：${item.action.title}`,
+  };
+}
+
 export function describeAutomationLastRun(lastRun: AutomationLastRun): string {
-  if (lastRun.status === 'never') return '尚未运行';
+  if (lastRun.status === 'never') return '尚无计划运行记录';
   if (lastRun.status === 'success') {
     const output = lastRun.outputKind === 'task' ? '任务' : '笔记';
-    return `上次成功 ${formatAutomationDateTime(lastRun.completedAt)} · 已创建${output}`;
+    return `上次计划运行成功 ${formatAutomationDateTime(lastRun.completedAt)} · 已创建${output}`;
   }
   const attempts =
     lastRun.consecutiveFailures > 1 ? ` · 连续失败 ${lastRun.consecutiveFailures} 次` : '';
-  return `上次失败 ${formatAutomationDateTime(lastRun.attemptedAt)} · ${
+  return `上次计划运行失败 ${formatAutomationDateTime(lastRun.attemptedAt)} · ${
     RUN_ERROR_LABELS[lastRun.errorCode]
   }${attempts} · ${formatAutomationDateTime(lastRun.nextRetryAt)} 重试`;
 }

@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   AutomationConflictError,
   AutomationLimitError,
+  AutomationNotFoundError,
+  AutomationOperationError,
 } from '../src/main/automations/automation-errors';
 import { DatabaseService } from '../src/main/database/database-service';
 import { DatabaseIntegrityError, DatabaseStateError } from '../src/main/database/errors';
@@ -17,6 +19,9 @@ const TASK_ID = '33333333-3333-4333-8333-333333333333';
 const NOTE_AUTOMATION_ID = '44444444-4444-4444-8444-444444444444';
 const NOTE_ID = '55555555-5555-4555-8555-555555555555';
 const FAILED_AUTOMATION_ID = '66666666-6666-4666-8666-666666666666';
+const WORKSPACE_B_ID = '77777777-7777-4777-8777-777777777777';
+const WORKSPACE_B_AUTOMATION_ID = '88888888-8888-4888-8888-888888888888';
+const SECOND_TASK_ID = '99999999-9999-4999-8999-999999999999';
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -30,6 +35,219 @@ afterEach(async () => {
 });
 
 describe('AutomationService through DatabaseService', () => {
+  it('runs disabled task and note definitions without changing schedule state or ledgers', async () => {
+    const automationIds = [AUTOMATION_ID, NOTE_AUTOMATION_ID];
+    const { service, dataDirectory } = await createServiceContext({
+      now: () => new Date(2026, 6, 23, 8, 15, 0),
+      automationIdFactory: () => automationIds.shift()!,
+      automationTaskIdFactory: () => TASK_ID,
+      automationNoteIdFactory: () => NOTE_ID,
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '按需巡检',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '检查本机备份' },
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '按需回顾',
+      schedule: { cadence: 'weekly', localTimeMinute: 1_050, weekday: 5 },
+      action: { kind: 'create-note', title: '本周回顾', body: '## 完成\n' },
+    });
+    const before = readAutomationPersistenceState(dataDirectory);
+
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).resolves.toEqual({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      outputKind: 'task',
+      outputId: TASK_ID,
+    });
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: NOTE_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).resolves.toEqual({
+      workspaceId: WORKSPACE_ID,
+      automationId: NOTE_AUTOMATION_ID,
+      outputKind: 'note',
+      outputId: NOTE_ID,
+    });
+
+    expect((await service.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).tasks).toEqual([
+      expect.objectContaining({
+        id: TASK_ID,
+        title: '检查本机备份',
+        plannedFor: '2026-07-23',
+      }),
+    ]);
+    expect((await service.getNoteSnapshot({ workspaceId: WORKSPACE_ID })).notes).toEqual([
+      expect.objectContaining({
+        id: NOTE_ID,
+        title: '本周回顾',
+        body: '## 完成\n',
+      }),
+    ]);
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(before);
+    const snapshot = await service.getAutomationSnapshot({ workspaceId: WORKSPACE_ID });
+    expect(snapshot.items).toHaveLength(2);
+    expect(snapshot.items.find(({ id }) => id === AUTOMATION_ID)).toMatchObject({
+      enabled: false,
+      revision: 1,
+      nextRunAt: null,
+      lastRun: { status: 'never' },
+    });
+    expect(snapshot.items.find(({ id }) => id === NOTE_AUTOMATION_ID)).toMatchObject({
+      enabled: false,
+      revision: 1,
+      nextRunAt: null,
+      lastRun: { status: 'never' },
+    });
+    await service.close();
+  });
+
+  it('rejects stale, archived-definition, and archived-workspace manual runs without output', async () => {
+    const workspaceIds = [WORKSPACE_ID, WORKSPACE_B_ID];
+    const automationIds = [AUTOMATION_ID, WORKSPACE_B_AUTOMATION_ID];
+    const service = await createService({
+      now: () => new Date(2026, 6, 23, 8, 0, 0),
+      workspaceIdFactory: () => workspaceIds.shift()!,
+      automationIdFactory: () => automationIds.shift()!,
+      automationTaskIdFactory: () => TASK_ID,
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '版本绑定',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '不会由旧版本创建' },
+    });
+    await service.updateAutomation({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      expectedRevision: 1,
+      name: '版本绑定（新）',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '只接受新版本' },
+    });
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).rejects.toBeInstanceOf(AutomationConflictError);
+    await service.archiveAutomation({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      expectedRevision: 2,
+    });
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 3,
+      }),
+    ).rejects.toBeInstanceOf(AutomationNotFoundError);
+
+    await service.createWorkspace({ name: '即将归档', color: '#348bd4' });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_B_ID,
+      name: '归档空间规则',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '归档后不可创建' },
+    });
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: WORKSPACE_B_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).rejects.toBeInstanceOf(AutomationNotFoundError);
+    await service.archiveWorkspace({ workspaceId: WORKSPACE_B_ID });
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_B_ID,
+        automationId: WORKSPACE_B_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).rejects.toBeInstanceOf(AutomationNotFoundError);
+    expect((await service.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).tasks).toEqual([]);
+    await service.close();
+  });
+
+  it('keeps a manual run independent from an adjacent scheduled occurrence', async () => {
+    let now = new Date(2026, 6, 23, 8, 0, 0);
+    const outputIds = [TASK_ID, SECOND_TASK_ID];
+    const { service, dataDirectory } = await createServiceContext({
+      now: () => now,
+      automationIdFactory: () => AUTOMATION_ID,
+      automationTaskIdFactory: () => outputIds.shift()!,
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '手动与计划独立',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '检查今日计划' },
+    });
+    const enabled = await service.setAutomationEnabled({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      expectedRevision: 1,
+      enabled: true,
+    });
+    const beforeManual = readAutomationPersistenceState(dataDirectory);
+    const nextRunAt = enabled.items[0]?.nextRunAt;
+    now = new Date(2026, 6, 23, 8, 29, 0);
+
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 2,
+      }),
+    ).resolves.toMatchObject({ outputKind: 'task', outputId: TASK_ID });
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(beforeManual);
+    expect(
+      (await service.getAutomationSnapshot({ workspaceId: WORKSPACE_ID })).items[0],
+    ).toMatchObject({
+      revision: 2,
+      nextRunAt,
+      lastRun: { status: 'never' },
+    });
+
+    now = new Date(2026, 6, 23, 9, 0, 0);
+    const input = {
+      automationId: AUTOMATION_ID,
+      expectedRevision: 2,
+      occurrenceDate: '2026-07-23',
+      scheduledFor: new Date(2026, 6, 23, 8, 30, 0).toISOString(),
+    };
+    await expect(service.runAutomationOccurrence(input)).resolves.toMatchObject({
+      status: 'success',
+      outputKind: 'task',
+    });
+    await expect(service.runAutomationOccurrence(input)).resolves.toMatchObject({
+      status: 'skipped',
+    });
+    expect(
+      new Set(
+        (await service.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).tasks.map(({ id }) => id),
+      ),
+    ).toEqual(new Set([TASK_ID, SECOND_TASK_ID]));
+    const afterSchedule = readAutomationPersistenceState(dataDirectory);
+    expect(afterSchedule.occurrences).toHaveLength(1);
+    expect(afterSchedule.runState).not.toEqual(beforeManual.runState);
+    await service.close();
+  });
+
   it('creates disabled definitions and atomically deduplicates a generated Today task', async () => {
     let now = new Date(2026, 6, 23, 8, 0, 0);
     const service = await createService({
@@ -94,12 +312,13 @@ describe('AutomationService through DatabaseService', () => {
 
   it('creates a note output and persists failure backoff without an occurrence on action failure', async () => {
     let now = new Date(2026, 6, 23, 8, 0, 0);
+    let taskOutputId = 'invalid-task-id';
     const ids = [NOTE_AUTOMATION_ID, FAILED_AUTOMATION_ID];
-    const service = await createService({
+    const { service, dataDirectory } = await createServiceContext({
       now: () => now,
       automationIdFactory: () => ids.shift()!,
       automationNoteIdFactory: () => NOTE_ID,
-      automationTaskIdFactory: () => 'invalid-task-id',
+      automationTaskIdFactory: () => taskOutputId,
     });
     await service.createAutomation({
       workspaceId: WORKSPACE_ID,
@@ -156,6 +375,21 @@ describe('AutomationService through DatabaseService', () => {
       errorCode: 'action-failed',
       consecutiveFailures: 1,
     });
+    const failedPersistence = readAutomationPersistenceState(dataDirectory);
+    taskOutputId = TASK_ID;
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: FAILED_AUTOMATION_ID,
+        expectedRevision: 2,
+      }),
+    ).resolves.toMatchObject({ outputKind: 'task', outputId: TASK_ID });
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(failedPersistence);
+    expect(
+      (await service.getAutomationSnapshot({ workspaceId: WORKSPACE_ID })).items.find(
+        ({ id }) => id === FAILED_AUTOMATION_ID,
+      )?.lastRun,
+    ).toEqual(failed?.lastRun);
     await service.close();
   });
 
@@ -503,6 +737,154 @@ describe('AutomationService through DatabaseService', () => {
     },
   );
 
+  it('rolls back a failed manual output without touching schedule state or ledgers', async () => {
+    let failTaskInsert = false;
+    const { service, dataDirectory } = await createServiceContext({
+      now: () => new Date(2026, 6, 23, 9, 0, 0),
+      automationIdFactory: () => AUTOMATION_ID,
+      automationTaskIdFactory: () => TASK_ID,
+      adapterFactory: (path, options) => {
+        const adapter = createNodeSqliteAdapter(path, options);
+        return options?.readOnly
+          ? adapter
+          : bindAdapterWithAutomationTransactionFailure(adapter, {
+              failCommitAfterSuccess: () => false,
+              failTaskInsert: () => failTaskInsert,
+              failRollbackAfterSuccess: () => false,
+            });
+      },
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '手动原子执行',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '只能完整提交' },
+    });
+    const before = readAutomationPersistenceState(dataDirectory);
+    failTaskInsert = true;
+
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).rejects.toBeInstanceOf(AutomationOperationError);
+    expect((await service.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).tasks).toEqual([]);
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(before);
+
+    failTaskInsert = false;
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).resolves.toMatchObject({ outputKind: 'task', outputId: TASK_ID });
+    expect((await service.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).tasks).toHaveLength(1);
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(before);
+    await service.close();
+  });
+
+  it('poisons manual execution when COMMIT succeeds before the adapter throws', async () => {
+    let failCommitAfterSuccess = false;
+    const { service, dataDirectory } = await createServiceContext({
+      now: () => new Date(2026, 6, 23, 9, 0, 0),
+      automationIdFactory: () => AUTOMATION_ID,
+      automationTaskIdFactory: () => TASK_ID,
+      adapterFactory: (path, options) => {
+        const adapter = createNodeSqliteAdapter(path, options);
+        return options?.readOnly
+          ? adapter
+          : bindAdapterWithAutomationTransactionFailure(adapter, {
+              failCommitAfterSuccess: () => failCommitAfterSuccess,
+              failTaskInsert: () => false,
+              failRollbackAfterSuccess: () => false,
+            });
+      },
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '提交结果未知',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '提交后保留' },
+    });
+    const before = readAutomationPersistenceState(dataDirectory);
+    failCommitAfterSuccess = true;
+
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).rejects.toBeInstanceOf(DatabaseIntegrityError);
+    await expect(
+      service.getAutomationSnapshot({ workspaceId: WORKSPACE_ID }),
+    ).rejects.toBeInstanceOf(DatabaseStateError);
+    failCommitAfterSuccess = false;
+    await service.close();
+
+    const reopened = new DatabaseService({ dataDirectory });
+    await reopened.open();
+    await expect(reopened.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).resolves.toMatchObject({
+      tasks: [{ id: TASK_ID, title: '提交后保留' }],
+    });
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(before);
+    await reopened.close();
+  });
+
+  it('poisons manual execution when a failed insert cannot roll back safely', async () => {
+    let failTaskInsert = false;
+    let failRollbackAfterSuccess = false;
+    const { service, dataDirectory } = await createServiceContext({
+      now: () => new Date(2026, 6, 23, 9, 0, 0),
+      automationIdFactory: () => AUTOMATION_ID,
+      automationTaskIdFactory: () => TASK_ID,
+      adapterFactory: (path, options) => {
+        const adapter = createNodeSqliteAdapter(path, options);
+        return options?.readOnly
+          ? adapter
+          : bindAdapterWithAutomationTransactionFailure(adapter, {
+              failCommitAfterSuccess: () => false,
+              failTaskInsert: () => failTaskInsert,
+              failRollbackAfterSuccess: () => failRollbackAfterSuccess,
+            });
+      },
+    });
+    await service.createAutomation({
+      workspaceId: WORKSPACE_ID,
+      name: '回滚结果未知',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '不会半提交' },
+    });
+    const before = readAutomationPersistenceState(dataDirectory);
+    failTaskInsert = true;
+    failRollbackAfterSuccess = true;
+
+    await expect(
+      service.runAutomationNow({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+    ).rejects.toBeInstanceOf(DatabaseIntegrityError);
+    await expect(service.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).rejects.toBeInstanceOf(
+      DatabaseStateError,
+    );
+    failTaskInsert = false;
+    failRollbackAfterSuccess = false;
+    await service.close();
+
+    const reopened = new DatabaseService({ dataDirectory });
+    await reopened.open();
+    await expect(reopened.getTaskSnapshot({ workspaceId: WORKSPACE_ID })).resolves.toMatchObject({
+      tasks: [],
+    });
+    expect(readAutomationPersistenceState(dataDirectory)).toEqual(before);
+    await reopened.close();
+  });
+
   it('poisons the service when COMMIT succeeds before the adapter throws', async () => {
     let now = new Date(2026, 6, 23, 8, 0, 0);
     let failCommitAfterSuccess = false;
@@ -624,6 +1006,7 @@ async function createService(
   options: Pick<
     ConstructorParameters<typeof DatabaseService>[0],
     | 'now'
+    | 'workspaceIdFactory'
     | 'automationIdFactory'
     | 'automationTaskIdFactory'
     | 'automationNoteIdFactory'
@@ -637,6 +1020,7 @@ async function createServiceContext(
   options: Pick<
     ConstructorParameters<typeof DatabaseService>[0],
     | 'now'
+    | 'workspaceIdFactory'
     | 'automationIdFactory'
     | 'automationTaskIdFactory'
     | 'automationNoteIdFactory'
@@ -652,6 +1036,51 @@ async function createServiceContext(
   });
   await service.open();
   return { service, dataDirectory };
+}
+
+function readAutomationPersistenceState(dataDirectory: string): {
+  readonly definitions: readonly Record<string, unknown>[];
+  readonly runState: readonly Record<string, unknown>[];
+  readonly occurrences: readonly Record<string, unknown>[];
+} {
+  const database = new DatabaseSync(join(dataDirectory, 'daily-workbench.sqlite3'), {
+    readOnly: true,
+  });
+  try {
+    return {
+      definitions: database
+        .prepare(
+          `SELECT id, workspace_id, name, cadence, local_time_minute, weekday,
+                  action_kind, action_title, action_body, enabled, effective_at,
+                  revision, created_at, updated_at, archived_at
+           FROM automations
+           ORDER BY id`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      runState: database
+        .prepare(
+          `SELECT automation_id, last_attempt_at, last_attempt_occurrence,
+                  last_success_at, last_success_occurrence, last_output_kind,
+                  last_error_code, consecutive_failures, next_retry_at, updated_at
+           FROM automation_run_state
+           ORDER BY automation_id`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      occurrences: database
+        .prepare(
+          `SELECT automation_id, occurrence_date, scheduled_for, definition_revision,
+                  completed_at, output_kind, task_id, note_id
+           FROM automation_occurrences
+           ORDER BY automation_id, occurrence_date`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+    };
+  } finally {
+    database.close();
+  }
 }
 
 async function createEnabledTaskAutomation(service: DatabaseService): Promise<void> {

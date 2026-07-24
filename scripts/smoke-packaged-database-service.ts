@@ -4,7 +4,12 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { WORKSPACE_COLORS, type BackupPolicy, type SearchSnapshot } from '../src/shared/contracts';
+import {
+  WORKSPACE_COLORS,
+  type AutomationItem,
+  type BackupPolicy,
+  type SearchSnapshot,
+} from '../src/shared/contracts';
 import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   DatabaseReplacementRecovery,
@@ -73,6 +78,16 @@ const BACKUP_RESTORE_FOCUS_ID = '53535353-5353-4353-8353-535353535353';
 const BACKUP_RESTORE_POST_TASK_ID = '54545454-5454-4454-8454-545454545454';
 const BACKUP_RESTORE_PAUSED_ID = '56565656-5656-4656-8656-565656565656';
 const BACKUP_RESTORE_COMMITTED_ID = '57575757-5757-4757-8757-575757575757';
+const MANUAL_AUTOMATION_WORKSPACE_ID = '61616161-6161-4161-8161-616161616161';
+const MANUAL_TASK_AUTOMATION_ID = '62626262-6262-4262-8262-626262626262';
+const MANUAL_NOTE_AUTOMATION_ID = '63636363-6363-4363-8363-636363636363';
+const MANUAL_ARCHIVED_AUTOMATION_ID = '64646464-6464-4464-8464-646464646464';
+const FIRST_MANUAL_TASK_ID = '65656565-6565-4565-8565-656565656565';
+const SECOND_MANUAL_TASK_ID = '66666666-6666-4666-8666-666666666666';
+const THIRD_MANUAL_TASK_ID = '67676767-6767-4767-8767-676767676767';
+const FIRST_MANUAL_NOTE_ID = '68686868-6868-4868-8868-686868686868';
+const SECOND_MANUAL_NOTE_ID = '69696969-6969-4969-8969-696969696969';
+const THIRD_MANUAL_NOTE_ID = '70707070-7070-4070-8070-707070707070';
 const FIXED_NOW = new Date('2026-07-22T12:34:56.000Z');
 const FIXED_TODAY = '2026-07-22';
 const FIXED_DAY_SIX = '2026-07-28';
@@ -88,6 +103,7 @@ async function main(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'daily workbench 服务 smoke-'));
   try {
     await smokeCurrentService(join(root, 'current 数据'));
+    await smokeManualAutomationRuns(join(root, 'manual automation 数据'));
     await smokeVersionOneUpgrade(join(root, 'legacy v1 数据'));
     await smokeVersionTwoUpgrade(join(root, 'legacy v2 数据'));
     await smokeVersionThreeUpgrade(join(root, 'legacy v3 数据'));
@@ -100,7 +116,7 @@ async function main(): Promise<void> {
     await smokeVersionTenUpgrade(join(root, 'legacy v10 数据'));
     await smokeBackupPointInTimeRestore(join(root, 'backup restore 数据'));
     console.log(
-      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/focus/migration/scheduled-backup/backup-restore/portable-round-trip/reopen smoke test passed ` +
+      `Packaged DatabaseService workspace/inbox/task/note/schedule/browser/search/terminal-preferences/automation/manual-automation/focus/migration/scheduled-backup/backup-restore/portable-round-trip/reopen smoke test passed ` +
         `(Electron ${process.versions.electron}, Node ${process.versions.node}, ` +
         `SQLite ${process.versions.sqlite}).`,
     );
@@ -1276,6 +1292,369 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
   }
 }
 
+async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
+  const now = new Date(2026, 6, 22, 12, 34, 56);
+  const today = formatLocalCivilDate(now);
+  const localMinute = now.getHours() * 60 + now.getMinutes();
+  assert.ok(localMinute <= 1_437, 'The manual automation smoke time must leave two minutes.');
+  const automationIds = [
+    MANUAL_TASK_AUTOMATION_ID,
+    MANUAL_NOTE_AUTOMATION_ID,
+    MANUAL_ARCHIVED_AUTOMATION_ID,
+  ];
+  const taskIds = [FIRST_MANUAL_TASK_ID, SECOND_MANUAL_TASK_ID, THIRD_MANUAL_TASK_ID];
+  const noteIds = [FIRST_MANUAL_NOTE_ID, SECOND_MANUAL_NOTE_ID, THIRD_MANUAL_NOTE_ID];
+  let service: DatabaseService | undefined = new DatabaseService({
+    dataDirectory,
+    now: () => now,
+    workspaceIdFactory: () => MANUAL_AUTOMATION_WORKSPACE_ID,
+    taskTodayFactory: () => today,
+    automationIdFactory: () => automationIds.shift() ?? '71717171-7171-4171-8171-717171717171',
+    automationTaskIdFactory: () => taskIds.shift() ?? '72727272-7272-4272-8272-727272727272',
+    automationNoteIdFactory: () => noteIds.shift() ?? '73737373-7373-4373-8373-737373737373',
+  });
+
+  try {
+    const initialized = await service.open();
+    assert.equal(initialized.migration.fromVersion, 0);
+    assert.equal(initialized.migration.toVersion, 11);
+    assert.deepEqual(
+      initialized.migration.applied.map(({ version }) => version),
+      DEFAULT_MIGRATIONS.map(({ version }) => version),
+    );
+
+    let automations = await service.createAutomation({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+      name: '手动创建今日任务',
+      schedule: {
+        cadence: 'daily',
+        localTimeMinute: localMinute + 1,
+        weekday: null,
+      },
+      action: {
+        kind: 'create-today-task',
+        title: '真实 DatabaseService 手动任务',
+      },
+    });
+    let taskAutomation = requireAutomationItem(automations.items, MANUAL_TASK_AUTOMATION_ID);
+    assert.deepEqual(readAutomationView(taskAutomation), {
+      enabled: false,
+      revision: 1,
+      nextRunAt: null,
+      lastRun: { status: 'never' },
+    });
+
+    automations = await service.createAutomation({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+      name: '手动创建 Markdown 笔记',
+      schedule: {
+        cadence: 'weekly',
+        localTimeMinute: localMinute + 2,
+        weekday: now.getDay(),
+      },
+      action: {
+        kind: 'create-note',
+        title: '真实 DatabaseService 手动笔记',
+        body: '# 手动运行\n\n- packaged smoke',
+      },
+    });
+    let noteAutomation = requireAutomationItem(automations.items, MANUAL_NOTE_AUTOMATION_ID);
+    assert.deepEqual(readAutomationView(noteAutomation), {
+      enabled: false,
+      revision: 1,
+      nextRunAt: null,
+      lastRun: { status: 'never' },
+    });
+
+    await service.createAutomation({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+      name: '归档后禁止手动运行',
+      schedule: {
+        cadence: 'daily',
+        localTimeMinute: localMinute + 1,
+        weekday: null,
+      },
+      action: {
+        kind: 'create-today-task',
+        title: '不应创建的归档输出',
+      },
+    });
+
+    const disabledPersistence = readManualAutomationPersistence(dataDirectory);
+    assert.equal(disabledPersistence.definitions.length, 3);
+    assert.equal(disabledPersistence.runState.length, 3);
+    assert.deepEqual(disabledPersistence.occurrences, []);
+
+    assert.deepEqual(
+      await service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+      {
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        outputKind: 'task',
+        outputId: FIRST_MANUAL_TASK_ID,
+      },
+    );
+    assert.deepEqual(
+      await service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+      {
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        outputKind: 'task',
+        outputId: SECOND_MANUAL_TASK_ID,
+      },
+    );
+    assert.deepEqual(
+      await service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_NOTE_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+      {
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_NOTE_AUTOMATION_ID,
+        outputKind: 'note',
+        outputId: FIRST_MANUAL_NOTE_ID,
+      },
+    );
+    assert.deepEqual(
+      await service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_NOTE_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+      {
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_NOTE_AUTOMATION_ID,
+        outputKind: 'note',
+        outputId: SECOND_MANUAL_NOTE_ID,
+      },
+    );
+
+    assert.deepEqual(readManualAutomationPersistence(dataDirectory), disabledPersistence);
+    automations = await service.getAutomationSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      readAutomationView(requireAutomationItem(automations.items, MANUAL_TASK_AUTOMATION_ID)),
+      readAutomationView(taskAutomation),
+    );
+    assert.deepEqual(
+      readAutomationView(requireAutomationItem(automations.items, MANUAL_NOTE_AUTOMATION_ID)),
+      readAutomationView(noteAutomation),
+    );
+
+    let tasks = await service.getTaskSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      new Set(tasks.tasks.map(({ id }) => id)),
+      new Set([FIRST_MANUAL_TASK_ID, SECOND_MANUAL_TASK_ID]),
+    );
+    for (const task of tasks.tasks) {
+      assert.equal(task.title, '真实 DatabaseService 手动任务');
+      assert.equal(task.status, 'todo');
+      assert.equal(task.plannedFor, today);
+    }
+    let notes = await service.getNoteSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      new Set(notes.notes.map(({ id }) => id)),
+      new Set([FIRST_MANUAL_NOTE_ID, SECOND_MANUAL_NOTE_ID]),
+    );
+    for (const note of notes.notes) {
+      assert.equal(note.title, '真实 DatabaseService 手动笔记');
+      assert.equal(note.body, '# 手动运行\n\n- packaged smoke');
+    }
+
+    automations = await service.setAutomationEnabled({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+      automationId: MANUAL_TASK_AUTOMATION_ID,
+      expectedRevision: 1,
+      enabled: true,
+    });
+    taskAutomation = requireAutomationItem(automations.items, MANUAL_TASK_AUTOMATION_ID);
+    assert.equal(taskAutomation.enabled, true);
+    assert.equal(taskAutomation.revision, 2);
+    assert.ok(taskAutomation.nextRunAt);
+    assert.deepEqual(taskAutomation.lastRun, { status: 'never' });
+
+    automations = await service.setAutomationEnabled({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+      automationId: MANUAL_NOTE_AUTOMATION_ID,
+      expectedRevision: 1,
+      enabled: true,
+    });
+    noteAutomation = requireAutomationItem(automations.items, MANUAL_NOTE_AUTOMATION_ID);
+    assert.equal(noteAutomation.enabled, true);
+    assert.equal(noteAutomation.revision, 2);
+    assert.ok(noteAutomation.nextRunAt);
+    assert.deepEqual(noteAutomation.lastRun, { status: 'never' });
+
+    const enabledPersistence = readManualAutomationPersistence(dataDirectory);
+    const enabledTaskDefinition = enabledPersistence.definitions.find(
+      ({ id }) => id === MANUAL_TASK_AUTOMATION_ID,
+    );
+    const enabledNoteDefinition = enabledPersistence.definitions.find(
+      ({ id }) => id === MANUAL_NOTE_AUTOMATION_ID,
+    );
+    assert.equal(enabledTaskDefinition?.enabled, 1);
+    assert.equal(enabledTaskDefinition?.revision, 2);
+    assert.ok(enabledTaskDefinition?.effective_at);
+    assert.equal(enabledNoteDefinition?.enabled, 1);
+    assert.equal(enabledNoteDefinition?.revision, 2);
+    assert.ok(enabledNoteDefinition?.effective_at);
+    assert.deepEqual(enabledPersistence.runState, disabledPersistence.runState);
+    assert.deepEqual(enabledPersistence.occurrences, []);
+
+    await assert.rejects(
+      service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        expectedRevision: 1,
+      }),
+      { name: 'AutomationConflictError' },
+    );
+    assert.deepEqual(readManualAutomationPersistence(dataDirectory), enabledPersistence);
+
+    assert.deepEqual(
+      await service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        expectedRevision: 2,
+      }),
+      {
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_TASK_AUTOMATION_ID,
+        outputKind: 'task',
+        outputId: THIRD_MANUAL_TASK_ID,
+      },
+    );
+    assert.deepEqual(
+      await service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_NOTE_AUTOMATION_ID,
+        expectedRevision: 2,
+      }),
+      {
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_NOTE_AUTOMATION_ID,
+        outputKind: 'note',
+        outputId: THIRD_MANUAL_NOTE_ID,
+      },
+    );
+
+    assert.deepEqual(readManualAutomationPersistence(dataDirectory), enabledPersistence);
+    automations = await service.getAutomationSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      readAutomationView(requireAutomationItem(automations.items, MANUAL_TASK_AUTOMATION_ID)),
+      readAutomationView(taskAutomation),
+    );
+    assert.deepEqual(
+      readAutomationView(requireAutomationItem(automations.items, MANUAL_NOTE_AUTOMATION_ID)),
+      readAutomationView(noteAutomation),
+    );
+
+    tasks = await service.getTaskSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      new Set(tasks.tasks.map(({ id }) => id)),
+      new Set([FIRST_MANUAL_TASK_ID, SECOND_MANUAL_TASK_ID, THIRD_MANUAL_TASK_ID]),
+    );
+    notes = await service.getNoteSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      new Set(notes.notes.map(({ id }) => id)),
+      new Set([FIRST_MANUAL_NOTE_ID, SECOND_MANUAL_NOTE_ID, THIRD_MANUAL_NOTE_ID]),
+    );
+
+    const archived = await service.archiveAutomation({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+      automationId: MANUAL_ARCHIVED_AUTOMATION_ID,
+      expectedRevision: 1,
+    });
+    assert.equal(
+      archived.items.some(({ id }) => id === MANUAL_ARCHIVED_AUTOMATION_ID),
+      false,
+    );
+    const archivedPersistence = readManualAutomationPersistence(dataDirectory);
+    assert.deepEqual(archivedPersistence.runState, enabledPersistence.runState);
+    assert.deepEqual(archivedPersistence.occurrences, []);
+    await assert.rejects(
+      service.runAutomationNow({
+        workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+        automationId: MANUAL_ARCHIVED_AUTOMATION_ID,
+        expectedRevision: 2,
+      }),
+      { name: 'AutomationNotFoundError' },
+    );
+    assert.deepEqual(readManualAutomationPersistence(dataDirectory), archivedPersistence);
+    assert.equal(
+      (await service.getTaskSnapshot({ workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID })).tasks.length,
+      3,
+    );
+    assert.equal(
+      (await service.getNoteSnapshot({ workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID })).notes.length,
+      3,
+    );
+
+    await service.close();
+    service = undefined;
+
+    service = new DatabaseService({
+      dataDirectory,
+      now: () => now,
+      taskTodayFactory: () => today,
+    });
+    const reopened = await service.open();
+    assert.deepEqual(reopened.migration, {
+      fromVersion: 11,
+      toVersion: 11,
+      applied: [],
+    });
+    tasks = await service.getTaskSnapshot({ workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID });
+    assert.deepEqual(
+      new Set(tasks.tasks.map(({ id }) => id)),
+      new Set([FIRST_MANUAL_TASK_ID, SECOND_MANUAL_TASK_ID, THIRD_MANUAL_TASK_ID]),
+    );
+    notes = await service.getNoteSnapshot({ workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID });
+    assert.deepEqual(
+      new Set(notes.notes.map(({ id }) => id)),
+      new Set([FIRST_MANUAL_NOTE_ID, SECOND_MANUAL_NOTE_ID, THIRD_MANUAL_NOTE_ID]),
+    );
+    automations = await service.getAutomationSnapshot({
+      workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
+    });
+    assert.deepEqual(
+      readAutomationView(requireAutomationItem(automations.items, MANUAL_TASK_AUTOMATION_ID)),
+      readAutomationView(taskAutomation),
+    );
+    assert.deepEqual(
+      readAutomationView(requireAutomationItem(automations.items, MANUAL_NOTE_AUTOMATION_ID)),
+      readAutomationView(noteAutomation),
+    );
+    assert.equal(
+      automations.items.some(({ id }) => id === MANUAL_ARCHIVED_AUTOMATION_ID),
+      false,
+    );
+    assert.deepEqual(readManualAutomationPersistence(dataDirectory), archivedPersistence);
+  } finally {
+    await service?.close().catch(() => undefined);
+  }
+}
+
 async function smokeScheduledAutomations(
   service: DatabaseService,
   setNow: (value: Date) => void,
@@ -1385,6 +1764,69 @@ async function smokeScheduledAutomations(
     daily: formatLocalCivilDate(catchUpNow),
     weekly: formatLocalCivilDate(weeklyOccurrence),
   };
+}
+
+function requireAutomationItem(
+  items: readonly AutomationItem[],
+  automationId: string,
+): AutomationItem {
+  const item = items.find(({ id }) => id === automationId);
+  assert.ok(item, `Missing automation ${automationId}.`);
+  return item;
+}
+
+function readAutomationView(item: AutomationItem) {
+  return {
+    enabled: item.enabled,
+    revision: item.revision,
+    nextRunAt: item.nextRunAt,
+    lastRun: item.lastRun,
+  };
+}
+
+function readManualAutomationPersistence(dataDirectory: string): {
+  readonly definitions: readonly Record<string, unknown>[];
+  readonly runState: readonly Record<string, unknown>[];
+  readonly occurrences: readonly Record<string, unknown>[];
+} {
+  const database = new DatabaseSync(join(dataDirectory, 'daily-workbench.sqlite3'), {
+    readOnly: true,
+  });
+  try {
+    return {
+      definitions: database
+        .prepare(
+          `SELECT id, workspace_id, name, cadence, local_time_minute, weekday,
+                  action_kind, action_title, action_body, enabled, effective_at,
+                  revision, created_at, updated_at, archived_at
+           FROM automations
+           ORDER BY id`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      runState: database
+        .prepare(
+          `SELECT automation_id, last_attempt_at, last_attempt_occurrence,
+                  last_success_at, last_success_occurrence, last_output_kind,
+                  last_error_code, consecutive_failures, next_retry_at, updated_at
+           FROM automation_run_state
+           ORDER BY automation_id`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      occurrences: database
+        .prepare(
+          `SELECT automation_id, occurrence_date, scheduled_for, definition_revision,
+                  completed_at, output_kind, task_id, note_id
+           FROM automation_occurrences
+           ORDER BY automation_id, occurrence_date`,
+        )
+        .all()
+        .map((row) => ({ ...row })),
+    };
+  } finally {
+    database.close();
+  }
 }
 
 function createManualAutomationController(
