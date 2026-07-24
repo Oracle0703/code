@@ -42,6 +42,8 @@ import {
   WORKSPACE_COLORS,
   type AssistantContextReference,
   type AutomationItem,
+  type DatabaseBackupRestoreInput,
+  type DatabaseBackupRestoreResult,
   type SearchResult,
   type TaskPlanning,
 } from '../shared/contracts';
@@ -130,6 +132,7 @@ export function App() {
     state: dataState,
     load: loadData,
     createBackup,
+    restoreBackup,
     updateBackupPolicy,
     exportData,
     chooseImport,
@@ -279,6 +282,26 @@ export function App() {
       !noteDraftDirtyRef.current ||
       window.confirm('当前笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
     [],
+  );
+  const restoreBackupWithApproval = useCallback(
+    async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
+      if (!confirmLeaveNoteDraft()) return null;
+      dataReplacementApprovedRef.current = true;
+      dataReplacementNoteDiscardApprovedRef.current = true;
+      try {
+        const result = await restoreBackup(input);
+        if (result.status === 'cancelled') {
+          dataReplacementApprovedRef.current = false;
+          dataReplacementNoteDiscardApprovedRef.current = false;
+        }
+        return result;
+      } catch (error) {
+        dataReplacementApprovedRef.current = false;
+        dataReplacementNoteDiscardApprovedRef.current = false;
+        throw error;
+      }
+    },
+    [confirmLeaveNoteDraft, restoreBackup],
   );
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
@@ -1544,6 +1567,7 @@ export function App() {
                     dataFeedback={dataState.feedback}
                     onRetryData={() => void loadData()}
                     onCreateBackup={createBackup}
+                    onRestoreBackup={restoreBackupWithApproval}
                     onUpdateBackupPolicy={updateBackupPolicy}
                     onExportData={exportData}
                     onChooseImport={chooseImport}

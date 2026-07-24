@@ -166,7 +166,9 @@ describe('ImportQuarantine', () => {
       idFactory: () => ids.shift() ?? '10000000-0000-4000-8000-000000000003',
       now: () => new Date('2026-07-22T12:00:00.000Z'),
     });
+    expect(quarantine.hasActiveSession()).toBe(false);
     const first = await quarantine.prepare(createPackage());
+    expect(quarantine.hasActiveSession()).toBe(true);
     const stagingPath = join(directory, `import-${first.importId}.sqlite3`);
     await Promise.all([
       writeFile(`${stagingPath}-wal`, 'wal'),
@@ -175,11 +177,14 @@ describe('ImportQuarantine', () => {
     ]);
     await expect(quarantine.prepare(createPackage())).rejects.toThrow(/cancelled/u);
     await quarantine.cancel({ importId: first.importId });
+    expect(quarantine.hasActiveSession()).toBe(false);
     expect(await readdir(directory)).toEqual([]);
 
     const second = await quarantine.prepare(createPackage());
+    expect(quarantine.hasActiveSession()).toBe(true);
     expect(second.importId).toBe('10000000-0000-4000-8000-000000000002');
     await quarantine.cancel({ importId: second.importId });
+    expect(quarantine.hasActiveSession()).toBe(false);
   });
 
   it('expires and removes an unclaimed preview without waiting for another request', async () => {

@@ -12,6 +12,7 @@ export const IPC_CHANNELS = {
     getStatus: 'database:get-status',
     createBackup: 'database:create-backup',
     listBackups: 'database:list-backups',
+    restoreBackup: 'database:restore-backup',
     getManagementSnapshot: 'database:get-management-snapshot',
     updateBackupPolicy: 'database:update-backup-policy',
     exportData: 'database:export-data',
@@ -249,6 +250,17 @@ export interface DatabaseBackupInfo {
   reason: DatabaseBackupReason;
   schemaVersion: number;
 }
+
+export interface DatabaseBackupRestoreInput {
+  readonly backupId: string;
+  readonly expectedReason: DatabaseBackupReason;
+  readonly expectedCreatedAt: string;
+  readonly expectedSizeBytes: number;
+  readonly expectedSchemaVersion: number;
+}
+
+export type DatabaseBackupRestoreResult =
+  { readonly status: 'cancelled' } | { readonly status: 'restarting' };
 
 export interface DatabaseStatus {
   schemaVersion: number;
@@ -1059,6 +1071,7 @@ export interface WorkbenchApi {
     getStatus(): Promise<DatabaseStatus>;
     createBackup(): Promise<DatabaseBackupInfo>;
     listBackups(): Promise<DatabaseBackupInfo[]>;
+    restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult>;
     getManagementSnapshot(): Promise<DataManagementSnapshot>;
     updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<DataManagementSnapshot>;
     exportData(): Promise<DataExportResult>;

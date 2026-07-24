@@ -32,18 +32,25 @@ import type {
   BackupRunErrorCode,
   AssistantCredentialStatus,
   DataManagementSnapshot,
-  DatabaseBackupReason,
+  DatabaseBackupInfo,
+  DatabaseBackupRestoreInput,
+  DatabaseBackupRestoreResult,
   TerminalProfileId,
   TerminalSnapshot,
 } from '../../shared/contracts';
 import {
+  backupReasonLabel,
   dataOperationLabel,
+  formatBackupBytes,
+  formatBackupDateTime,
   latestDatabaseBackup,
+  orderDatabaseBackups,
   type DataFeedback,
   type DataLoadStatus,
   type DataOperationKind,
 } from '../data-state';
 import { mergeTerminalSnapshot, terminalConfigurationIssue } from '../terminal-state';
+import { BackupHistoryDialog, BackupRestoreDialog } from './BackupRestoreDialog';
 
 export type SettingsSection =
   'general' | 'assistant' | 'terminal' | 'appearance' | 'data' | 'shortcuts' | 'about';
@@ -75,6 +82,9 @@ interface SettingsPageProps {
   readonly dataFeedback: DataFeedback | null;
   readonly onRetryData: () => void;
   readonly onCreateBackup: () => void | Promise<void>;
+  readonly onRestoreBackup: (
+    input: DatabaseBackupRestoreInput,
+  ) => Promise<DatabaseBackupRestoreResult | null>;
   readonly onUpdateBackupPolicy: (input: BackupPolicyUpdateInput) => void | Promise<void>;
   readonly onExportData: () => void | Promise<void>;
   readonly onChooseImport: () => void | Promise<void>;
@@ -101,13 +111,6 @@ const WEEKDAY_OPTIONS = [
   '星期六',
 ] as const;
 
-const BACKUP_REASON_LABELS: Record<DatabaseBackupReason, string> = {
-  manual: '手动',
-  scheduled: '定时',
-  'pre-migration': '迁移前',
-  'pre-import': '导入前',
-};
-
 const BACKUP_ERROR_LABELS: Record<BackupRunErrorCode, string> = {
   'backup-failed': '无法创建一致性备份',
   'retention-failed': '备份已创建，但旧备份清理失败',
@@ -127,6 +130,7 @@ export function SettingsPage({
   dataFeedback,
   onRetryData,
   onCreateBackup,
+  onRestoreBackup,
   onUpdateBackupPolicy,
   onExportData,
   onChooseImport,
@@ -225,6 +229,7 @@ export function SettingsPage({
               feedback={dataFeedback}
               onRetry={onRetryData}
               onCreateBackup={onCreateBackup}
+              onRestoreBackup={onRestoreBackup}
               onUpdatePolicy={onUpdateBackupPolicy}
               onExport={onExportData}
               onChooseImport={onChooseImport}
@@ -1080,23 +1085,29 @@ interface DataSettingsProps {
   readonly feedback: DataFeedback | null;
   readonly onRetry: () => void;
   readonly onCreateBackup: () => void | Promise<void>;
+  readonly onRestoreBackup: (
+    input: DatabaseBackupRestoreInput,
+  ) => Promise<DatabaseBackupRestoreResult | null>;
   readonly onUpdatePolicy: (input: BackupPolicyUpdateInput) => void | Promise<void>;
   readonly onExport: () => void | Promise<void>;
   readonly onChooseImport: () => void | Promise<void>;
 }
 
-function DataSettings({
+export function DataSettings({
   snapshot,
   status,
   operation,
   feedback,
   onRetry,
   onCreateBackup,
+  onRestoreBackup,
   onUpdatePolicy,
   onExport,
   onChooseImport,
 }: DataSettingsProps) {
   const actionInFlightRef = useRef(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<DatabaseBackupInfo | null>(null);
   const runAction = async (action: () => void | Promise<void>): Promise<void> => {
     if (operation !== null || actionInFlightRef.current) return;
     actionInFlightRef.current = true;
@@ -1131,6 +1142,12 @@ function DataSettings({
 
   const busy = operation !== null;
   const latestBackup = latestDatabaseBackup(snapshot.backups);
+  const orderedBackups = orderDatabaseBackups(snapshot.backups);
+  const chooseRestoreTarget = (backup: DatabaseBackupInfo) => {
+    if (busy) return;
+    setHistoryOpen(false);
+    setRestoreTarget(Object.freeze({ ...backup }));
+  };
   return (
     <>
       {feedback ? (
@@ -1207,23 +1224,44 @@ function DataSettings({
               : ''}
           </p>
         ) : null}
-        {snapshot.backups.length > 0 ? (
-          <ul className="backup-list" aria-label="最近备份">
-            {snapshot.backups.slice(0, 5).map((backup) => (
-              <li key={backup.id}>
-                <span>
-                  <Archive size={14} aria-hidden="true" />
-                </span>
-                <div>
-                  <strong>{formatDateTime(backup.createdAt)}</strong>
-                  <small>
-                    {BACKUP_REASON_LABELS[backup.reason]} · Schema v{backup.schemaVersion}
-                  </small>
-                </div>
-                <span>{formatBytes(backup.sizeBytes)}</span>
-              </li>
-            ))}
-          </ul>
+        {orderedBackups.length > 0 ? (
+          <>
+            <ul className="backup-list" aria-label="最近五份备份">
+              {orderedBackups.slice(0, 5).map((backup) => (
+                <li key={backup.id}>
+                  <span>
+                    <Archive size={14} aria-hidden="true" />
+                  </span>
+                  <div>
+                    <strong>{formatBackupDateTime(backup.createdAt)}</strong>
+                    <small>
+                      {backupReasonLabel(backup.reason)} · Schema v{backup.schemaVersion}
+                    </small>
+                  </div>
+                  <span className="backup-list__size">{formatBackupBytes(backup.sizeBytes)}</span>
+                  <button
+                    type="button"
+                    className="backup-list__restore"
+                    disabled={busy}
+                    aria-label={`恢复 ${formatBackupDateTime(backup.createdAt)} 的备份`}
+                    onClick={() => chooseRestoreTarget(backup)}
+                  >
+                    恢复
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              className="backup-history-action"
+              disabled={busy}
+              onClick={() => setHistoryOpen(true)}
+            >
+              查看全部备份
+              <span>{orderedBackups.length.toLocaleString()}</span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </button>
+          </>
         ) : null}
       </div>
 
@@ -1261,6 +1299,23 @@ function DataSettings({
           <ChevronRight size={16} aria-hidden="true" />
         </button>
       </div>
+
+      {historyOpen ? (
+        <BackupHistoryDialog
+          backups={orderedBackups}
+          busy={busy}
+          onClose={() => setHistoryOpen(false)}
+          onRestore={chooseRestoreTarget}
+        />
+      ) : null}
+      {restoreTarget ? (
+        <BackupRestoreDialog
+          backup={restoreTarget}
+          busy={busy}
+          onClose={() => setRestoreTarget(null)}
+          onConfirm={onRestoreBackup}
+        />
+      ) : null}
     </>
   );
 }
@@ -1463,13 +1518,6 @@ function formatDateTime(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return '大小未知';
-  if (value < 1_024) return `${value} B`;
-  if (value < 1_048_576) return `${(value / 1_024).toFixed(1)} KiB`;
-  return `${(value / 1_048_576).toFixed(1)} MiB`;
 }
 
 function formatMinuteOfDay(value: number): string {

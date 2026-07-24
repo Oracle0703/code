@@ -294,9 +294,13 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'A focus task must be unfinished and planned for today in this workspace.',
     'Focus wake delay must be an integer from 1 to 60000 milliseconds.',
     'Focus remaining time must be an integer between',
+    'The database backup restore copy does not match its source.',
+    'The database restore staging file did not preserve the local backup state.',
+    'The database restore staging file retained unsafe runtime state.',
     'CREATE VIRTUAL TABLE notes_search',
     'database:get-management-snapshot',
     'database:update-backup-policy',
+    'database:restore-backup',
     'database:export-data',
     'database:choose-import',
     'database:commit-import',
@@ -524,6 +528,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
   for (const requiredToken of [
     'database:get-management-snapshot',
     'database:update-backup-policy',
+    'database:restore-backup',
     'database:export-data',
     'database:choose-import',
     'database:commit-import',
@@ -713,6 +718,17 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     assert.ok(
       rendererBundle.includes(archiveRecoveryToken),
       `Packaged renderer does not contain workspace recovery UI token ${archiveRecoveryToken}.`,
+    );
+  }
+  for (const backupRestoreToken of [
+    '全部备份',
+    '确认恢复此备份',
+    '恢复前会再次核对所选备份',
+    '未结束的专注、自动化运行、浏览器页面和终端会话不会复活',
+  ]) {
+    assert.ok(
+      rendererBundle.includes(backupRestoreToken),
+      `Packaged renderer does not contain backup restore UI token ${backupRestoreToken}.`,
     );
   }
   for (const requiredTerminalRendererToken of [

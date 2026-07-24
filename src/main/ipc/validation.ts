@@ -23,6 +23,8 @@ import {
   type BrowserWorkspaceInput,
   type DataImportCommitInput,
   type DataImportTargetInput,
+  type DatabaseBackupReason,
+  type DatabaseBackupRestoreInput,
   type FocusStartInput,
   type FocusTargetInput,
   type InboxCategorizeInput,
@@ -115,6 +117,12 @@ const MAX_URL_LENGTH = 4_096;
 const MAX_TERMINAL_WRITE_LENGTH = 1_048_576;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const DATABASE_BACKUP_REASONS: readonly DatabaseBackupReason[] = [
+  'manual',
+  'scheduled',
+  'pre-migration',
+  'pre-import',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -314,6 +322,52 @@ export function parseBackupPolicyUpdateInput(value: unknown): BackupPolicyUpdate
       'expectedRevision',
       1,
       Number.MAX_SAFE_INTEGER,
+    ),
+  };
+}
+
+export function parseDatabaseBackupRestoreInput(value: unknown): DatabaseBackupRestoreInput {
+  if (!isRecord(value)) {
+    throw new TypeError('Database backup restore input must be an object');
+  }
+  assertOnlyKeys(value, [
+    'backupId',
+    'expectedReason',
+    'expectedCreatedAt',
+    'expectedSizeBytes',
+    'expectedSchemaVersion',
+  ]);
+  if (
+    typeof value.expectedReason !== 'string' ||
+    !DATABASE_BACKUP_REASONS.includes(value.expectedReason as DatabaseBackupReason)
+  ) {
+    throw new TypeError('Unsupported database backup reason');
+  }
+  if (typeof value.expectedCreatedAt !== 'string') {
+    throw new TypeError('Database backup creation time must be an ISO timestamp');
+  }
+  const expectedCreatedAt = new Date(value.expectedCreatedAt);
+  if (
+    !Number.isFinite(expectedCreatedAt.getTime()) ||
+    expectedCreatedAt.toISOString() !== value.expectedCreatedAt
+  ) {
+    throw new TypeError('Database backup creation time must be an ISO timestamp');
+  }
+  return {
+    backupId: parseUuidV4(value.backupId, 'Database backup id'),
+    expectedReason: value.expectedReason as DatabaseBackupReason,
+    expectedCreatedAt: value.expectedCreatedAt,
+    expectedSizeBytes: assertIntegerInRange(
+      value.expectedSizeBytes,
+      'expectedSizeBytes',
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    expectedSchemaVersion: assertIntegerInRange(
+      value.expectedSchemaVersion,
+      'expectedSchemaVersion',
+      0,
+      11,
     ),
   };
 }

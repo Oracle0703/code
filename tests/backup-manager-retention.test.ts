@@ -17,6 +17,38 @@ afterEach(async () => {
 });
 
 describe('BackupManager scheduled retention', () => {
+  it('returns the complete history by default while keeping explicit list limits bounded', async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), 'workbench-backup-full-history-'));
+    directories.push(dataDirectory);
+    const backupDirectory = join(dataDirectory, 'backups');
+    await mkdir(backupDirectory);
+    const names = Array.from({ length: 105 }, (_, index) => {
+      const timestamp = new Date(Date.UTC(2026, 0, 1) + index).toISOString();
+      const fileTimestamp = timestamp.replaceAll('-', '').replaceAll(':', '').replace('.', '');
+      const id = `aaaaaaaa-aaaa-4aaa-8aaa-${String(index + 1).padStart(12, '0')}`;
+      return `daily-workbench-v11-manual-${fileTimestamp}-${id}.sqlite3`;
+    });
+    await Promise.all(
+      names.map((name, index) => writeFile(join(backupDirectory, name), `snapshot ${index}`)),
+    );
+    const manager = new BackupManager({
+      paths: {
+        dataDirectory,
+        databasePath: join(dataDirectory, 'daily-workbench.sqlite3'),
+        backupDirectory,
+      },
+      adapterFactory: createNodeSqliteAdapter,
+      validateSnapshot: () => undefined,
+    });
+
+    const all = await manager.list();
+    expect(all).toHaveLength(105);
+    expect(all[0]?.fileName).toBe(names.at(-1));
+    expect(all.at(-1)?.fileName).toBe(names[0]);
+    await expect(manager.list(100)).resolves.toHaveLength(100);
+    await expect(manager.list(101)).rejects.toBeInstanceOf(DatabaseBackupError);
+  });
+
   it('recognizes new reasons and deletes only excess scheduled snapshots', async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), 'workbench-backup-retention-'));
     directories.push(dataDirectory);

@@ -4,6 +4,8 @@ import { chmod, lstat, open, rename, rm, type FileHandle } from 'node:fs/promise
 import { basename, dirname, extname, resolve } from 'node:path';
 import type {
   DataExportResult,
+  DatabaseBackupRestoreInput,
+  DatabaseBackupRestoreResult,
   DataImportCommitInput,
   DataImportCommitResult,
   DataImportPreview,
@@ -12,6 +14,7 @@ import type {
   DatabaseBackupInfo,
   DatabaseStatus,
 } from '../../shared/contracts';
+import type { PreparedBackupRestore } from '../database/types';
 import type { PortableDataRecord, PreparedImport } from '../data-portability';
 import { serializePortablePackage } from '../data-portability';
 import { DEFAULT_MAX_PACKAGE_BYTES } from '../data-portability/package-format';
@@ -25,6 +28,12 @@ export interface PortableDataDatabase {
     backupId: string,
     expectedReason: 'pre-import',
   ): Promise<DatabaseBackupInfo>;
+  prepareBackupRestore(
+    input: DatabaseBackupRestoreInput,
+    restoreId: string,
+  ): Promise<PreparedBackupRestore>;
+  refreshBackupRestore(prepared: PreparedBackupRestore): Promise<PreparedBackupRestore>;
+  discardBackupRestore(prepared: PreparedBackupRestore): Promise<void>;
 }
 
 export interface DataPortabilityDialogs {
@@ -37,6 +46,7 @@ export interface DataExportDurabilityOperations {
 }
 
 export interface ImportQuarantineOperations {
+  hasActiveSession?(): boolean;
   prepare(bytes: Uint8Array): Promise<DataImportPreview>;
   claim(input: DataImportCommitInput): Promise<PreparedImport>;
   refreshClaimed(input: DataImportTargetInput): Promise<PreparedImport>;
@@ -53,6 +63,7 @@ export interface DataPortabilityControllerOptions {
   readonly databaseFileName?: string;
   readonly appVersion: string;
   readonly requestDestructiveConfirmation: (input: DataImportCommitInput) => Promise<boolean>;
+  readonly requestBackupRestoreConfirmation?: (prepared: PreparedBackupRestore) => Promise<boolean>;
   readonly requestReplacementApproval: () => Promise<boolean>;
   readonly prepareReplacement: () => Promise<void>;
   readonly scheduleRestart: () => Promise<void>;
@@ -63,7 +74,7 @@ export interface DataPortabilityControllerOptions {
   readonly onError?: (error: unknown) => void;
 }
 
-type DataPortabilityOperation = 'export' | 'choose-import' | 'commit-import';
+type DataPortabilityOperation = 'export' | 'choose-import' | 'commit-import' | 'restore-backup';
 
 export class DataPortabilityController {
   readonly #database: PortableDataDatabase;
@@ -73,6 +84,7 @@ export class DataPortabilityController {
   readonly #databaseFileName: string;
   readonly #appVersion: string;
   readonly #requestDestructiveConfirmation: (input: DataImportCommitInput) => Promise<boolean>;
+  readonly #requestBackupRestoreConfirmation: (prepared: PreparedBackupRestore) => Promise<boolean>;
   readonly #requestReplacementApproval: () => Promise<boolean>;
   readonly #prepareReplacement: () => Promise<void>;
   readonly #scheduleRestart: () => Promise<void>;
@@ -91,6 +103,7 @@ export class DataPortabilityController {
     databaseFileName = 'daily-workbench.sqlite3',
     appVersion,
     requestDestructiveConfirmation,
+    requestBackupRestoreConfirmation = async () => false,
     requestReplacementApproval,
     prepareReplacement,
     scheduleRestart,
@@ -113,6 +126,7 @@ export class DataPortabilityController {
     this.#databaseFileName = databaseFileName;
     this.#appVersion = appVersion;
     this.#requestDestructiveConfirmation = requestDestructiveConfirmation;
+    this.#requestBackupRestoreConfirmation = requestBackupRestoreConfirmation;
     this.#requestReplacementApproval = requestReplacementApproval;
     this.#prepareReplacement = prepareReplacement;
     this.#scheduleRestart = scheduleRestart;
@@ -260,6 +274,88 @@ export class DataPortabilityController {
       return Promise.reject(new Error('The data import is already being committed.'));
     }
     return this.#quarantine.cancel(input);
+  }
+
+  restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult> {
+    return this.#exclusive('restore-backup', async () => {
+      if (this.#quarantine.hasActiveSession?.()) {
+        throw new Error('Cancel the active data import preview before restoring a backup.');
+      }
+      let prepared: PreparedBackupRestore | undefined;
+      let markerWriteStarted = false;
+      let safetyBackupId: string | undefined;
+      let restartRequired = false;
+      let stagingOwned = false;
+      try {
+        prepared = await this.#database.prepareBackupRestore(input, this.#createId());
+        stagingOwned = true;
+        const confirmed = await this.#requestBackupRestoreConfirmation(prepared);
+        if (!confirmed) {
+          await this.#database.discardBackupRestore(prepared);
+          stagingOwned = false;
+          return { status: 'cancelled' };
+        }
+
+        const approved = await this.#requestReplacementApproval();
+        if (!approved) {
+          await this.#database.discardBackupRestore(prepared);
+          stagingOwned = false;
+          return { status: 'cancelled' };
+        }
+
+        // Approval freezes the Renderer. From this point onward every exit path
+        // must restart the process so the old surface and runtime cannot resume.
+        restartRequired = true;
+        await this.#prepareReplacement();
+        prepared = await this.#database.refreshBackupRestore(prepared);
+        const safetyBackup = await this.#database.createPreImportBackup();
+        safetyBackupId = safetyBackup.id;
+        await this.#database.validateExistingBackup(safetyBackup.id, 'pre-import');
+        markerWriteStarted = true;
+        await this.#markerStore.create({
+          replacementId: prepared.restoreId,
+          timestamp: this.#readNow().toISOString(),
+          databaseFileName: this.#databaseFileName,
+          stagingFileName: prepared.stagingFileName,
+          rollbackFileName: `rollback-${prepared.restoreId}.sqlite3`,
+          stagingSha256: prepared.stagingDigest,
+          preImportBackupId: safetyBackup.id,
+        });
+        stagingOwned = false;
+        this.#scheduleRestartAfterResponse();
+        return { status: 'restarting' };
+      } catch (error) {
+        if (prepared && stagingOwned) {
+          if (!markerWriteStarted) {
+            await this.#database.discardBackupRestore(prepared).catch(this.#onError);
+          } else {
+            // Marker publication can succeed before its final directory fsync
+            // reports failure. Re-read before deciding who owns the staging file.
+            try {
+              const marker = await this.#markerStore.read();
+              if (!marker) {
+                await this.#database.discardBackupRestore(prepared).catch(this.#onError);
+              } else if (
+                marker.replacementId !== prepared.restoreId ||
+                marker.stagingFileName !== prepared.stagingFileName ||
+                marker.stagingSha256 !== prepared.stagingDigest ||
+                marker.preImportBackupId !== safetyBackupId
+              ) {
+                this.#onError(
+                  new Error(
+                    'A different database replacement marker appeared during backup restore.',
+                  ),
+                );
+              }
+            } catch (readError) {
+              this.#onError(readError);
+            }
+          }
+        }
+        if (restartRequired) this.#scheduleRestartAfterResponse();
+        throw error;
+      }
+    });
   }
 
   #exclusive<T>(operation: DataPortabilityOperation, task: () => Promise<T>): Promise<T> {

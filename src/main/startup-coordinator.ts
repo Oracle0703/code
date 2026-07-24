@@ -1,6 +1,23 @@
 export type StartupStageResult<T> =
   { readonly status: 'ready'; readonly value: T } | { readonly status: 'cancelled' };
 
+export type BeforeQuitDisposition =
+  'allow' | 'record-request' | 'replacement-owned' | 'request-approval';
+
+export function decideBeforeQuit({
+  allowQuit,
+  databaseAvailable,
+  replacementActive,
+}: {
+  readonly allowQuit: boolean;
+  readonly databaseAvailable: boolean;
+  readonly replacementActive: boolean;
+}): BeforeQuitDisposition {
+  if (allowQuit) return 'allow';
+  if (replacementActive) return 'replacement-owned';
+  return databaseAvailable ? 'request-approval' : 'record-request';
+}
+
 export class AsyncSingleFlight<T> {
   #running: Promise<T> | undefined;
 

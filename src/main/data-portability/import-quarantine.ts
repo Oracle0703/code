@@ -100,6 +100,10 @@ export class ImportQuarantine {
     this.#maxStagingBytes = maxStagingBytes;
   }
 
+  hasActiveSession(): boolean {
+    return this.#preparing || this.#sessions.size !== 0;
+  }
+
   async prepare(bytes: Uint8Array): Promise<DataImportPreview> {
     if (this.#preparing) {
       throw new Error('Another import preview is already being prepared.');

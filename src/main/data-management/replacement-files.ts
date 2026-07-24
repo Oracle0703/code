@@ -14,6 +14,8 @@ const MARKER_FILE_NAME = 'database-replacement-v1.json';
 const MAXIMUM_MARKER_BYTES = 16 * 1024;
 const ABANDONED_IMPORT_FILE =
   /^(?:import-[0-9a-f-]{36}\.(?:dwbx|sqlite3(?:-(?:wal|shm|journal))?)|\.import-[0-9a-f-]{36}\.(?:dwbx\.partial|sqlite3\.[0-9a-f-]{36}\.partial(?:-(?:wal|shm|journal))?))$/u;
+const ABANDONED_BACKUP_RESTORE_DIRECTORY =
+  /^\.backup-restore-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const ABANDONED_MARKER_PARTIAL = /^\.database-replacement-v1\.json\.[0-9a-f-]{36}\.partial$/u;
 const ORPHANED_ROLLBACK_FILE =
   /^rollback-([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.sqlite3$/iu;
@@ -612,11 +614,21 @@ export async function cleanupAbandonedImportArtifacts(
   let removed = 0;
   if (entry) {
     for (const candidate of await readdir(directory, { withFileTypes: true })) {
-      if (!ABANDONED_IMPORT_FILE.test(candidate.name)) continue;
-      if (!candidate.isFile() || candidate.isSymbolicLink()) {
-        throw new Error('An abandoned import artifact is not a regular file.');
+      const path = resolveChild(directory, candidate.name);
+      if (ABANDONED_IMPORT_FILE.test(candidate.name)) {
+        if (!candidate.isFile() || candidate.isSymbolicLink()) {
+          throw new Error('An abandoned import artifact is not a regular file.');
+        }
+        await rm(path);
+        removed += 1;
+        continue;
       }
-      await rm(resolveChild(directory, candidate.name));
+      if (!ABANDONED_BACKUP_RESTORE_DIRECTORY.test(candidate.name)) continue;
+      if (!candidate.isDirectory() || candidate.isSymbolicLink()) {
+        throw new Error('An abandoned backup restore path is not a real directory.');
+      }
+      await inspectOptionalRealDirectory(path);
+      await rm(path, { recursive: true });
       removed += 1;
     }
   }

@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   INITIAL_DATA_MANAGEMENT_STATE,
   DataImportLifecycle,
+  backupReasonLabel,
   canStartDataOperation,
+  createDatabaseBackupRestoreInput,
   dataManagementReducer,
   dataOperationLabel,
   latestDatabaseBackup,
+  orderDatabaseBackups,
   reconcileDataManagementSnapshot,
 } from '../src/renderer/data-state';
 import type {
@@ -148,10 +151,40 @@ describe('data management renderer state', () => {
     expect(latestDatabaseBackup([])).toBeNull();
   });
 
+  it('orders backup history without mutating the Main-owned snapshot', () => {
+    const old = backup('old', '2026-07-20T10:00:00.000Z');
+    const newestA = backup('a', '2026-07-23T10:00:00.000Z');
+    const newestB = backup('b', '2026-07-23T10:00:00.000Z');
+    const incoming = [old, newestA, newestB];
+
+    expect(orderDatabaseBackups(incoming).map(({ id }) => id)).toEqual(['b', 'a', 'old']);
+    expect(incoming.map(({ id }) => id)).toEqual(['old', 'a', 'b']);
+  });
+
+  it('locks every visible backup attribute into the restore request', () => {
+    const target = {
+      ...backup('target', '2026-07-23T10:00:00.000Z'),
+      sizeBytes: 8_192,
+      schemaVersion: 11,
+    };
+    const input = createDatabaseBackupRestoreInput(target);
+
+    expect(input).toEqual({
+      backupId: 'target',
+      expectedReason: 'manual',
+      expectedCreatedAt: '2026-07-23T10:00:00.000Z',
+      expectedSizeBytes: 8_192,
+      expectedSchemaVersion: 11,
+    });
+    expect(Object.isFrozen(input)).toBe(true);
+  });
+
   it('provides bounded, user-facing operation labels', () => {
     expect(dataOperationLabel('backup')).toBe('正在创建一致性备份…');
+    expect(dataOperationLabel('restore-backup')).toContain('验证备份');
     expect(dataOperationLabel('commit-import')).toContain('准备重启');
     expect(dataOperationLabel(null)).toBeNull();
+    expect(backupReasonLabel('pre-import')).toBe('替换前备份');
   });
 
   it('does not let an older backup event replace a newer policy revision', () => {

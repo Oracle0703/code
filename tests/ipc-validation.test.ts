@@ -19,6 +19,7 @@ import {
   parseBrowserWorkspaceInput,
   parseDataImportCommitInput,
   parseDataImportTargetInput,
+  parseDatabaseBackupRestoreInput,
   parseFocusStartInput,
   parseFocusTargetInput,
   parseInboxCategorizeInput,
@@ -66,6 +67,7 @@ const TAB_ID = '723e4567-e89b-42d3-a456-426614174000';
 const BOOKMARK_ID = '823e4567-e89b-42d3-a456-426614174000';
 const DOWNLOAD_ID = '923e4567-e89b-42d3-a456-426614174000';
 const IMPORT_ID = 'a23e4567-e89b-42d3-a456-426614174000';
+const BACKUP_ID = 'd23e4567-e89b-42d3-a456-426614174000';
 const AUTOMATION_ID = 'b23e4567-e89b-42d3-a456-426614174000';
 const FOCUS_SESSION_ID = 'c23e4567-e89b-42d3-a456-426614174000';
 const WSL_DISTRIBUTION_ID = `wsl-${'a'.repeat(64)}`;
@@ -264,6 +266,91 @@ describe('IPC validation', () => {
         expectedRevision: 2,
       }),
     ).toThrow(TypeError);
+  });
+
+  it('accepts only exact database backup restore tokens', () => {
+    const input = {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled' as const,
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 11,
+    };
+    expect(parseDatabaseBackupRestoreInput(input)).toEqual(input);
+    expect(
+      parseDatabaseBackupRestoreInput({
+        ...input,
+        expectedSizeBytes: Number.MAX_SAFE_INTEGER,
+        expectedSchemaVersion: 0,
+      }),
+    ).toEqual({
+      ...input,
+      expectedSizeBytes: Number.MAX_SAFE_INTEGER,
+      expectedSchemaVersion: 0,
+    });
+
+    for (const expectedReason of ['manual', 'scheduled', 'pre-migration', 'pre-import'] as const) {
+      expect(parseDatabaseBackupRestoreInput({ ...input, expectedReason })).toEqual({
+        ...input,
+        expectedReason,
+      });
+    }
+  });
+
+  it.each([
+    null,
+    {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled',
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 11,
+      fileName: 'daily-workbench.sqlite3',
+    },
+    {
+      backupId: BACKUP_ID.toUpperCase(),
+      expectedReason: 'scheduled',
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 11,
+    },
+    {
+      backupId: BACKUP_ID,
+      expectedReason: 'restore',
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 11,
+    },
+    {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled',
+      expectedCreatedAt: '2026-07-24T00:12:34.567-07:00',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 11,
+    },
+    {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled',
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 0,
+      expectedSchemaVersion: 11,
+    },
+    {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled',
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: Number.MAX_SAFE_INTEGER + 1,
+      expectedSchemaVersion: 11,
+    },
+    {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled',
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 12,
+    },
+  ])('rejects malformed database backup restore token %#', (input) => {
+    expect(() => parseDatabaseBackupRestoreInput(input)).toThrow(TypeError);
   });
 
   it('accepts only opaque import ids and matching lowercase digests', () => {

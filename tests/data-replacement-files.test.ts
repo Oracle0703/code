@@ -860,7 +860,12 @@ describe('database replacement files', () => {
     temporaryDirectories.push(dataDirectory);
     const importDirectory = join(dataDirectory, 'imports');
     await mkdir(importDirectory);
+    const restoreDirectory = join(importDirectory, `.backup-restore-${REPLACEMENT_ID}-${WRITE_ID}`);
+    const unrelatedDirectory = join(importDirectory, 'keep-directory');
+    await Promise.all([mkdir(restoreDirectory), mkdir(unrelatedDirectory)]);
     await Promise.all([
+      writeFile(join(restoreDirectory, 'daily-workbench.sqlite3'), 'restore copy'),
+      writeFile(join(unrelatedDirectory, 'keep.txt'), 'unrelated directory'),
       writeFile(join(importDirectory, `import-${REPLACEMENT_ID}.dwbx`), 'package'),
       writeFile(join(importDirectory, `import-${REPLACEMENT_ID}.sqlite3`), 'database'),
       writeFile(join(importDirectory, `import-${REPLACEMENT_ID}.sqlite3-journal`), 'journal'),
@@ -876,12 +881,43 @@ describe('database replacement files', () => {
       ),
     ]);
 
-    await expect(cleanupAbandonedImportArtifacts(dataDirectory)).resolves.toBe(5);
+    await expect(cleanupAbandonedImportArtifacts(dataDirectory)).resolves.toBe(6);
+    await expect(readFile(join(restoreDirectory, 'daily-workbench.sqlite3'))).rejects.toMatchObject(
+      {
+        code: 'ENOENT',
+      },
+    );
     expect(await readFile(join(importDirectory, 'keep-me.txt'), 'utf8')).toBe('unrelated');
+    expect(await readFile(join(unrelatedDirectory, 'keep.txt'), 'utf8')).toBe(
+      'unrelated directory',
+    );
     expect(
       await readFile(join(importDirectory, `import-${REPLACEMENT_ID}.dwbx-journal`), 'utf8'),
     ).toBe('lookalike');
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects an abandoned backup-restore directory symlink without following it',
+    async () => {
+      const dataDirectory = await mkdtemp(join(tmpdir(), 'daily-workbench-restore-cleanup-link-'));
+      temporaryDirectories.push(dataDirectory);
+      const importDirectory = join(dataDirectory, 'imports');
+      const outside = await mkdtemp(join(tmpdir(), 'daily-workbench-restore-cleanup-outside-'));
+      temporaryDirectories.push(outside);
+      await mkdir(importDirectory);
+      await writeFile(join(outside, 'preserve.txt'), 'outside');
+      await symlink(
+        outside,
+        join(importDirectory, `.backup-restore-${REPLACEMENT_ID}-${WRITE_ID}`),
+        'dir',
+      );
+
+      await expect(cleanupAbandonedImportArtifacts(dataDirectory)).rejects.toThrow(
+        /not a real directory/u,
+      );
+      await expect(readFile(join(outside, 'preserve.txt'), 'utf8')).resolves.toBe('outside');
+    },
+  );
 });
 
 async function createContext() {

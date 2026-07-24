@@ -25,6 +25,7 @@ vi.mock('electron', () => ({
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
 const IMPORT_ID = '22222222-2222-4222-8222-222222222222';
+const BACKUP_ID = '33333333-3333-4333-8333-333333333333';
 const RENDERER_URL = 'file:///opt/daily-workbench/index.html';
 let unregister: (() => void) | undefined;
 
@@ -51,8 +52,17 @@ describe('data and search IPC handlers', () => {
       retentionCount: 21,
       expectedRevision: 2,
     };
+    const restore = {
+      backupId: BACKUP_ID,
+      expectedReason: 'scheduled' as const,
+      expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+      expectedSizeBytes: 1_048_576,
+      expectedSchemaVersion: 10,
+    };
 
+    harness.invoke(IPC_CHANNELS.database.createBackup);
     harness.invoke(IPC_CHANNELS.database.getManagementSnapshot);
+    harness.invoke(IPC_CHANNELS.database.restoreBackup, restore);
     harness.invoke(IPC_CHANNELS.database.updateBackupPolicy, policy);
     harness.invoke(IPC_CHANNELS.database.exportData);
     harness.invoke(IPC_CHANNELS.database.chooseImport);
@@ -67,7 +77,9 @@ describe('data and search IPC handlers', () => {
       scope: 'all',
     });
 
+    expect(harness.data.createBackup).toHaveBeenCalledTimes(1);
     expect(harness.data.getManagementSnapshot).toHaveBeenCalledTimes(1);
+    expect(harness.data.restoreBackup).toHaveBeenCalledExactlyOnceWith(restore);
     expect(harness.data.updateBackupPolicy).toHaveBeenCalledExactlyOnceWith(policy);
     expect(harness.data.exportData).toHaveBeenCalledTimes(1);
     expect(harness.data.chooseImport).toHaveBeenCalledTimes(1);
@@ -95,6 +107,29 @@ describe('data and search IPC handlers', () => {
       }),
     ).toThrow(TypeError);
     expect(() =>
+      harness.invoke(IPC_CHANNELS.database.restoreBackup, {
+        backupId: BACKUP_ID,
+        expectedReason: 'scheduled',
+        expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+        expectedSizeBytes: 1_048_576,
+        expectedSchemaVersion: 11,
+        path: '/tmp/unsafe.sqlite3',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      harness.invoke(
+        IPC_CHANNELS.database.restoreBackup,
+        {
+          backupId: BACKUP_ID,
+          expectedReason: 'scheduled',
+          expectedCreatedAt: '2026-07-24T07:12:34.567Z',
+          expectedSizeBytes: 1_048_576,
+          expectedSchemaVersion: 11,
+        },
+        'surplus',
+      ),
+    ).toThrow(TypeError);
+    expect(() =>
       harness.invoke(IPC_CHANNELS.search.query, {
         workspaceId: WORKSPACE_ID,
         query: 'valid',
@@ -103,6 +138,7 @@ describe('data and search IPC handlers', () => {
     ).toThrow(TypeError);
     expect(harness.data.exportData).not.toHaveBeenCalled();
     expect(harness.data.commitImport).not.toHaveBeenCalled();
+    expect(harness.data.restoreBackup).not.toHaveBeenCalled();
     expect(harness.search.query).not.toHaveBeenCalled();
   });
 });
@@ -112,7 +148,9 @@ async function createHarness() {
   const frame = { url: RENDERER_URL };
   const webContents = { mainFrame: frame };
   const data = {
+    createBackup: vi.fn(),
     getManagementSnapshot: vi.fn(),
+    restoreBackup: vi.fn(),
     updateBackupPolicy: vi.fn(),
     exportData: vi.fn(),
     chooseImport: vi.fn(),

@@ -1,3 +1,5 @@
+import type { DatabaseBackupInfo } from '../../shared/contracts';
+
 export interface DatabasePaths {
   readonly dataDirectory: string;
   readonly databasePath: string;
@@ -44,6 +46,14 @@ export interface BackupResult {
 export interface BackupRetentionResult {
   readonly deleted: number;
   readonly retained: number;
+}
+
+export interface PreparedBackupRestore {
+  readonly restoreId: string;
+  readonly backup: DatabaseBackupInfo;
+  readonly sourceDigest: string;
+  readonly stagingFileName: string;
+  readonly stagingDigest: string;
 }
 
 export interface DatabaseMetadata {

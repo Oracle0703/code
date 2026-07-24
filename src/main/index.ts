@@ -35,7 +35,7 @@ import {
   runAfterCloseApproval,
   settleShutdownsBefore,
 } from './shutdown-coordinator';
-import { AsyncSingleFlight, settleStartupStage } from './startup-coordinator';
+import { AsyncSingleFlight, decideBeforeQuit, settleStartupStage } from './startup-coordinator';
 import { createTrustedRendererLocation } from './security/trusted-renderer';
 import { TerminalConfigurationService } from './terminal/terminal-configuration-service';
 import { TerminalManager } from './terminal/terminal-manager';
@@ -79,11 +79,22 @@ function startupCanContinue(expected: StartupRuntimeIdentity): boolean {
     !databaseShutdownPromise &&
     !replacementPreparationPromise &&
     !replacementRestartPromise &&
+    !quitApprovalPromise &&
     databaseService === expected.database &&
     (expected.data === undefined || dataManagementController === expected.data) &&
     (expected.automation === undefined || automationController === expected.automation) &&
     (expected.focus === undefined || focusController === expected.focus) &&
     (expected.assistant === undefined || assistantController === expected.assistant)
+  );
+}
+
+function runtimeCanReceiveEvents(): boolean {
+  return (
+    !applicationQuitRequested &&
+    !databaseShutdownPromise &&
+    !replacementPreparationPromise &&
+    !replacementRestartPromise &&
+    !quitApprovalPromise
   );
 }
 
@@ -641,6 +652,25 @@ async function createDataManagementController(
       });
       return result.response === 1;
     },
+    requestBackupRestoreConfirmation: async ({ backup }) => {
+      const result = await dialog.showMessageBox(currentWindowForDialog(), {
+        type: 'warning',
+        title: '确认恢复本地备份',
+        message: `恢复到 ${formatBackupRestoreDate(backup.createdAt)} 的备份？`,
+        detail: [
+          `${formatBackupRestoreReason(backup.reason)} · Schema v${backup.schemaVersion} · ${formatBackupRestoreBytes(backup.sizeBytes)}`,
+          '',
+          'Daily Workbench 会先为当前数据库创建“替换前”安全备份，再关闭工作区、替换数据库并重启。目标备份不会被修改。',
+          '历史快照中的运行中专注会暂停（已到期则完成），自动化会保持停用，终端与浏览器面板保持关闭。',
+          '凭据、已下载文件及其他数据库外状态不会回滚。',
+        ].join('\n'),
+        buttons: ['取消', '创建安全备份、恢复并重启'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      return result.response === 1;
+    },
     requestReplacementApproval: requestDataReplacementApproval,
     prepareReplacement: prepareForDataReplacement,
     scheduleRestart: restartForDataReplacement,
@@ -658,6 +688,34 @@ async function createDataManagementController(
       console.error('Daily Workbench automatic backup failed.', error);
     },
   });
+}
+
+function formatBackupRestoreDate(value: string): string {
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value));
+}
+
+function formatBackupRestoreReason(
+  reason: 'manual' | 'scheduled' | 'pre-migration' | 'pre-import',
+) {
+  switch (reason) {
+    case 'manual':
+      return '手动备份';
+    case 'scheduled':
+      return '定时备份';
+    case 'pre-migration':
+      return '迁移前备份';
+    case 'pre-import':
+      return '替换前备份';
+  }
+}
+
+function formatBackupRestoreBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function quitAfterStartupFailure(error: unknown): void {
@@ -681,6 +739,9 @@ if (!hasSingleInstanceLock) {
   }
 } else {
   app.on('second-instance', () => {
+    if (!runtimeCanReceiveEvents()) {
+      return;
+    }
     if (!mainWindow || mainWindow.isDestroyed()) {
       return;
     }
@@ -696,17 +757,30 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('before-quit', (event) => {
-    if (allowQuit) {
+    const disposition = decideBeforeQuit({
+      allowQuit,
+      databaseAvailable: databaseService !== null,
+      replacementActive:
+        replacementPreparationPromise !== null || replacementRestartPromise !== null,
+    });
+    if (disposition === 'allow') return;
+    if (disposition === 'record-request') {
+      applicationQuitRequested = true;
       return;
     }
-    if (!databaseService) {
+
+    if (disposition === 'replacement-owned') {
+      event.preventDefault();
+      return;
+    }
+    const activeDatabase = databaseService;
+    if (!activeDatabase) {
       applicationQuitRequested = true;
       return;
     }
 
     event.preventDefault();
     if (!databaseShutdownPromise && !quitApprovalPromise) {
-      const activeDatabase = databaseService;
       const activeData = dataManagementController;
       const activeAutomation = automationController;
       const activeFocus = focusController;
@@ -779,7 +853,7 @@ if (!hasSingleInstanceLock) {
       if (replacementOutcome === 'rolled-back') {
         dialog.showErrorBox(
           'Daily Workbench restored your previous data',
-          'The imported data could not be opened safely, so the original database was restored. The pre-import backup is still available in Settings.',
+          'The replacement database could not be opened safely, so the original database was restored. The pre-replacement safety backup is still available in Settings.',
         );
       }
       const database = new DatabaseService({
@@ -868,8 +942,9 @@ if (!hasSingleInstanceLock) {
       if (dataStartStage.status === 'cancelled') return;
 
       powerMonitor.on('resume', () => {
+        if (!runtimeCanReceiveEvents()) return;
         const activeAutomation = automationController;
-        if (activeAutomation && !databaseShutdownPromise) {
+        if (activeAutomation) {
           void activeAutomation.evaluate().catch((error: unknown) => {
             console.error(
               'Daily Workbench failed to evaluate automations after system resume.',
@@ -878,7 +953,7 @@ if (!hasSingleInstanceLock) {
           });
         }
         const activeFocus = focusController;
-        if (activeFocus && !databaseShutdownPromise) {
+        if (activeFocus) {
           void activeFocus.evaluate().catch((error: unknown) => {
             console.error('Daily Workbench failed to reconcile focus after system resume.', error);
           });
@@ -899,6 +974,7 @@ if (!hasSingleInstanceLock) {
           !databaseShutdownPromise &&
           !replacementPreparationPromise &&
           !replacementRestartPromise &&
+          !quitApprovalPromise &&
           BrowserWindow.getAllWindows().length === 0
         ) {
           const activeData = dataManagementController;

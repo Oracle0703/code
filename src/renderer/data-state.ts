@@ -2,12 +2,20 @@ import type {
   DataImportPreview,
   DataManagementSnapshot,
   DatabaseBackupInfo,
+  DatabaseBackupReason,
+  DatabaseBackupRestoreInput,
 } from '../shared/contracts';
 
 export type DataLoadStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export type DataOperationKind =
-  'backup' | 'update-policy' | 'export' | 'choose-import' | 'commit-import' | 'cancel-import';
+  | 'backup'
+  | 'restore-backup'
+  | 'update-policy'
+  | 'export'
+  | 'choose-import'
+  | 'commit-import'
+  | 'cancel-import';
 
 export interface ActiveDataOperation {
   readonly kind: DataOperationKind;
@@ -159,10 +167,63 @@ export function latestDatabaseBackup(
   return latest;
 }
 
+export function orderDatabaseBackups(
+  backups: readonly DatabaseBackupInfo[],
+): readonly DatabaseBackupInfo[] {
+  return [...backups].sort(
+    (left, right) =>
+      right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+  );
+}
+
+export function createDatabaseBackupRestoreInput(
+  backup: DatabaseBackupInfo,
+): DatabaseBackupRestoreInput {
+  return Object.freeze({
+    backupId: backup.id,
+    expectedReason: backup.reason,
+    expectedCreatedAt: backup.createdAt,
+    expectedSizeBytes: backup.sizeBytes,
+    expectedSchemaVersion: backup.schemaVersion,
+  });
+}
+
+const BACKUP_REASON_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  manual: '手动备份',
+  scheduled: '定时备份',
+  'pre-migration': '迁移前备份',
+  'pre-import': '替换前备份',
+});
+
+export function backupReasonLabel(reason: DatabaseBackupReason): string {
+  return BACKUP_REASON_LABELS[reason] ?? '应用备份';
+}
+
+export function formatBackupDateTime(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '时间未知';
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
+export function formatBackupBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '大小未知';
+  if (value < 1_024) return `${value} B`;
+  if (value < 1_048_576) return `${(value / 1_024).toFixed(1)} KiB`;
+  return `${(value / 1_048_576).toFixed(1)} MiB`;
+}
+
 export function dataOperationLabel(operation: DataOperationKind | null): string | null {
   switch (operation) {
     case 'backup':
       return '正在创建一致性备份…';
+    case 'restore-backup':
+      return '正在验证备份并准备安全恢复…';
     case 'update-policy':
       return '正在保存自动备份设置…';
     case 'export':

@@ -1,15 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import { chmod, lstat, open, readdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
-import type { DatabaseBackupInfo } from '../../shared/contracts';
+import type { DatabaseBackupInfo, DatabaseBackupRestoreInput } from '../../shared/contracts';
 import { DatabaseBackupError } from './errors';
 import type { SqliteAdapter, SqliteAdapterFactory } from './sqlite-adapter';
 import type { BackupReason, BackupResult, BackupRetentionResult, DatabasePaths } from './types';
 
 const BACKUP_FILE_PATTERN =
   /^daily-workbench-v(\d+)-(manual|scheduled|pre-migration|pre-import)-([0-9]{8}T[0-9]{9}Z)-([0-9a-fA-F-]{36})\.sqlite3$/u;
-const DEFAULT_LIST_LIMIT = 100;
+const MAXIMUM_LIST_LIMIT = 100;
 const BACKUP_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'] as const;
 
 type BackupSidecarSuffix = (typeof BACKUP_SIDECAR_SUFFIXES)[number];
@@ -32,6 +32,11 @@ export interface BackupManagerOptions {
   readonly now?: () => Date;
   readonly idFactory?: () => string;
   readonly durability?: BackupDurabilityOperations;
+}
+
+export interface BackupRestoreCopyResult {
+  readonly backup: DatabaseBackupInfo;
+  readonly sourceDigest: string;
 }
 
 export class BackupManager {
@@ -160,15 +165,19 @@ export class BackupManager {
     }
   }
 
-  async list(limit = DEFAULT_LIST_LIMIT): Promise<DatabaseBackupInfo[]> {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > DEFAULT_LIST_LIMIT) {
+  async list(limit?: number): Promise<DatabaseBackupInfo[]> {
+    if (
+      limit !== undefined &&
+      (!Number.isSafeInteger(limit) || limit < 1 || limit > MAXIMUM_LIST_LIMIT)
+    ) {
       throw new DatabaseBackupError('The database backup list limit is invalid.');
     }
 
     try {
-      return (await this.#scan())
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-        .slice(0, limit);
+      const sorted = (await this.#scan()).sort((left, right) =>
+        right.createdAt.localeCompare(left.createdAt),
+      );
+      return limit === undefined ? sorted : sorted.slice(0, limit);
     } catch (error) {
       if (error instanceof DatabaseBackupError) {
         throw error;
@@ -233,6 +242,42 @@ export class BackupManager {
     } catch (error) {
       if (error instanceof DatabaseBackupError) throw error;
       throw new DatabaseBackupError('The referenced database backup could not be validated.', {
+        cause: error,
+      });
+    }
+  }
+
+  async copyRestoreReference(
+    input: DatabaseBackupRestoreInput,
+    destinationPath: string,
+  ): Promise<BackupRestoreCopyResult> {
+    validateRestoreInput(input);
+    const destination = await this.#resolveRestoreCopyPath(destinationPath);
+    let destinationCreated = false;
+
+    try {
+      const backup = await this.validateReference(input.backupId, input.expectedReason);
+      assertExactRestoreMetadata(backup, input);
+      await assertMissingRestoreArtifact(destination);
+      const sourcePath = this.#resolveBackupPath(backup.fileName);
+      const sourceDigest = await copyStableRegularFile(sourcePath, destination, backup.sizeBytes);
+      destinationCreated = true;
+      await chmod(destination, 0o600);
+
+      const revalidated = await this.validateReference(input.backupId, input.expectedReason);
+      assertExactRestoreMetadata(revalidated, input);
+      if (!sameBackupInfo(backup, revalidated)) {
+        throw new DatabaseBackupError(
+          'The referenced database backup changed while its restore copy was prepared.',
+        );
+      }
+      return { backup: revalidated, sourceDigest };
+    } catch (error) {
+      if (destinationCreated) {
+        await unlink(destination).catch(() => undefined);
+      }
+      if (error instanceof DatabaseBackupError) throw error;
+      throw new DatabaseBackupError('The database backup restore copy could not be prepared.', {
         cause: error,
       });
     }
@@ -449,6 +494,36 @@ export class BackupManager {
     return path;
   }
 
+  async #resolveRestoreCopyPath(path: string): Promise<string> {
+    const importDirectory = resolve(this.#paths.dataDirectory, 'imports');
+    if (dirname(importDirectory) !== this.#paths.dataDirectory) {
+      throw new DatabaseBackupError('The database restore directory escaped its data directory.');
+    }
+    const directoryEntry = await lstat(importDirectory);
+    if (!directoryEntry.isDirectory() || directoryEntry.isSymbolicLink()) {
+      throw new DatabaseBackupError('The database restore directory is not a real directory.');
+    }
+    const destination = resolve(path);
+    const workingDirectory = dirname(destination);
+    const workingMatch = /^\.backup-restore-(.{36})-(.{36})$/u.exec(basename(workingDirectory));
+    const isolatedDatabase =
+      dirname(workingDirectory) === importDirectory &&
+      workingMatch !== null &&
+      isLowercaseUuid(workingMatch[1]) &&
+      isLowercaseUuid(workingMatch[2]) &&
+      basename(destination) === 'daily-workbench.sqlite3';
+    if (!isolatedDatabase) {
+      throw new DatabaseBackupError('The database restore copy path is invalid.');
+    }
+    const workingEntry = await lstat(workingDirectory);
+    if (!workingEntry.isDirectory() || workingEntry.isSymbolicLink()) {
+      throw new DatabaseBackupError(
+        'The isolated database restore directory is not a real directory.',
+      );
+    }
+    return destination;
+  }
+
   async #removeBackupArtifacts(path: string, includeMainFile: boolean): Promise<void> {
     await this.#unlinkBackupArtifacts(
       path,
@@ -605,6 +680,10 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
 }
 
+function isLowercaseUuid(value: string): boolean {
+  return value === value.toLowerCase() && isUuid(value);
+}
+
 function isBackupReason(value: string): value is BackupReason {
   return (
     value === 'manual' ||
@@ -612,6 +691,56 @@ function isBackupReason(value: string): value is BackupReason {
     value === 'pre-migration' ||
     value === 'pre-import'
   );
+}
+
+function validateRestoreInput(input: DatabaseBackupRestoreInput): void {
+  if (
+    !input ||
+    typeof input !== 'object' ||
+    !isUuid(input.backupId) ||
+    !isBackupReason(input.expectedReason) ||
+    !isIsoTimestamp(input.expectedCreatedAt) ||
+    !Number.isSafeInteger(input.expectedSizeBytes) ||
+    input.expectedSizeBytes < 1 ||
+    !Number.isSafeInteger(input.expectedSchemaVersion) ||
+    input.expectedSchemaVersion < 0
+  ) {
+    throw new DatabaseBackupError('The database backup restore reference is invalid.');
+  }
+}
+
+function assertExactRestoreMetadata(
+  backup: DatabaseBackupInfo,
+  expected: DatabaseBackupRestoreInput,
+): void {
+  if (
+    backup.id !== expected.backupId.toLowerCase() ||
+    backup.reason !== expected.expectedReason ||
+    backup.createdAt !== expected.expectedCreatedAt ||
+    backup.sizeBytes !== expected.expectedSizeBytes ||
+    backup.schemaVersion !== expected.expectedSchemaVersion
+  ) {
+    throw new DatabaseBackupError(
+      'The referenced database backup metadata changed before restore.',
+    );
+  }
+}
+
+function sameBackupInfo(left: DatabaseBackupInfo, right: DatabaseBackupInfo): boolean {
+  return (
+    left.id === right.id &&
+    left.fileName === right.fileName &&
+    left.reason === right.reason &&
+    left.createdAt === right.createdAt &&
+    left.sizeBytes === right.sizeBytes &&
+    left.schemaVersion === right.schemaVersion
+  );
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const timestamp = new Date(value);
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value;
 }
 
 function isSafeRegularFile(entry: Stats): boolean {
@@ -729,4 +858,99 @@ async function assertMissing(path: string): Promise<void> {
     throw error;
   }
   throw new DatabaseBackupError('A generated database backup filename already exists.');
+}
+
+async function assertMissingRestoreArtifact(path: string): Promise<void> {
+  const entry = await lstat(path).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  });
+  if (entry) {
+    throw new DatabaseBackupError('The database restore copy already exists.');
+  }
+}
+
+async function copyStableRegularFile(
+  sourcePath: string,
+  destinationPath: string,
+  expectedSize: number,
+): Promise<string> {
+  const sourceBefore = await lstat(sourcePath);
+  if (!isSafeRegularFile(sourceBefore) || sourceBefore.size !== expectedSize) {
+    throw new DatabaseBackupError('The database backup changed before it could be copied.');
+  }
+  const sourceFlags =
+    constants.O_RDONLY | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
+  const destinationFlags =
+    constants.O_WRONLY |
+    constants.O_CREAT |
+    constants.O_EXCL |
+    (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW);
+  const source = await open(sourcePath, sourceFlags);
+  let destination;
+  let destinationCreated = false;
+  try {
+    destination = await open(destinationPath, destinationFlags, 0o600);
+    destinationCreated = true;
+    const sourceOpened = await source.stat();
+    if (!sameStableFile(sourceBefore, sourceOpened) || sourceOpened.size !== expectedSize) {
+      throw new DatabaseBackupError('The database backup changed before it could be copied.');
+    }
+
+    const hash = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, expectedSize));
+    let position = 0;
+    while (position < expectedSize) {
+      const length = Math.min(buffer.byteLength, expectedSize - position);
+      const { bytesRead } = await source.read(buffer, 0, length, position);
+      if (bytesRead < 1) {
+        throw new DatabaseBackupError('The database backup was truncated while it was copied.');
+      }
+      hash.update(buffer.subarray(0, bytesRead));
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await destination.write(
+          buffer,
+          written,
+          bytesRead - written,
+          position + written,
+        );
+        if (result.bytesWritten < 1) {
+          throw new DatabaseBackupError('The database backup restore copy could not be written.');
+        }
+        written += result.bytesWritten;
+      }
+      position += bytesRead;
+    }
+
+    const growthProbe = Buffer.allocUnsafe(1);
+    if ((await source.read(growthProbe, 0, 1, expectedSize)).bytesRead !== 0) {
+      throw new DatabaseBackupError('The database backup grew while it was copied.');
+    }
+    await destination.chmod(0o600);
+    const [sourceAfterHandle, sourceAfterPath, destinationAfter] = await Promise.all([
+      source.stat(),
+      lstat(sourcePath),
+      destination.stat(),
+    ]);
+    if (
+      !sameStableFile(sourceOpened, sourceAfterHandle) ||
+      !sameStableFile(sourceOpened, sourceAfterPath) ||
+      !isSafeRegularFile(destinationAfter) ||
+      destinationAfter.size !== expectedSize
+    ) {
+      throw new DatabaseBackupError('The database backup changed while it was copied.');
+    }
+    return hash.digest('hex');
+  } catch (error) {
+    await destination?.close().catch(() => undefined);
+    destination = undefined;
+    if (destinationCreated) {
+      await unlink(destinationPath).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    await source.close().catch(() => undefined);
+    await destination?.close().catch(() => undefined);
+  }
 }
