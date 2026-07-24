@@ -43,6 +43,33 @@ describe('ImportQuarantine', () => {
     await quarantine.cancel({ importId: preview.importId });
   });
 
+  it('previews v3 focus-session counts for schema 10 packages', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'workbench-import-focus-preview-'));
+    directories.push(directory);
+    const quarantine = new ImportQuarantine({
+      directory,
+      stager: new AtomicImportStager({
+        directory,
+        idFactory: () => '74747474-7474-4474-8474-747474747474',
+        driver: {
+          build: async (_packageData, path) => writeFile(path, 'valid-stage'),
+          validate: async () => undefined,
+        },
+      }),
+      idFactory: () => '75757575-7575-4575-8575-757575757575',
+      now: () => new Date('2026-07-22T12:00:00.000Z'),
+    });
+
+    const preview = await quarantine.prepare(createFocusPackage());
+    expect(preview).toMatchObject({
+      sourceSchemaVersion: 10,
+      counts: {
+        focusSessions: 1,
+      },
+    });
+    await quarantine.cancel({ importId: preview.importId });
+  });
+
   it('stages an immutable package behind a one-time preview token', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'workbench-import-quarantine-'));
     directories.push(directory);
@@ -466,6 +493,45 @@ function createAutomationPackage(): Buffer {
           createdAt: '2026-07-22T10:00:00.000Z',
           updatedAt: '2026-07-22T10:00:00.000Z',
           archivedAt: null,
+        },
+      },
+    ],
+  });
+}
+
+function createFocusPackage(): Buffer {
+  const workspaceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  return serializePortablePackage({
+    exportId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    exportedAt: '2026-07-22T11:00:00.000Z',
+    sourceAppVersion: '0.1.0',
+    sourceSchemaVersion: 10,
+    records: [
+      {
+        type: 'app-state',
+        data: { currentWorkspaceId: workspaceId },
+      },
+      {
+        type: 'workspace',
+        data: {
+          id: workspaceId,
+          name: '主工作区',
+          archivedAt: null,
+        },
+      },
+      {
+        type: 'focus-session',
+        data: {
+          id: '76767676-7676-4676-8676-767676767676',
+          workspaceId,
+          taskId: null,
+          status: 'paused',
+          remainingSeconds: 900,
+          revision: 2,
+          localDate: '2026-07-22',
+          createdAt: '2026-07-22T10:00:00.000Z',
+          updatedAt: '2026-07-22T10:10:00.000Z',
+          completedAt: null,
         },
       },
     ],

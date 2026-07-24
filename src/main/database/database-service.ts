@@ -13,6 +13,9 @@ import type {
   BackupRunErrorCode,
   DatabaseBackupInfo,
   DatabaseStatus,
+  FocusSnapshot,
+  FocusStartInput,
+  FocusTargetInput,
   InboxArchiveResult,
   InboxCategorizeInput,
   InboxCreateInput,
@@ -61,6 +64,7 @@ import {
   type BrowserWorkspaceDataInput,
 } from '../browser';
 import { readPortableDatabaseRecords, type PortableDataRecord } from '../data-portability';
+import { FocusService, type FocusReconcileResult } from '../focus';
 import { InboxService } from '../inbox';
 import { NoteService } from '../notes';
 import { ScheduleService } from '../schedule';
@@ -157,6 +161,8 @@ export interface DatabaseServiceOptions {
   readonly noteIdFactory?: () => string;
   readonly scheduleIdFactory?: () => string;
   readonly scheduleTodayFactory?: () => string;
+  readonly focusIdFactory?: () => string;
+  readonly focusTodayFactory?: () => string;
   readonly automationIdFactory?: () => string;
   readonly automationTaskIdFactory?: () => string;
   readonly automationNoteIdFactory?: () => string;
@@ -177,6 +183,7 @@ export class DatabaseService implements TerminalPreferenceStore {
   readonly #taskService: TaskService;
   readonly #noteService: NoteService;
   readonly #scheduleService: ScheduleService;
+  readonly #focusService: FocusService;
   readonly #automationService: AutomationService;
   readonly #searchService: SearchService;
   readonly #browserService: BrowserService;
@@ -205,6 +212,8 @@ export class DatabaseService implements TerminalPreferenceStore {
     noteIdFactory = randomUUID,
     scheduleIdFactory = randomUUID,
     scheduleTodayFactory,
+    focusIdFactory = randomUUID,
+    focusTodayFactory,
     automationIdFactory = randomUUID,
     automationTaskIdFactory = randomUUID,
     automationNoteIdFactory = randomUUID,
@@ -248,6 +257,13 @@ export class DatabaseService implements TerminalPreferenceStore {
       now,
       idFactory: scheduleIdFactory,
       todayFactory: scheduleTodayFactory,
+      onFatalTransaction: (error) => this.#markPoisoned(error),
+    });
+    this.#focusService = new FocusService({
+      execute: (operation) => this.#enqueue((database) => operation(database)),
+      now,
+      idFactory: focusIdFactory,
+      todayFactory: focusTodayFactory ?? taskTodayFactory ?? scheduleTodayFactory,
       onFatalTransaction: (error) => this.#markPoisoned(error),
     });
     this.#automationService = new AutomationService({
@@ -458,7 +474,9 @@ export class DatabaseService implements TerminalPreferenceStore {
   }
 
   readPortableRecords(): Promise<readonly PortableDataRecord[]> {
-    return this.#enqueue((database) => readPortableDatabaseRecords(database));
+    return this.#enqueue((database) =>
+      readPortableDatabaseRecords(database, DEFAULT_MIGRATIONS, this.#now),
+    );
   }
 
   getBackupSchedulerState(): Promise<BackupSchedulerPersistentState> {
@@ -655,6 +673,34 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#scheduleService.archive(input);
   }
 
+  getFocusSnapshot(input: WorkspaceTargetInput): Promise<FocusSnapshot> {
+    return this.#focusService.getSnapshot(input);
+  }
+
+  startFocusSession(input: FocusStartInput): Promise<FocusSnapshot> {
+    return this.#focusService.start(input);
+  }
+
+  pauseFocusSession(input: FocusTargetInput): Promise<FocusSnapshot> {
+    return this.#focusService.pause(input);
+  }
+
+  resumeFocusSession(input: FocusTargetInput): Promise<FocusSnapshot> {
+    return this.#focusService.resume(input);
+  }
+
+  cancelFocusSession(input: FocusTargetInput): Promise<FocusSnapshot> {
+    return this.#focusService.cancel(input);
+  }
+
+  reconcileFocusSession(): Promise<FocusReconcileResult> {
+    return this.#focusService.reconcileOpenSession();
+  }
+
+  pauseRunningFocusSession(): Promise<FocusReconcileResult> {
+    return this.#focusService.pauseRunningSession();
+  }
+
   getAutomationSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot> {
     return this.#automationService.getSnapshot(input);
   }
@@ -798,6 +844,9 @@ export class DatabaseService implements TerminalPreferenceStore {
         if (migration.toVersion >= 9) {
           this.#automationService.validateSnapshot(database);
         }
+        if (migration.toVersion >= 10) {
+          this.#focusService.validateSnapshot(database);
+        }
         this.#browserService.validateSnapshot(database);
         this.#searchService.validateSnapshot(database);
         this.#searchService.validateContentIntegrity(database);
@@ -922,6 +971,9 @@ export class DatabaseService implements TerminalPreferenceStore {
     }
     if (expectedVersion >= 9) {
       this.#automationService.validateSnapshot(database);
+    }
+    if (expectedVersion >= 10) {
+      this.#focusService.validateSnapshot(database);
     }
   }
 

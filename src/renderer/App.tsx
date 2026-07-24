@@ -75,6 +75,7 @@ import { useInboxController } from './hooks/useInboxController';
 import { useAssistantController } from './hooks/useAssistantController';
 import { useAutomationController } from './hooks/useAutomationController';
 import { useDataManagementController } from './hooks/useDataManagementController';
+import { useFocusController } from './hooks/useFocusController';
 import { useGlobalSearchController } from './hooks/useGlobalSearchController';
 import { useNoteController } from './hooks/useNoteController';
 import { useScheduleController } from './hooks/useScheduleController';
@@ -140,6 +141,7 @@ export function App() {
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
   const [scheduleDialog, setScheduleDialog] = useState<ScheduleDialogState | null>(null);
   const [automationDialog, setAutomationDialog] = useState<AutomationDialogState | null>(null);
+  const [focusDialogOpen, setFocusDialogOpen] = useState(false);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [assistantSurfaceOpen, setAssistantSurfaceOpen] = useState(false);
@@ -185,6 +187,7 @@ export function App() {
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
+  const focusController = useFocusController(snapshot?.currentWorkspaceId ?? null);
   const automationController = useAutomationController(snapshot?.currentWorkspaceId ?? null, {
     onRunOutput: ({ workspaceId, outputKind }) => {
       if (currentWorkspaceIdRef.current !== workspaceId) return;
@@ -233,6 +236,7 @@ export function App() {
     taskDialog !== null ||
     scheduleDialog !== null ||
     automationDialog !== null ||
+    focusDialogOpen ||
     dataState.importPreview !== null;
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
@@ -320,6 +324,7 @@ export function App() {
       taskDialog !== null ||
       scheduleDialog !== null ||
       automationDialog !== null ||
+      focusDialogOpen ||
       dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
@@ -335,6 +340,7 @@ export function App() {
     automationDialog,
     scheduleDialog,
     dataState.importPreview,
+    focusDialogOpen,
     taskDialog,
     workspaceController.pendingOperation,
     workspaceDialog,
@@ -348,6 +354,7 @@ export function App() {
         quickCaptureTarget !== null ||
         scheduleDialog !== null ||
         automationDialog !== null ||
+        focusDialogOpen ||
         dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
@@ -364,6 +371,7 @@ export function App() {
     [
       activeWorkspace,
       automationDialog,
+      focusDialogOpen,
       quickCaptureTarget,
       scheduleDialog,
       dataState.importPreview,
@@ -381,6 +389,7 @@ export function App() {
       taskDialog !== null ||
       scheduleDialog !== null ||
       automationDialog !== null ||
+      focusDialogOpen ||
       dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
@@ -403,6 +412,7 @@ export function App() {
     scheduleController.snapshot,
     scheduleDialog,
     dataState.importPreview,
+    focusDialogOpen,
     taskDialog,
     workspaceController.pendingOperation,
     workspaceDialog,
@@ -416,6 +426,7 @@ export function App() {
       taskDialog !== null ||
       scheduleDialog !== null ||
       automationDialog !== null ||
+      focusDialogOpen ||
       dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
@@ -431,6 +442,7 @@ export function App() {
     activeWorkspace,
     automationDialog,
     dataState.importPreview,
+    focusDialogOpen,
     quickCaptureTarget,
     scheduleDialog,
     taskDialog,
@@ -447,6 +459,7 @@ export function App() {
         taskDialog !== null ||
         scheduleDialog !== null ||
         automationDialog !== null ||
+        focusDialogOpen ||
         dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
@@ -464,6 +477,7 @@ export function App() {
       activeWorkspace,
       automationDialog,
       dataState.importPreview,
+      focusDialogOpen,
       quickCaptureTarget,
       scheduleDialog,
       taskDialog,
@@ -564,6 +578,7 @@ export function App() {
         taskDialog !== null ||
         scheduleDialog !== null ||
         automationDialog !== null ||
+        focusDialogOpen ||
         dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
@@ -622,6 +637,7 @@ export function App() {
     browserOpen,
     automationDialog,
     dataState.importPreview,
+    focusDialogOpen,
     paletteOpen,
     quickCaptureTarget,
     sidebarCollapsed,
@@ -1298,6 +1314,11 @@ export function App() {
                     scheduleOperationError={scheduleController.operationError}
                     pendingScheduleItemIds={scheduleController.pendingItemIds}
                     scheduleCreatePending={scheduleController.pendingCreate}
+                    focusSnapshot={focusController.snapshot}
+                    focusStatus={focusController.status}
+                    focusError={focusController.error}
+                    focusOperation={focusController.operation}
+                    focusRemainingSeconds={focusController.remainingSeconds}
                     onOpenInbox={() => requestActiveView('inbox')}
                     onOpenTasks={() => requestActiveView('tasks')}
                     onCreateToday={() => openTaskCreate('today')}
@@ -1321,6 +1342,13 @@ export function App() {
                         item,
                       })
                     }
+                    onRetryFocus={focusController.retry}
+                    onStartFocus={focusController.start}
+                    onPauseFocus={focusController.pause}
+                    onResumeFocus={focusController.resume}
+                    onCancelFocus={focusController.cancel}
+                    onSwitchFocusWorkspace={requestWorkspaceActivation}
+                    onFocusDialogOpenChange={setFocusDialogOpen}
                     onOpenAssistant={() => openAssistant({ kind: 'today' })}
                   />
                 ) : activeSurface === 'inbox' ? (

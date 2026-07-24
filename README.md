@@ -2,7 +2,7 @@
 
 一个面向个人日常工作的 Electron 桌面工作台。它借鉴 Codex 一类“上下文 + 工具面板”的交互方式，把今日事项、项目、网页与终端放进同一个可恢复的工作空间。
 
-> 当前状态：`v1.0` 只读工作区 AI 助手闭环。Electron 进程隔离、可迁移数据库、浏览器标签/收藏夹/安全下载、工作区隔离的多终端、全局搜索、受控数据可移植性与每日/每周固定自动化已经打通；用户现在还可显式选择有限的本地上下文，经 OpenAI Responses API 取得流式回答。
+> 当前状态：可恢复专注会话闭环。Electron 进程隔离、可迁移数据库、浏览器标签/收藏夹/安全下载、工作区隔离的多终端、全局搜索、受控数据可移植性、每日/每周固定自动化与只读工作区 AI 助手已经打通；Today 现在还提供由 Main 和 SQLite 共同负责的固定 25 分钟专注会话。
 
 ## 已具备的能力
 
@@ -16,6 +16,7 @@
 - 将收件箱中的笔记线索原子转换为带唯一来源关系的真实笔记
 - 按工作区隔离的今日日程，可创建、编辑和软归档专注、会议、回顾与个人时间段
 - Today 同时使用真实任务和真实日程，并在跨午夜、窗口恢复或重新聚焦后刷新本地日期
+- Today 可开始固定 25 分钟的持久化专注会话，可选关联当天未完成任务；暂停、继续、取消、休眠恢复、重启对账和今日完成轮次均由 Main/SQLite 管理
 - 将收件箱线索原子转换为带唯一来源关系的任务，失败时不会留下半完成状态
 - 合并命令面板的全局搜索，可跨当前或全部活动工作区定位收件箱、任务、笔记、日程、浏览器标签和收藏夹
 - 命令面板中的工作区切换、页面导航、快速记录、浏览器、终端配置和数据设置快捷动作
@@ -32,8 +33,8 @@
 - 完整依赖审计报告、开发期风险基线和打包后 Electron fuse 状态校验
 - Electron 内置 `node:sqlite` 数据库、事务迁移、迁移校验和与迁移前自动备份
 - 受控手动备份、每日/每周定时备份、只清理定时快照的保留策略和持久化失败退避
-- Main 独占的 `.dwbx` v2 逻辑导出/预检导入与崩溃可恢复替换，不接受 Renderer 路径或外部 SQLite；自动化定义可移植但导入后强制暂停，运行账本与机器终端配置不进入数据包
-- Linux/Windows 打包后 SQLite、工作区、收件箱、任务、笔记、日程、浏览器、搜索、终端配置、自动化、迁移、备份和重开验证
+- Main 独占的 `.dwbx` v3 逻辑导出/预检导入与崩溃可恢复替换，不接受 Renderer 路径或外部 SQLite；自动化定义可移植但导入后强制暂停，未到期的运行中专注会话也只会以暂停状态导入
+- Linux/Windows 打包后 SQLite、工作区、收件箱、任务、笔记、日程、专注、浏览器、搜索、终端配置、自动化、迁移、备份和重开验证
 - 不使用真实 API key 或外网的本地 Responses SSE provider 冒烟，覆盖请求约束、分块流式输出、取消和失败收口
 
 ## 快速开始
@@ -71,6 +72,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run test:assistant
+npm run test:focus
 npm run test:terminal
 npm run audit:all
 npm run build:database-smoke
@@ -95,8 +97,8 @@ npm run check
 
 | 目标            | 当前验证级别                                                            |
 | --------------- | ----------------------------------------------------------------------- |
-| Windows x64     | Squirrel、fuse、ConPTY、业务数据、真实下载及本地 AI provider 冒烟       |
-| Linux x64       | Electron package、fuse、包体、业务数据、真实下载及本地 AI provider 冒烟 |
+| Windows x64     | Squirrel、fuse、ConPTY、v10 业务数据、真实下载及本地 AI provider 冒烟   |
+| Linux x64       | Electron package、fuse、包体、v10 业务数据、真实下载及 AI provider 冒烟 |
 | macOS x64/arm64 | 已配置 ZIP maker，尚未进入 CI 实机验证                                  |
 
 GitHub Actions 的 Windows 作业会保存通过该作业内全部检查的安装包、完整 NuGet 更新包、`RELEASES` 和 `SHA256SUMS.txt`，保留 14 天。当前运行时冒烟针对 Squirrel 构建同时产生的未打包应用负载；最终 NUPKG 负载复验仍由独立的 Issue #9 跟踪。

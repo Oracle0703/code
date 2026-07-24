@@ -70,7 +70,8 @@ export function DataImportDialog({
     counts.scheduleItems +
     counts.browserTabs +
     counts.browserBookmarks +
-    counts.automations;
+    counts.automations +
+    counts.focusSessions;
 
   return (
     <dialog
@@ -120,6 +121,7 @@ export function DataImportDialog({
         <Count label="任务" value={counts.tasks} />
         <Count label="笔记" value={counts.notes} />
         <Count label="日程" value={counts.scheduleItems} />
+        <Count label="专注记录" value={counts.focusSessions} />
         <Count label="自动化" value={counts.automations} />
         <Count label="浏览器标签" value={counts.browserTabs} />
         <Count label="浏览器收藏" value={counts.browserBookmarks} />
@@ -135,6 +137,9 @@ export function DataImportDialog({
           </span>
           <small>
             本机终端 Profile、目录授权与 WSL 选择不会从数据包导入。
+            {counts.focusSessions > 0
+              ? ` ${counts.focusSessions.toLocaleString()} 条专注记录会导入；未结束会话保持暂停。`
+              : ''}
             {counts.automations > 0
               ? ` ${counts.automations.toLocaleString()} 条自动化导入后将全部暂停${
                   counts.enabledAutomations > 0

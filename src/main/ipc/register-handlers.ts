@@ -20,6 +20,9 @@ import {
   type DataManagementSnapshot,
   type DatabaseBackupInfo,
   type DatabaseStatus,
+  type FocusSnapshot,
+  type FocusStartInput,
+  type FocusTargetInput,
   type InboxArchiveResult,
   type InboxCategorizeInput,
   type InboxCreateInput,
@@ -86,6 +89,8 @@ import {
   parseBrowserWorkspaceInput,
   parseDataImportCommitInput,
   parseDataImportTargetInput,
+  parseFocusStartInput,
+  parseFocusTargetInput,
   parseInboxCategorizeInput,
   parseInboxCreateInput,
   parseInboxTargetInput,
@@ -177,6 +182,13 @@ interface IpcDependencies {
     updateScheduleItem(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archiveScheduleItem(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
   };
+  focus: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<FocusSnapshot>;
+    start(input: FocusStartInput): Promise<FocusSnapshot>;
+    pause(input: FocusTargetInput): Promise<FocusSnapshot>;
+    resume(input: FocusTargetInput): Promise<FocusSnapshot>;
+    cancel(input: FocusTargetInput): Promise<FocusSnapshot>;
+  };
   automation: {
     getSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;
     create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
@@ -234,6 +246,7 @@ export function registerIpcHandlers({
   task,
   note,
   schedule,
+  focus,
   automation,
   assistant,
   terminal,
@@ -409,6 +422,27 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.schedule.archive, (_event, input, ...args) => {
     assertNoArguments(args, 'Archiving a schedule item');
     return schedule.archiveScheduleItem(parseScheduleTargetInput(input));
+  });
+
+  register(IPC_CHANNELS.focus.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the focus snapshot');
+    return focus.getSnapshot(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.focus.start, (_event, input, ...args) => {
+    assertNoArguments(args, 'Starting a focus session');
+    return focus.start(parseFocusStartInput(input));
+  });
+  register(IPC_CHANNELS.focus.pause, (_event, input, ...args) => {
+    assertNoArguments(args, 'Pausing a focus session');
+    return focus.pause(parseFocusTargetInput(input));
+  });
+  register(IPC_CHANNELS.focus.resume, (_event, input, ...args) => {
+    assertNoArguments(args, 'Resuming a focus session');
+    return focus.resume(parseFocusTargetInput(input));
+  });
+  register(IPC_CHANNELS.focus.cancel, (_event, input, ...args) => {
+    assertNoArguments(args, 'Cancelling a focus session');
+    return focus.cancel(parseFocusTargetInput(input));
   });
 
   register(IPC_CHANNELS.automation.getSnapshot, (_event, input, ...args) => {

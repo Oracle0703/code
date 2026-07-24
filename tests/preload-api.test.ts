@@ -304,6 +304,55 @@ describe('preload schedule API', () => {
   });
 });
 
+describe('preload focus API', () => {
+  it('exposes only the declared frozen focus methods', () => {
+    expect(Object.keys(api.focus).sort()).toEqual([
+      'cancel',
+      'getSnapshot',
+      'onChanged',
+      'pause',
+      'resume',
+      'start',
+    ]);
+    expect(Object.isFrozen(api.focus)).toBe(true);
+  });
+
+  it('forwards exact focus inputs through allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const taskId = '423e4567-e89b-42d3-a456-426614174000';
+    const sessionId = 'c23e4567-e89b-42d3-a456-426614174000';
+    const target = { workspaceId, sessionId, expectedRevision: 2 };
+
+    await api.focus.getSnapshot({ workspaceId });
+    await api.focus.start({ workspaceId });
+    await api.focus.start({ workspaceId, taskId });
+    await api.focus.pause(target);
+    await api.focus.resume(target);
+    await api.focus.cancel(target);
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['focus:get-snapshot', { workspaceId }],
+      ['focus:start', { workspaceId }],
+      ['focus:start', { workspaceId, taskId }],
+      ['focus:pause', target],
+      ['focus:resume', target],
+      ['focus:cancel', target],
+    ]);
+  });
+
+  it('subscribes and removes narrow focus change listeners', () => {
+    const listener = vi.fn();
+    const unsubscribe = api.focus.onChanged(listener);
+    expect(electron.on).toHaveBeenCalledExactlyOnceWith('focus:changed', expect.any(Function));
+    const wrapped = electron.on.mock.calls[0]?.[1] as (event: unknown, payload: unknown) => void;
+    const payload = { workspaceId: 'workspace', reason: 'transition' };
+    wrapped({}, payload);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(payload);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledExactlyOnceWith('focus:changed', wrapped);
+  });
+});
+
 describe('preload automation API', () => {
   it('exposes only the declared frozen automation methods', () => {
     expect(Object.keys(api.automation).sort()).toEqual([

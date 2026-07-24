@@ -7,11 +7,18 @@ import {
   normalizeAutomationRevision,
   normalizeAutomationSchedule,
 } from '../../shared/automation-domain';
+import {
+  normalizeFocusRemainingSeconds,
+  normalizeFocusRevision,
+  normalizeFocusSessionId,
+} from '../../shared/focus-domain';
+import { normalizeTaskCivilDate, normalizeTaskId } from '../../shared/task-domain';
 import { normalizeWorkspaceId } from '../../shared/workspace-domain';
 
 export const DATA_PACKAGE_FORMAT = 'daily-workbench-portable';
 export const LEGACY_DATA_PACKAGE_FORMAT_VERSION = 1;
-export const DATA_PACKAGE_FORMAT_VERSION = 2;
+export const AUTOMATION_DATA_PACKAGE_FORMAT_VERSION = 2;
+export const DATA_PACKAGE_FORMAT_VERSION = 3;
 export const DEFAULT_MAX_PACKAGE_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_MAX_MANIFEST_BYTES = 64 * 1024;
 export const DEFAULT_MAX_RECORD_BYTES = 1024 * 1024;
@@ -30,14 +37,21 @@ const LEGACY_PORTABLE_RECORD_TYPES = [
   'browser-bookmark',
 ] as const;
 
-export const PORTABLE_RECORD_TYPES = [
+const AUTOMATION_PORTABLE_RECORD_TYPES = [
   ...LEGACY_PORTABLE_RECORD_TYPES,
   'automation-definition',
 ] as const;
 
+export const PORTABLE_RECORD_TYPES = [
+  ...AUTOMATION_PORTABLE_RECORD_TYPES,
+  'focus-session',
+] as const;
+
 export type PortableRecordType = (typeof PORTABLE_RECORD_TYPES)[number];
 export type PortablePackageFormatVersion =
-  typeof LEGACY_DATA_PACKAGE_FORMAT_VERSION | typeof DATA_PACKAGE_FORMAT_VERSION;
+  | typeof LEGACY_DATA_PACKAGE_FORMAT_VERSION
+  | typeof AUTOMATION_DATA_PACKAGE_FORMAT_VERSION
+  | typeof DATA_PACKAGE_FORMAT_VERSION;
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue =
   JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
@@ -127,7 +141,12 @@ export function serializePortablePackage(
     sourceAppVersion: source.sourceAppVersion,
     sourceSchemaVersion: source.sourceSchemaVersion,
     recordCount: source.records.length,
-    counts: formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION ? toLegacyCounts(counts) : counts,
+    counts:
+      formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION
+        ? toLegacyCounts(counts)
+        : formatVersion === AUTOMATION_DATA_PACKAGE_FORMAT_VERSION
+          ? toAutomationCounts(counts)
+          : counts,
     bodySha256,
   };
   const output = Buffer.from(`${canonicalJson(manifest)}\n${body}`, 'utf8');
@@ -308,6 +327,8 @@ function validateRecord(
     }
   } else if (record.type === 'automation-definition') {
     validateAutomationRecord(record);
+  } else if (record.type === 'focus-session') {
+    validateFocusSessionRecord(record);
   }
 }
 
@@ -381,6 +402,73 @@ function validateAutomationRecord(record: PortableDataRecord): void {
   }
 }
 
+function validateFocusSessionRecord(record: PortableDataRecord): void {
+  assertExactObjectKeys(record.data, [
+    'completedAt',
+    'createdAt',
+    'id',
+    'localDate',
+    'remainingSeconds',
+    'revision',
+    'status',
+    'taskId',
+    'updatedAt',
+    'workspaceId',
+  ]);
+  const data = record.data;
+  try {
+    if (normalizeFocusSessionId(data.id) !== data.id) {
+      throw new TypeError('Focus session id must already be normalized.');
+    }
+    if (normalizeWorkspaceId(data.workspaceId) !== data.workspaceId) {
+      throw new TypeError('Focus workspace id must already be normalized.');
+    }
+    if (data.taskId !== null && normalizeTaskId(data.taskId) !== data.taskId) {
+      throw new TypeError('Focus task id must already be normalized.');
+    }
+    if (data.status !== 'paused' && data.status !== 'completed') {
+      throw new TypeError('Portable focus state is invalid.');
+    }
+    if (
+      normalizeFocusRemainingSeconds(data.remainingSeconds, data.status === 'completed') !==
+      data.remainingSeconds
+    ) {
+      throw new TypeError('Focus remaining time must already be normalized.');
+    }
+    if (normalizeFocusRevision(data.revision) !== data.revision) {
+      throw new TypeError('Focus revision must already be normalized.');
+    }
+  } catch (error) {
+    throw new DataPackageError('The focus session identity or state is invalid.', {
+      cause: error,
+    });
+  }
+  try {
+    if (normalizeTaskCivilDate(data.localDate) !== data.localDate) {
+      throw new TypeError('Focus local date must already be normalized.');
+    }
+  } catch {
+    throw new DataPackageError('The focus session local date is invalid.');
+  }
+  validateIsoTimestamp(data.createdAt, 'focus session creation time');
+  validateIsoTimestamp(data.updatedAt, 'focus session update time');
+  if ((data.updatedAt as string) < (data.createdAt as string)) {
+    throw new DataPackageError('The focus session update time precedes its creation time.');
+  }
+  if (data.status === 'completed') {
+    validateIsoTimestamp(data.completedAt, 'focus session completion time');
+    if (
+      data.remainingSeconds !== 0 ||
+      (data.completedAt as string) < (data.createdAt as string) ||
+      (data.updatedAt as string) < (data.completedAt as string)
+    ) {
+      throw new DataPackageError('The completed focus session state is invalid.');
+    }
+  } else if (data.completedAt !== null) {
+    throw new DataPackageError('The paused focus session completion time is invalid.');
+  }
+}
+
 function validateRecordGraph(records: readonly PortableDataRecord[]): string {
   const appStates = records.filter(({ type }) => type === 'app-state');
   if (appStates.length !== 1) {
@@ -391,6 +479,7 @@ function validateRecordGraph(records: readonly PortableDataRecord[]): string {
     throw new DataPackageError('The data package current workspace id is invalid.');
   }
   const workspaceNames = new Map<string, string>();
+  const archivedWorkspaceIds = new Set<string>();
   for (const record of records) {
     if (record.type !== 'workspace') continue;
     const id = record.data.id;
@@ -399,6 +488,7 @@ function validateRecordGraph(records: readonly PortableDataRecord[]): string {
       throw new DataPackageError('The data package workspace identity is invalid.');
     }
     workspaceNames.set(id, name);
+    if (record.data.archivedAt !== null) archivedWorkspaceIds.add(id);
   }
   const currentWorkspaceName = workspaceNames.get(currentWorkspaceId);
   if (!currentWorkspaceName) {
@@ -419,6 +509,47 @@ function validateRecordGraph(records: readonly PortableDataRecord[]): string {
     }
     automationIds.add(id);
   }
+  const taskWorkspaces = new Map<string, string>();
+  for (const record of records) {
+    if (record.type !== 'task') continue;
+    const id = record.data.id;
+    const workspaceId = record.data.workspaceId;
+    if (typeof id === 'string' && typeof workspaceId === 'string') {
+      taskWorkspaces.set(id, workspaceId);
+    }
+  }
+  const focusSessionIds = new Set<string>();
+  let unfinishedFocusSessions = 0;
+  for (const record of records) {
+    if (record.type !== 'focus-session') continue;
+    const id = record.data.id;
+    const workspaceId = record.data.workspaceId;
+    const taskId = record.data.taskId;
+    if (
+      typeof id !== 'string' ||
+      typeof workspaceId !== 'string' ||
+      focusSessionIds.has(id) ||
+      !workspaceNames.has(workspaceId) ||
+      (taskId !== null &&
+        (typeof taskId !== 'string' || taskWorkspaces.get(taskId) !== workspaceId))
+    ) {
+      throw new DataPackageError(
+        'The data package focus session identity, workspace, or task is invalid.',
+      );
+    }
+    focusSessionIds.add(id);
+    if (record.data.status === 'paused') {
+      unfinishedFocusSessions += 1;
+      if (archivedWorkspaceIds.has(workspaceId)) {
+        throw new DataPackageError(
+          'An unfinished focus session cannot belong to an archived workspace.',
+        );
+      }
+    }
+  }
+  if (unfinishedFocusSessions > 1) {
+    throw new DataPackageError('The data package contains more than one unfinished focus session.');
+  }
   return currentWorkspaceName;
 }
 
@@ -434,6 +565,7 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
     browserBookmarks: number;
     automations: number;
     enabledAutomations: number;
+    focusSessions: number;
   } = {
     workspaces: 0,
     archivedWorkspaces: 0,
@@ -445,6 +577,7 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
     browserBookmarks: 0,
     automations: 0,
     enabledAutomations: 0,
+    focusSessions: 0,
   };
   for (const record of records) {
     switch (record.type) {
@@ -476,6 +609,9 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
         counts.automations += 1;
         if (record.data.enabled === true) counts.enabledAutomations += 1;
         break;
+      case 'focus-session':
+        counts.focusSessions += 1;
+        break;
       default:
         break;
     }
@@ -497,11 +633,14 @@ function parseCounts(
     'tasks',
     'workspaces',
   ] as const;
+  const automationKeys = [...legacyKeys, 'automations', 'enabledAutomations'] as const;
   assertExactObjectKeys(
     value,
     formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION
       ? legacyKeys
-      : [...legacyKeys, 'automations', 'enabledAutomations'],
+      : formatVersion === AUTOMATION_DATA_PACKAGE_FORMAT_VERSION
+        ? automationKeys
+        : [...automationKeys, 'focusSessions'],
   );
   const object = value as Record<string, unknown>;
   for (const count of Object.values(object)) {
@@ -524,12 +663,14 @@ function parseCounts(
       formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION
         ? 0
         : (object.enabledAutomations as number),
+    focusSessions:
+      formatVersion === DATA_PACKAGE_FORMAT_VERSION ? (object.focusSessions as number) : 0,
   };
 }
 
 function toLegacyCounts(
   counts: DataImportCounts,
-): Omit<DataImportCounts, 'automations' | 'enabledAutomations'> {
+): Omit<DataImportCounts, 'automations' | 'enabledAutomations' | 'focusSessions'> {
   return {
     workspaces: counts.workspaces,
     archivedWorkspaces: counts.archivedWorkspaces,
@@ -542,11 +683,20 @@ function toLegacyCounts(
   };
 }
 
+function toAutomationCounts(counts: DataImportCounts): Omit<DataImportCounts, 'focusSessions'> {
+  return {
+    ...toLegacyCounts(counts),
+    automations: counts.automations,
+    enabledAutomations: counts.enabledAutomations,
+  };
+}
+
 function formatVersionForSchema(schemaVersion: number): PortablePackageFormatVersion {
   if (schemaVersion === 7 || schemaVersion === 8) {
     return LEGACY_DATA_PACKAGE_FORMAT_VERSION;
   }
-  if (schemaVersion === 9) return DATA_PACKAGE_FORMAT_VERSION;
+  if (schemaVersion === 9) return AUTOMATION_DATA_PACKAGE_FORMAT_VERSION;
+  if (schemaVersion === 10) return DATA_PACKAGE_FORMAT_VERSION;
   throw new DataPackageError('The data package source schema version is not supported.');
 }
 
@@ -561,7 +711,11 @@ function assertFormatMatchesSchema(
 }
 
 function isSupportedFormatVersion(value: unknown): value is PortablePackageFormatVersion {
-  return value === LEGACY_DATA_PACKAGE_FORMAT_VERSION || value === DATA_PACKAGE_FORMAT_VERSION;
+  return (
+    value === LEGACY_DATA_PACKAGE_FORMAT_VERSION ||
+    value === AUTOMATION_DATA_PACKAGE_FORMAT_VERSION ||
+    value === DATA_PACKAGE_FORMAT_VERSION
+  );
 }
 
 function isRecordTypeSupported(
@@ -569,11 +723,13 @@ function isRecordTypeSupported(
   formatVersion: PortablePackageFormatVersion,
 ): value is PortableRecordType {
   if (typeof value !== 'string') return false;
-  return (
+  const supportedTypes =
     formatVersion === DATA_PACKAGE_FORMAT_VERSION
       ? PORTABLE_RECORD_TYPES
-      : LEGACY_PORTABLE_RECORD_TYPES
-  ).includes(value as never);
+      : formatVersion === AUTOMATION_DATA_PACKAGE_FORMAT_VERSION
+        ? AUTOMATION_PORTABLE_RECORD_TYPES
+        : LEGACY_PORTABLE_RECORD_TYPES;
+  return supportedTypes.includes(value as never);
 }
 
 function canonicalize(value: unknown, depth: number): JsonValue {

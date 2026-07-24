@@ -32,6 +32,10 @@ import {
   type DataManagementSnapshot,
   type DatabaseBackupInfo,
   type DatabaseStatus,
+  type FocusChangedEvent,
+  type FocusSnapshot,
+  type FocusStartInput,
+  type FocusTargetInput,
   type InboxArchiveResult,
   type InboxCategorizeInput,
   type InboxCreateInput,
@@ -246,6 +250,16 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.update, input),
     archive: (input: ScheduleTargetInput) =>
       invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.archive, input),
+  }),
+  focus: Object.freeze({
+    getSnapshot: (input: WorkspaceTargetInput) =>
+      invoke<FocusSnapshot>(IPC_CHANNELS.focus.getSnapshot, input),
+    start: (input: FocusStartInput) => invoke<FocusSnapshot>(IPC_CHANNELS.focus.start, input),
+    pause: (input: FocusTargetInput) => invoke<FocusSnapshot>(IPC_CHANNELS.focus.pause, input),
+    resume: (input: FocusTargetInput) => invoke<FocusSnapshot>(IPC_CHANNELS.focus.resume, input),
+    cancel: (input: FocusTargetInput) => invoke<FocusSnapshot>(IPC_CHANNELS.focus.cancel, input),
+    onChanged: (listener: (event: FocusChangedEvent) => void) =>
+      subscribe(IPC_CHANNELS.focus.changed, listener),
   }),
   automation: Object.freeze({
     getSnapshot: (input: WorkspaceTargetInput) =>
