@@ -32,6 +32,8 @@ const NOTE_ID = '66666666-6666-4666-8666-666666666666';
 const SCHEDULE_ID = '77777777-7777-4777-8777-777777777777';
 const TAB_ID = '88888888-8888-4888-8888-888888888888';
 const BOOKMARK_ID = '99999999-9999-4999-8999-999999999999';
+const AUTOMATION_ID = '12121212-3434-4567-8abc-121212121212';
+const AUTOMATION_OUTPUT_NOTE_ID = '74747474-7474-4474-8474-747474747474';
 const DATABASE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const EXPORT_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const ROUND_TRIP_EXPORT_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
@@ -68,6 +70,228 @@ afterEach(async () => {
 });
 
 describe('portable database codec', () => {
+  it('imports v2 automation definitions paused with fresh runtime state', async () => {
+    const directory = await createTemporaryDirectory();
+    const packageData = createAutomationPackage();
+    expect(packageData.manifest).toMatchObject({
+      formatVersion: 2,
+      sourceSchemaVersion: 9,
+      counts: { automations: 1, enabledAutomations: 1 },
+    });
+    const destinationPath = await stagePackage(
+      directory,
+      '70000000-0000-4000-8000-000000000001',
+      '70000000-0000-4000-8000-000000000002',
+      packageData,
+      createDriver(),
+    );
+    const database = createNodeSqliteAdapter(destinationPath);
+    database.open();
+    expect(
+      database.get<Record<string, unknown>>(
+        `SELECT name, cadence, local_time_minute, weekday, action_kind,
+                action_title, action_body, enabled, effective_at, revision,
+                created_at, updated_at, archived_at
+         FROM automations
+         WHERE id = ?`,
+        [AUTOMATION_ID],
+      ),
+    ).toEqual({
+      name: '每日回顾',
+      cadence: 'daily',
+      local_time_minute: 17 * 60 + 30,
+      weekday: null,
+      action_kind: 'create-note',
+      action_title: '工作回顾',
+      action_body: '## 完成\n\n## 下一步',
+      enabled: 0,
+      effective_at: null,
+      revision: 4,
+      created_at: T1,
+      updated_at: T4,
+      archived_at: null,
+    });
+    expect(
+      database.get<Record<string, unknown>>(
+        `SELECT last_attempt_at, last_attempt_occurrence, last_success_at,
+                last_success_occurrence, last_output_kind, last_error_code,
+                consecutive_failures, next_retry_at
+         FROM automation_run_state
+         WHERE automation_id = ?`,
+        [AUTOMATION_ID],
+      ),
+    ).toEqual({
+      last_attempt_at: null,
+      last_attempt_occurrence: null,
+      last_success_at: null,
+      last_success_occurrence: null,
+      last_output_kind: null,
+      last_error_code: null,
+      consecutive_failures: 0,
+      next_retry_at: null,
+    });
+    expect(
+      database.get<{ count: number }>('SELECT COUNT(*) AS count FROM automation_occurrences'),
+    ).toEqual({ count: 0 });
+    const exported = readPortableDatabaseRecords(database);
+    expect(exported.find(({ type }) => type === 'automation-definition')).toMatchObject({
+      data: { id: AUTOMATION_ID, enabled: false },
+    });
+    database.run(
+      `UPDATE automations
+       SET enabled = 1, effective_at = ?, revision = revision + 1, updated_at = ?
+       WHERE id = ?`,
+      [T5, T5, AUTOMATION_ID],
+    );
+    database.run(
+      `UPDATE automation_run_state
+       SET last_attempt_at = ?,
+           last_attempt_occurrence = '2026-07-23',
+           last_error_code = 'action-failed',
+           consecutive_failures = 1,
+           next_retry_at = ?,
+           updated_at = ?
+       WHERE automation_id = ?`,
+      [T5, T6, T6, AUTOMATION_ID],
+    );
+    const activeRecord = readPortableDatabaseRecords(database).find(
+      ({ type }) => type === 'automation-definition',
+    );
+    expect(activeRecord?.data.enabled).toBe(true);
+    expect(Object.keys(activeRecord?.data ?? {}).sort()).toEqual([
+      'action',
+      'archivedAt',
+      'createdAt',
+      'enabled',
+      'id',
+      'name',
+      'revision',
+      'schedule',
+      'updatedAt',
+      'workspaceId',
+    ]);
+    database.close();
+  });
+
+  it('round-trips archived-workspace history without charging it to the active limit', async () => {
+    const directory = await createTemporaryDirectory();
+    const archivedDefinitions = Array.from({ length: 100 }, (_, index) =>
+      automationDefinitionRecord(index, ARCHIVED_WORKSPACE_ID),
+    );
+    const activeDefinitions = Array.from({ length: 100 }, (_, index) =>
+      automationDefinitionRecord(index + archivedDefinitions.length, ACTIVE_WORKSPACE_ID),
+    );
+    const packageData = parsePortablePackage(
+      serializePortablePackage({
+        exportId: '72727272-7272-4272-8272-727272727272',
+        exportedAt: BUILD_TIME,
+        sourceAppVersion: '0.1.0',
+        sourceSchemaVersion: 9,
+        records: [...createRecords(), ...archivedDefinitions, ...activeDefinitions],
+      }),
+    );
+
+    const destinationPath = await stagePackage(
+      directory,
+      '73000000-0000-4000-8000-000000000001',
+      '73000000-0000-4000-8000-000000000002',
+      packageData,
+      createDriver(),
+    );
+    const database = createNodeSqliteAdapter(destinationPath);
+    database.open();
+    expect(
+      database.get<{ total: number; active: number }>(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(
+             CASE
+               WHEN automation.archived_at IS NULL AND workspace.archived_at IS NULL THEN 1
+               ELSE 0
+             END
+           ) AS active
+         FROM automations AS automation
+         JOIN workspaces AS workspace ON workspace.id = automation.workspace_id`,
+      ),
+    ).toEqual({ total: 200, active: 100 });
+    const exportedRecords = readPortableDatabaseRecords(database);
+    expect(exportedRecords.filter(({ type }) => type === 'automation-definition')).toHaveLength(
+      200,
+    );
+    database.close();
+
+    const roundTripPackage = parsePortablePackage(
+      serializePortablePackage({
+        exportId: '72727272-7272-4272-8272-727272727273',
+        exportedAt: BUILD_TIME,
+        sourceAppVersion: '0.1.0',
+        sourceSchemaVersion: 9,
+        records: exportedRecords,
+      }),
+    );
+    const roundTripPath = await stagePackage(
+      directory,
+      '73000000-0000-4000-8000-000000000003',
+      '73000000-0000-4000-8000-000000000004',
+      roundTripPackage,
+      createDriver(),
+    );
+    const roundTripDatabase = createNodeSqliteAdapter(roundTripPath);
+    roundTripDatabase.open();
+    expect(readPortableDatabaseRecords(roundTripDatabase)).toEqual(exportedRecords);
+    roundTripDatabase.close();
+  });
+
+  it('rejects staged automation run state or occurrence data not supplied by the package', async () => {
+    const directory = await createTemporaryDirectory();
+    const packageData = createAutomationPackage();
+
+    const runStatePath = join(directory, 'runtime-state.sqlite3');
+    const runStateDriver = createDriver();
+    await runStateDriver.build(packageData, runStatePath);
+    const runStateDatabase = createNodeSqliteAdapter(runStatePath);
+    runStateDatabase.open();
+    runStateDatabase.run(
+      `UPDATE automation_run_state
+       SET last_attempt_at = ?,
+           last_attempt_occurrence = '2026-07-23',
+           last_error_code = 'action-failed',
+           consecutive_failures = 1,
+           next_retry_at = ?,
+           updated_at = ?
+       WHERE automation_id = ?`,
+      [T5, T6, T6, AUTOMATION_ID],
+    );
+    runStateDatabase.close();
+    await expect(runStateDriver.validate(runStatePath, packageData)).rejects.toThrow(
+      /freshly paused/u,
+    );
+
+    const occurrencePath = join(directory, 'runtime-occurrence.sqlite3');
+    const occurrenceDriver = createDriver();
+    await occurrenceDriver.build(packageData, occurrencePath);
+    const occurrenceDatabase = createNodeSqliteAdapter(occurrencePath);
+    occurrenceDatabase.open();
+    occurrenceDatabase.run(
+      `INSERT INTO notes (
+         id, workspace_id, title, body, revision, source_inbox_entry_id,
+         created_at, updated_at, archived_at
+       ) VALUES (?, ?, 'Automation output', '', 1, NULL, ?, ?, NULL)`,
+      [AUTOMATION_OUTPUT_NOTE_ID, ACTIVE_WORKSPACE_ID, T3, T3],
+    );
+    occurrenceDatabase.run(
+      `INSERT INTO automation_occurrences (
+         automation_id, occurrence_date, scheduled_for, definition_revision,
+         completed_at, output_kind, task_id, note_id
+       ) VALUES (?, '2026-07-23', ?, 4, ?, 'note', NULL, ?)`,
+      [AUTOMATION_ID, T5, T6, AUTOMATION_OUTPUT_NOTE_ID],
+    );
+    occurrenceDatabase.close();
+    await expect(occurrenceDriver.validate(occurrencePath, packageData)).rejects.toThrow(
+      /freshly paused|latest occurrence/u,
+    );
+  });
+
   it('round-trips every logical record without exporting local database state', async () => {
     const directory = await createTemporaryDirectory();
     const driver = createDriver();
@@ -283,17 +507,21 @@ describe('portable database codec', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
-  it('accepts v7 and v8 logical packages but rejects unsupported source schemas', async () => {
+  it('accepts v1 schema 7/8 and v2 schema 9 packages but rejects unsupported sources', async () => {
     const directory = await createTemporaryDirectory();
-    await expect(
-      stagePackage(
-        directory,
-        '50000000-0000-4000-8000-000000000001',
-        '50000000-0000-4000-8000-000000000002',
-        createPackage(7),
-        createDriver(),
-      ),
-    ).resolves.toContain('import-50000000-0000-4000-8000-000000000001.sqlite3');
+    const legacyPath = await stagePackage(
+      directory,
+      '50000000-0000-4000-8000-000000000001',
+      '50000000-0000-4000-8000-000000000002',
+      createPackage(7),
+      createDriver(),
+    );
+    const legacy = createNodeSqliteAdapter(legacyPath, { readOnly: true });
+    legacy.open();
+    expect(legacy.get<{ count: number }>('SELECT COUNT(*) AS count FROM automations')).toEqual({
+      count: 0,
+    });
+    legacy.close();
     await expect(
       stagePackage(
         directory,
@@ -308,19 +536,40 @@ describe('portable database codec', () => {
         directory,
         '50000000-0000-4000-8000-000000000005',
         '50000000-0000-4000-8000-000000000006',
-        createPackage(6),
+        createPackage(9),
         createDriver(),
       ),
-    ).rejects.toBeInstanceOf(DataPackageError);
+    ).resolves.toContain('import-50000000-0000-4000-8000-000000000005.sqlite3');
+    const unsupported = createPackage(8);
     await expect(
       stagePackage(
         directory,
         '50000000-0000-4000-8000-000000000007',
         '50000000-0000-4000-8000-000000000008',
-        createPackage(9),
+        {
+          ...unsupported,
+          manifest: { ...unsupported.manifest, sourceSchemaVersion: 6 },
+        },
         createDriver(),
       ),
     ).rejects.toBeInstanceOf(DataPackageError);
+    const forgedLegacyAutomation = createAutomationPackage();
+    await expect(
+      stagePackage(
+        directory,
+        '50000000-0000-4000-8000-000000000009',
+        '50000000-0000-4000-8000-00000000000a',
+        {
+          ...forgedLegacyAutomation,
+          manifest: {
+            ...forgedLegacyAutomation.manifest,
+            formatVersion: 1,
+            sourceSchemaVersion: 8,
+          },
+        },
+        createDriver(),
+      ),
+    ).rejects.toThrow(/legacy data package/u);
   });
 
   it('binds validation to the previewed logical records and verifies FTS content', async () => {
@@ -481,6 +730,69 @@ function createPackage(sourceSchemaVersion = 7): ParsedPortablePackage {
       records: [...createRecords()].reverse(),
     }),
   );
+}
+
+function createAutomationPackage(): ParsedPortablePackage {
+  return parsePortablePackage(
+    serializePortablePackage({
+      exportId: '71717171-7171-4171-8171-717171717171',
+      exportedAt: BUILD_TIME,
+      sourceAppVersion: '0.1.0',
+      sourceSchemaVersion: 9,
+      records: [
+        ...createRecords(),
+        {
+          type: 'automation-definition',
+          data: {
+            id: AUTOMATION_ID,
+            workspaceId: ACTIVE_WORKSPACE_ID,
+            name: '每日回顾',
+            enabled: true,
+            schedule: {
+              cadence: 'daily',
+              localTimeMinute: 17 * 60 + 30,
+              weekday: null,
+            },
+            action: {
+              kind: 'create-note',
+              title: '工作回顾',
+              body: '## 完成\n\n## 下一步',
+            },
+            revision: 4,
+            createdAt: T1,
+            updatedAt: T4,
+            archivedAt: null,
+          },
+        },
+      ],
+    }),
+  );
+}
+
+function automationDefinitionRecord(index: number, workspaceId: string): PortableDataRecord {
+  const idPrefix = (index + 1).toString(16).padStart(8, '0');
+  return {
+    type: 'automation-definition',
+    data: {
+      id: `${idPrefix}-0000-4000-8000-000000000000`,
+      workspaceId,
+      name: `历史自动化 ${index + 1}`,
+      enabled: false,
+      schedule: {
+        cadence: 'daily',
+        localTimeMinute: 8 * 60 + 30,
+        weekday: null,
+      },
+      action: {
+        kind: 'create-today-task',
+        title: `历史任务 ${index + 1}`,
+      },
+      revision: 1,
+      createdAt: T1,
+      updatedAt: T1,
+      archivedAt: null,
+    },
+  };
 }
 
 function createPackageWithNoteTitle(title: string): ParsedPortablePackage {

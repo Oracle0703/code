@@ -6,6 +6,7 @@ import notesScheduleSql from '../../../migrations/0005_notes_schedule.sql?raw';
 import browserTabsBookmarksSql from '../../../migrations/0006_browser_tabs_bookmarks.sql?raw';
 import searchDataProtectionSql from '../../../migrations/0007_search_data_protection.sql?raw';
 import terminalWorkspacePreferencesSql from '../../../migrations/0008_terminal_workspace_preferences.sql?raw';
+import scheduledAutomationsSql from '../../../migrations/0009_scheduled_automations.sql?raw';
 import type { Migration } from './types';
 
 export const DEFAULT_MIGRATIONS: readonly Migration[] = Object.freeze([
@@ -48,5 +49,10 @@ export const DEFAULT_MIGRATIONS: readonly Migration[] = Object.freeze([
     version: 8,
     name: 'terminal_workspace_preferences',
     sql: terminalWorkspacePreferencesSql,
+  }),
+  Object.freeze({
+    version: 9,
+    name: 'scheduled_automations',
+    sql: scheduledAutomationsSql,
   }),
 ]);

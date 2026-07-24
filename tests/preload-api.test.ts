@@ -304,6 +304,79 @@ describe('preload schedule API', () => {
   });
 });
 
+describe('preload automation API', () => {
+  it('exposes only the declared frozen automation methods', () => {
+    expect(Object.keys(api.automation).sort()).toEqual([
+      'archive',
+      'create',
+      'getSnapshot',
+      'onChanged',
+      'setEnabled',
+      'update',
+    ]);
+    expect(Object.isFrozen(api.automation)).toBe(true);
+  });
+
+  it('forwards exact automation inputs through allowlisted channels', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const automationId = 'b23e4567-e89b-42d3-a456-426614174000';
+    const schedule = { cadence: 'daily' as const, localTimeMinute: 510, weekday: null };
+    const action = { kind: 'create-today-task' as const, title: '检查今日计划' };
+
+    await api.automation.getSnapshot({ workspaceId });
+    await api.automation.create({ workspaceId, name: '每日准备', schedule, action });
+    await api.automation.update({
+      workspaceId,
+      automationId,
+      expectedRevision: 1,
+      name: '每日检查',
+      schedule,
+      action,
+    });
+    await api.automation.setEnabled({
+      workspaceId,
+      automationId,
+      expectedRevision: 2,
+      enabled: true,
+    });
+    await api.automation.archive({
+      workspaceId,
+      automationId,
+      expectedRevision: 3,
+    });
+
+    expect(electron.invoke.mock.calls).toEqual([
+      ['automation:get-snapshot', { workspaceId }],
+      ['automation:create', { workspaceId, name: '每日准备', schedule, action }],
+      [
+        'automation:update',
+        {
+          workspaceId,
+          automationId,
+          expectedRevision: 1,
+          name: '每日检查',
+          schedule,
+          action,
+        },
+      ],
+      ['automation:set-enabled', { workspaceId, automationId, expectedRevision: 2, enabled: true }],
+      ['automation:archive', { workspaceId, automationId, expectedRevision: 3 }],
+    ]);
+  });
+
+  it('subscribes and removes narrow automation change listeners', () => {
+    const listener = vi.fn();
+    const unsubscribe = api.automation.onChanged(listener);
+    expect(electron.on).toHaveBeenCalledExactlyOnceWith('automation:changed', expect.any(Function));
+    const wrapped = electron.on.mock.calls[0]?.[1] as (event: unknown, payload: unknown) => void;
+    const payload = { workspaceId: 'workspace', reason: 'run', outputKind: 'task' };
+    wrapped({}, payload);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(payload);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledExactlyOnceWith('automation:changed', wrapped);
+  });
+});
+
 describe('preload window API', () => {
   it('exposes only the declared frozen window methods', () => {
     expect(Object.keys(api.window).sort()).toEqual([

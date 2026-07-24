@@ -1,9 +1,10 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, dialog, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, powerMonitor, type WebContents } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { IPC_CHANNELS, type WindowCloseReason } from '../shared/contracts';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
+import { AutomationController } from './automations';
 import { BrowserController } from './browser/browser-controller';
 import {
   AtomicImportStager,
@@ -36,6 +37,7 @@ import { createWorkspaceIpcAdapter } from './workspace-ipc-adapter';
 let mainWindow: BrowserWindow | null = null;
 let databaseService: DatabaseService | null = null;
 let dataManagementController: DataManagementController | null = null;
+let automationController: AutomationController | null = null;
 let databaseShutdownPromise: Promise<void> | null = null;
 let replacementPreparationPromise: Promise<void> | null = null;
 let replacementRestartPromise: Promise<void> | null = null;
@@ -66,6 +68,7 @@ function denyWebviewAttachment(contents: WebContents): void {
 async function createMainWindow(
   database: DatabaseService,
   data: DataManagementController,
+  automation: AutomationController,
 ): Promise<void> {
   const initialWorkspaceSnapshot = await database.getWorkspaceSnapshot();
   let rendererWorkspaceId = initialWorkspaceSnapshot.currentWorkspaceId;
@@ -188,6 +191,7 @@ async function createMainWindow(
     task: database,
     note: database,
     schedule: database,
+    automation,
     terminal,
     trustedRendererLocation,
   });
@@ -347,12 +351,14 @@ async function requestDataReplacementApproval(): Promise<boolean> {
 function prepareForDataReplacement(): Promise<void> {
   if (replacementPreparationPromise) return replacementPreparationPromise;
   const activeData = dataManagementController;
+  const activeAutomation = automationController;
   prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
     console.error('Daily Workbench failed to hide a window before data replacement.', error);
   });
 
   const preparations = [
     ...replacementRuntimePreparations,
+    ...(activeAutomation ? [() => activeAutomation.stop()] : []),
     ...(activeData ? [() => activeData.stop()] : []),
   ];
   replacementPreparationPromise = (async () => {
@@ -376,6 +382,7 @@ function restartForDataReplacement(): Promise<void> {
   if (replacementRestartPromise) return replacementRestartPromise;
   const activeDatabase = databaseService;
   const activeData = dataManagementController;
+  const activeAutomation = automationController;
   prepareApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
     console.error('Daily Workbench failed to hide a window before data replacement.', error);
   });
@@ -383,7 +390,11 @@ function restartForDataReplacement(): Promise<void> {
   replacementRestartPromise = (async () => {
     if (activeDatabase) {
       databaseShutdownPromise = settleShutdownsBefore(
-        [...runtimeShutdowns, ...(activeData ? [() => activeData.stop()] : [])],
+        [
+          ...runtimeShutdowns,
+          ...(activeAutomation ? [() => activeAutomation.stop()] : []),
+          ...(activeData ? [() => activeData.stop()] : []),
+        ],
         () => activeDatabase.close(),
         (error) => {
           console.error('Daily Workbench failed to stop a runtime before data replacement.', error);
@@ -399,6 +410,7 @@ function restartForDataReplacement(): Promise<void> {
 
     databaseService = null;
     dataManagementController = null;
+    automationController = null;
     allowQuit = true;
     finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
       console.error('Daily Workbench failed to destroy a window before restarting.', error);
@@ -586,6 +598,7 @@ if (!hasSingleInstanceLock) {
     if (!databaseShutdownPromise && !quitApprovalPromise) {
       const activeDatabase = databaseService;
       const activeData = dataManagementController;
+      const activeAutomation = automationController;
       quitApprovalPromise = runAfterCloseApproval(
         [...closeApprovalRequests].map((requestApproval) => () => requestApproval('application')),
         async () => {
@@ -593,7 +606,11 @@ if (!hasSingleInstanceLock) {
             console.error('Daily Workbench failed to disable a window before quitting.', error);
           });
           databaseShutdownPromise = settleShutdownsBefore(
-            [...runtimeShutdowns, ...(activeData ? [() => activeData.stop()] : [])],
+            [
+              ...runtimeShutdowns,
+              ...(activeAutomation ? [() => activeAutomation.stop()] : []),
+              ...(activeData ? [() => activeData.stop()] : []),
+            ],
             () => activeDatabase.close(),
             (error) => {
               console.error(
@@ -608,6 +625,7 @@ if (!hasSingleInstanceLock) {
             .finally(() => {
               databaseService = null;
               dataManagementController = null;
+              automationController = null;
               allowQuit = true;
               finishApprovedCloseSurfaces(approvedCloseSurfaces, (error) => {
                 console.error('Daily Workbench failed to destroy an approved window.', error);
@@ -653,19 +671,46 @@ if (!hasSingleInstanceLock) {
 
       const data = await createDataManagementController(database, dataDirectory);
       dataManagementController = data;
-      await createMainWindow(database, data);
+      const automation = new AutomationController({
+        database,
+        onChanged: (event) => {
+          sendToRenderer(IPC_CHANNELS.automation.changed, event);
+        },
+        onError: (error) => {
+          console.error('Daily Workbench scheduled automation failed.', error);
+        },
+      });
+      automationController = automation;
+      await automation.start();
+      await createMainWindow(database, data, automation);
       await data.start();
+
+      powerMonitor.on('resume', () => {
+        const activeAutomation = automationController;
+        if (activeAutomation && !databaseShutdownPromise) {
+          void activeAutomation.evaluate().catch((error: unknown) => {
+            console.error(
+              'Daily Workbench failed to evaluate automations after system resume.',
+              error,
+            );
+          });
+        }
+      });
 
       app.on('activate', () => {
         const activeDatabase = databaseService;
+        const activeAutomation = automationController;
         if (
           activeDatabase &&
+          activeAutomation &&
           !databaseShutdownPromise &&
           BrowserWindow.getAllWindows().length === 0
         ) {
           const activeData = dataManagementController;
           if (activeData) {
-            void createMainWindow(activeDatabase, activeData).catch(quitAfterStartupFailure);
+            void createMainWindow(activeDatabase, activeData, activeAutomation).catch(
+              quitAfterStartupFailure,
+            );
           }
         }
       });

@@ -98,7 +98,7 @@ describe('terminal preference persistence', () => {
     });
 
     const backup = await service.createBackup();
-    expect(backup).toMatchObject({ schemaVersion: 8 });
+    expect(backup).toMatchObject({ schemaVersion: 9 });
     await service.close();
 
     const snapshot = new DatabaseSync(join(dataDirectory, 'backups', backup.fileName), {

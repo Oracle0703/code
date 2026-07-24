@@ -1,14 +1,23 @@
 import { createHash } from 'node:crypto';
 import type { DataImportCounts } from '../../shared/contracts';
+import {
+  normalizeAutomationAction,
+  normalizeAutomationId,
+  normalizeAutomationName,
+  normalizeAutomationRevision,
+  normalizeAutomationSchedule,
+} from '../../shared/automation-domain';
+import { normalizeWorkspaceId } from '../../shared/workspace-domain';
 
 export const DATA_PACKAGE_FORMAT = 'daily-workbench-portable';
-export const DATA_PACKAGE_FORMAT_VERSION = 1;
+export const LEGACY_DATA_PACKAGE_FORMAT_VERSION = 1;
+export const DATA_PACKAGE_FORMAT_VERSION = 2;
 export const DEFAULT_MAX_PACKAGE_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_MAX_MANIFEST_BYTES = 64 * 1024;
 export const DEFAULT_MAX_RECORD_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_RECORDS = 100_000;
 
-export const PORTABLE_RECORD_TYPES = [
+const LEGACY_PORTABLE_RECORD_TYPES = [
   'app-state',
   'workspace',
   'workspace-preference',
@@ -21,7 +30,14 @@ export const PORTABLE_RECORD_TYPES = [
   'browser-bookmark',
 ] as const;
 
+export const PORTABLE_RECORD_TYPES = [
+  ...LEGACY_PORTABLE_RECORD_TYPES,
+  'automation-definition',
+] as const;
+
 export type PortableRecordType = (typeof PORTABLE_RECORD_TYPES)[number];
+export type PortablePackageFormatVersion =
+  typeof LEGACY_DATA_PACKAGE_FORMAT_VERSION | typeof DATA_PACKAGE_FORMAT_VERSION;
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue =
   JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
@@ -33,7 +49,7 @@ export interface PortableDataRecord {
 
 export interface PortablePackageManifest {
   readonly format: typeof DATA_PACKAGE_FORMAT;
-  readonly formatVersion: typeof DATA_PACKAGE_FORMAT_VERSION;
+  readonly formatVersion: PortablePackageFormatVersion;
   readonly exportId: string;
   readonly exportedAt: string;
   readonly sourceAppVersion: string;
@@ -79,6 +95,7 @@ export function serializePortablePackage(
   validateIsoTimestamp(source.exportedAt, 'export time');
   validateSourceVersion(source.sourceAppVersion);
   validateSchemaVersion(source.sourceSchemaVersion);
+  const formatVersion = formatVersionForSchema(source.sourceSchemaVersion);
   const resolvedLimits = resolveLimits(limits);
   if (source.records.length > resolvedLimits.maxRecords) {
     throw new DataPackageError('The data package contains too many records.');
@@ -86,7 +103,7 @@ export function serializePortablePackage(
 
   let bodyByteLength = 0;
   const lines = source.records.map((record) => {
-    validateRecord(record);
+    validateRecord(record, formatVersion);
     const line = canonicalJson(record);
     const lineByteLength = Buffer.byteLength(line, 'utf8');
     if (lineByteLength > resolvedLimits.maxRecordBytes) {
@@ -102,15 +119,15 @@ export function serializePortablePackage(
   const bodySha256 = sha256(Buffer.from(body, 'utf8'));
   const counts = countRecords(source.records);
   validateRecordGraph(source.records);
-  const manifest: PortablePackageManifest = {
+  const manifest = {
     format: DATA_PACKAGE_FORMAT,
-    formatVersion: DATA_PACKAGE_FORMAT_VERSION,
+    formatVersion,
     exportId: source.exportId.toLowerCase(),
     exportedAt: source.exportedAt,
     sourceAppVersion: source.sourceAppVersion,
     sourceSchemaVersion: source.sourceSchemaVersion,
     recordCount: source.records.length,
-    counts,
+    counts: formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION ? toLegacyCounts(counts) : counts,
     bodySha256,
   };
   const output = Buffer.from(`${canonicalJson(manifest)}\n${body}`, 'utf8');
@@ -172,7 +189,7 @@ export function parsePortablePackage(
       throw new DataPackageError('A data package record has invalid framing or size.');
     }
     const value = parseCanonicalLine(line, 'record');
-    records.push(parseRecord(value));
+    records.push(parseRecord(value, manifest.formatVersion));
     lineStart = lineEnd + 1;
   }
   if (records.length !== manifest.recordCount) {
@@ -221,24 +238,22 @@ function parseManifest(value: unknown): PortablePackageManifest {
     'sourceSchemaVersion',
   ]);
   const object = value as Record<string, unknown>;
-  if (
-    object.format !== DATA_PACKAGE_FORMAT ||
-    object.formatVersion !== DATA_PACKAGE_FORMAT_VERSION
-  ) {
+  if (object.format !== DATA_PACKAGE_FORMAT || !isSupportedFormatVersion(object.formatVersion)) {
     throw new DataPackageError('The data package format is not supported.');
   }
   validateUuid(object.exportId, 'export id');
   validateIsoTimestamp(object.exportedAt, 'export time');
   validateSourceVersion(object.sourceAppVersion);
   validateSchemaVersion(object.sourceSchemaVersion);
+  assertFormatMatchesSchema(object.formatVersion, object.sourceSchemaVersion);
   if (!Number.isSafeInteger(object.recordCount) || (object.recordCount as number) < 1) {
     throw new DataPackageError('The data package record count is invalid.');
   }
   validateDigest(object.bodySha256, 'body digest');
-  const counts = parseCounts(object.counts);
+  const counts = parseCounts(object.counts, object.formatVersion);
   return {
     format: DATA_PACKAGE_FORMAT,
-    formatVersion: DATA_PACKAGE_FORMAT_VERSION,
+    formatVersion: object.formatVersion,
     exportId: (object.exportId as string).toLowerCase(),
     exportedAt: object.exportedAt as string,
     sourceAppVersion: object.sourceAppVersion as string,
@@ -249,13 +264,13 @@ function parseManifest(value: unknown): PortablePackageManifest {
   };
 }
 
-function parseRecord(value: unknown): PortableDataRecord {
+function parseRecord(
+  value: unknown,
+  formatVersion: PortablePackageFormatVersion,
+): PortableDataRecord {
   assertExactObjectKeys(value, ['data', 'type']);
   const object = value as Record<string, unknown>;
-  if (
-    typeof object.type !== 'string' ||
-    !PORTABLE_RECORD_TYPES.includes(object.type as PortableRecordType)
-  ) {
+  if (typeof object.type !== 'string' || !isRecordTypeSupported(object.type, formatVersion)) {
     throw new DataPackageError('The data package record type is invalid.');
   }
   if (!isPlainObject(object.data)) {
@@ -265,12 +280,15 @@ function parseRecord(value: unknown): PortableDataRecord {
     type: object.type as PortableRecordType,
     data: object.data as { readonly [key: string]: JsonValue },
   };
-  validateRecord(record);
+  validateRecord(record, formatVersion);
   return record;
 }
 
-function validateRecord(record: PortableDataRecord): void {
-  if (!PORTABLE_RECORD_TYPES.includes(record.type) || !isPlainObject(record.data)) {
+function validateRecord(
+  record: PortableDataRecord,
+  formatVersion: PortablePackageFormatVersion,
+): void {
+  if (!isRecordTypeSupported(record.type, formatVersion) || !isPlainObject(record.data)) {
     throw new DataPackageError('The data package record is invalid.');
   }
   canonicalize(record.data, 0);
@@ -287,6 +305,78 @@ function validateRecord(record: PortableDataRecord): void {
     }
     if (archivedAt !== null) {
       validateIsoTimestamp(archivedAt, 'workspace archive time');
+    }
+  } else if (record.type === 'automation-definition') {
+    validateAutomationRecord(record);
+  }
+}
+
+function validateAutomationRecord(record: PortableDataRecord): void {
+  assertExactObjectKeys(record.data, [
+    'action',
+    'archivedAt',
+    'createdAt',
+    'enabled',
+    'id',
+    'name',
+    'revision',
+    'schedule',
+    'updatedAt',
+    'workspaceId',
+  ]);
+  const data = record.data;
+  if (typeof data.enabled !== 'boolean') {
+    throw new DataPackageError('The automation enabled state is invalid.');
+  }
+  if (!isPlainObject(data.schedule)) {
+    throw new DataPackageError('The automation schedule is invalid.');
+  }
+  assertExactObjectKeys(data.schedule, ['cadence', 'localTimeMinute', 'weekday']);
+  if (!isPlainObject(data.action) || typeof data.action.kind !== 'string') {
+    throw new DataPackageError('The automation action is invalid.');
+  }
+  assertExactObjectKeys(
+    data.action,
+    data.action.kind === 'create-today-task' ? ['kind', 'title'] : ['body', 'kind', 'title'],
+  );
+
+  try {
+    const id = normalizeAutomationId(data.id);
+    const workspaceId = normalizeWorkspaceId(data.workspaceId);
+    const name = normalizeAutomationName(data.name);
+    const schedule = normalizeAutomationSchedule(data.schedule);
+    const action = normalizeAutomationAction(data.action);
+    const revision = normalizeAutomationRevision(data.revision);
+    if (
+      id !== data.id ||
+      workspaceId !== data.workspaceId ||
+      name !== data.name ||
+      canonicalJson(schedule) !== canonicalJson(data.schedule) ||
+      canonicalJson(action) !== canonicalJson(data.action) ||
+      revision !== data.revision
+    ) {
+      throw new TypeError('Automation values must already be normalized.');
+    }
+  } catch (error) {
+    throw new DataPackageError('The automation definition is invalid.', { cause: error });
+  }
+
+  validateIsoTimestamp(data.createdAt, 'automation creation time');
+  validateIsoTimestamp(data.updatedAt, 'automation update time');
+  if ((data.updatedAt as string) < (data.createdAt as string)) {
+    throw new DataPackageError('The automation update time precedes its creation time.');
+  }
+  if (!Object.hasOwn(data, 'archivedAt')) {
+    throw new DataPackageError('The automation archive state is missing.');
+  }
+  if (data.archivedAt !== null) {
+    validateIsoTimestamp(data.archivedAt, 'automation archive time');
+    if (
+      data.enabled ||
+      (data.archivedAt as string) < (data.createdAt as string) ||
+      (data.updatedAt as string) < (data.archivedAt as string)
+    ) {
+      throw new DataPackageError('The archived automation state is invalid.');
     }
   }
 }
@@ -314,6 +404,21 @@ function validateRecordGraph(records: readonly PortableDataRecord[]): string {
   if (!currentWorkspaceName) {
     throw new DataPackageError('The data package current workspace is missing.');
   }
+  const automationIds = new Set<string>();
+  for (const record of records) {
+    if (record.type !== 'automation-definition') continue;
+    const id = record.data.id;
+    const workspaceId = record.data.workspaceId;
+    if (
+      typeof id !== 'string' ||
+      typeof workspaceId !== 'string' ||
+      automationIds.has(id) ||
+      !workspaceNames.has(workspaceId)
+    ) {
+      throw new DataPackageError('The data package automation identity or workspace is invalid.');
+    }
+    automationIds.add(id);
+  }
   return currentWorkspaceName;
 }
 
@@ -327,6 +432,8 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
     scheduleItems: number;
     browserTabs: number;
     browserBookmarks: number;
+    automations: number;
+    enabledAutomations: number;
   } = {
     workspaces: 0,
     archivedWorkspaces: 0,
@@ -336,6 +443,8 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
     scheduleItems: 0,
     browserTabs: 0,
     browserBookmarks: 0,
+    automations: 0,
+    enabledAutomations: 0,
   };
   for (const record of records) {
     switch (record.type) {
@@ -363,6 +472,10 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
       case 'browser-bookmark':
         counts.browserBookmarks += 1;
         break;
+      case 'automation-definition':
+        counts.automations += 1;
+        if (record.data.enabled === true) counts.enabledAutomations += 1;
+        break;
       default:
         break;
     }
@@ -370,8 +483,11 @@ function countRecords(records: readonly PortableDataRecord[]): DataImportCounts 
   return counts;
 }
 
-function parseCounts(value: unknown): DataImportCounts {
-  assertExactObjectKeys(value, [
+function parseCounts(
+  value: unknown,
+  formatVersion: PortablePackageFormatVersion,
+): DataImportCounts {
+  const legacyKeys = [
     'archivedWorkspaces',
     'browserBookmarks',
     'browserTabs',
@@ -380,14 +496,84 @@ function parseCounts(value: unknown): DataImportCounts {
     'scheduleItems',
     'tasks',
     'workspaces',
-  ]);
-  const object = value as Record<keyof DataImportCounts, unknown>;
+  ] as const;
+  assertExactObjectKeys(
+    value,
+    formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION
+      ? legacyKeys
+      : [...legacyKeys, 'automations', 'enabledAutomations'],
+  );
+  const object = value as Record<string, unknown>;
   for (const count of Object.values(object)) {
     if (!Number.isSafeInteger(count) || (count as number) < 0) {
       throw new DataPackageError('The data package contains an invalid count.');
     }
   }
-  return object as unknown as DataImportCounts;
+  return {
+    workspaces: object.workspaces as number,
+    archivedWorkspaces: object.archivedWorkspaces as number,
+    inboxEntries: object.inboxEntries as number,
+    tasks: object.tasks as number,
+    notes: object.notes as number,
+    scheduleItems: object.scheduleItems as number,
+    browserTabs: object.browserTabs as number,
+    browserBookmarks: object.browserBookmarks as number,
+    automations:
+      formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION ? 0 : (object.automations as number),
+    enabledAutomations:
+      formatVersion === LEGACY_DATA_PACKAGE_FORMAT_VERSION
+        ? 0
+        : (object.enabledAutomations as number),
+  };
+}
+
+function toLegacyCounts(
+  counts: DataImportCounts,
+): Omit<DataImportCounts, 'automations' | 'enabledAutomations'> {
+  return {
+    workspaces: counts.workspaces,
+    archivedWorkspaces: counts.archivedWorkspaces,
+    inboxEntries: counts.inboxEntries,
+    tasks: counts.tasks,
+    notes: counts.notes,
+    scheduleItems: counts.scheduleItems,
+    browserTabs: counts.browserTabs,
+    browserBookmarks: counts.browserBookmarks,
+  };
+}
+
+function formatVersionForSchema(schemaVersion: number): PortablePackageFormatVersion {
+  if (schemaVersion === 7 || schemaVersion === 8) {
+    return LEGACY_DATA_PACKAGE_FORMAT_VERSION;
+  }
+  if (schemaVersion === 9) return DATA_PACKAGE_FORMAT_VERSION;
+  throw new DataPackageError('The data package source schema version is not supported.');
+}
+
+function assertFormatMatchesSchema(
+  formatVersion: PortablePackageFormatVersion,
+  schemaVersion: number,
+): void {
+  const expected = formatVersionForSchema(schemaVersion);
+  if (expected !== formatVersion) {
+    throw new DataPackageError('The data package format does not match its source schema.');
+  }
+}
+
+function isSupportedFormatVersion(value: unknown): value is PortablePackageFormatVersion {
+  return value === LEGACY_DATA_PACKAGE_FORMAT_VERSION || value === DATA_PACKAGE_FORMAT_VERSION;
+}
+
+function isRecordTypeSupported(
+  value: unknown,
+  formatVersion: PortablePackageFormatVersion,
+): value is PortableRecordType {
+  if (typeof value !== 'string') return false;
+  return (
+    formatVersion === DATA_PACKAGE_FORMAT_VERSION
+      ? PORTABLE_RECORD_TYPES
+      : LEGACY_PORTABLE_RECORD_TYPES
+  ).includes(value as never);
 }
 
 function canonicalize(value: unknown, depth: number): JsonValue {

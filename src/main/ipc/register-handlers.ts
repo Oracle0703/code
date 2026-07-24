@@ -1,6 +1,11 @@
 import { app, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron';
 import {
   IPC_CHANNELS,
+  type AutomationCreateInput,
+  type AutomationSetEnabledInput,
+  type AutomationSnapshot,
+  type AutomationTargetInput,
+  type AutomationUpdateInput,
   type BackupPolicyUpdateInput,
   type DataExportResult,
   type DataImportCommitInput,
@@ -57,6 +62,10 @@ import type { BrowserController } from '../browser/browser-controller';
 import { isTrustedRendererUrl, type TrustedRendererLocation } from '../security/trusted-renderer';
 import {
   assertNoArguments,
+  parseAutomationCreateInput,
+  parseAutomationSetEnabledInput,
+  parseAutomationTargetInput,
+  parseAutomationUpdateInput,
   parseBackupPolicyUpdateInput,
   parseBrowserBookmarkTargetInput,
   parseBrowserBoundsInput,
@@ -160,6 +169,13 @@ interface IpcDependencies {
     updateScheduleItem(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archiveScheduleItem(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
   };
+  automation: {
+    getSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;
+    create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
+    update(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
+    setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
+    archive(input: AutomationTargetInput): Promise<AutomationSnapshot>;
+  };
   terminal: {
     getSnapshot(input: TerminalWorkspaceInput): TerminalSnapshot | Promise<TerminalSnapshot>;
     create(input: TerminalCreateInput): TerminalSnapshot | Promise<TerminalSnapshot>;
@@ -202,6 +218,7 @@ export function registerIpcHandlers({
   task,
   note,
   schedule,
+  automation,
   terminal,
   trustedRendererLocation,
 }: IpcDependencies): () => void {
@@ -375,6 +392,27 @@ export function registerIpcHandlers({
   register(IPC_CHANNELS.schedule.archive, (_event, input, ...args) => {
     assertNoArguments(args, 'Archiving a schedule item');
     return schedule.archiveScheduleItem(parseScheduleTargetInput(input));
+  });
+
+  register(IPC_CHANNELS.automation.getSnapshot, (_event, input, ...args) => {
+    assertNoArguments(args, 'Getting the automation snapshot');
+    return automation.getSnapshot(parseWorkspaceTargetInput(input));
+  });
+  register(IPC_CHANNELS.automation.create, (_event, input, ...args) => {
+    assertNoArguments(args, 'Creating an automation');
+    return automation.create(parseAutomationCreateInput(input));
+  });
+  register(IPC_CHANNELS.automation.update, (_event, input, ...args) => {
+    assertNoArguments(args, 'Updating an automation');
+    return automation.update(parseAutomationUpdateInput(input));
+  });
+  register(IPC_CHANNELS.automation.setEnabled, (_event, input, ...args) => {
+    assertNoArguments(args, 'Changing an automation state');
+    return automation.setEnabled(parseAutomationSetEnabledInput(input));
+  });
+  register(IPC_CHANNELS.automation.archive, (_event, input, ...args) => {
+    assertNoArguments(args, 'Archiving an automation');
+    return automation.archive(parseAutomationTargetInput(input));
   });
 
   register(IPC_CHANNELS.window.minimize, () => {

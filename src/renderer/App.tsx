@@ -39,12 +39,15 @@ import {
 import {
   DEFAULT_WORKSPACE_PREFERENCES,
   WORKSPACE_COLORS,
+  type AutomationItem,
   type SearchResult,
   type WorkspaceViewId,
 } from '../shared/contracts';
 import { isQuickCaptureShortcut } from '../shared/quick-capture-shortcut';
 import { findCurrentWorkspace } from '../shared/workspace-domain';
 import { ActivityRail } from './components/ActivityRail';
+import { AutomationDialog, type AutomationDialogState } from './components/AutomationDialog';
+import { AutomationPage } from './components/AutomationPage';
 import { BrowserPanel } from './components/BrowserPanel';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { DataImportDialog } from './components/DataImportDialog';
@@ -54,7 +57,6 @@ import { InboxUndoStack } from './components/InboxUndoStack';
 import { NotePage } from './components/NotePage';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
 import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
-import { SectionPage } from './components/SectionPage';
 import { SettingsPage, type SettingsSection } from './components/SettingsPage';
 import { TaskDialog, type TaskDialogState } from './components/TaskDialog';
 import { TaskPage } from './components/TaskPage';
@@ -63,6 +65,7 @@ import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { useInboxController } from './hooks/useInboxController';
+import { useAutomationController } from './hooks/useAutomationController';
 import { useDataManagementController } from './hooks/useDataManagementController';
 import { useGlobalSearchController } from './hooks/useGlobalSearchController';
 import { useNoteController } from './hooks/useNoteController';
@@ -126,6 +129,7 @@ export function App() {
   const [quickCaptureTarget, setQuickCaptureTarget] = useState<QuickCaptureTarget | null>(null);
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
   const [scheduleDialog, setScheduleDialog] = useState<ScheduleDialogState | null>(null);
+  const [automationDialog, setAutomationDialog] = useState<AutomationDialogState | null>(null);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [requestedNoteId, setRequestedNoteId] = useState<string | null>(null);
@@ -146,10 +150,23 @@ export function App() {
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
   const snapshot = workspaceController.snapshot;
+  useEffect(() => {
+    currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
+  }, [snapshot?.currentWorkspaceId]);
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
+  const automationController = useAutomationController(snapshot?.currentWorkspaceId ?? null, {
+    onRunOutput: ({ workspaceId, outputKind }) => {
+      if (currentWorkspaceIdRef.current !== workspaceId) return;
+      if (outputKind === 'task') {
+        void taskController.refresh().catch(() => undefined);
+      } else {
+        void noteController.refresh().catch(() => undefined);
+      }
+    },
+  });
   const searchController = useGlobalSearchController({
     open: paletteOpen,
     workspaceId: snapshot?.currentWorkspaceId ?? null,
@@ -180,13 +197,10 @@ export function App() {
     quickCaptureTarget !== null ||
     taskDialog !== null ||
     scheduleDialog !== null ||
+    automationDialog !== null ||
     dataState.importPreview !== null;
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
-
-  useEffect(() => {
-    currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
-  }, [snapshot?.currentWorkspaceId]);
 
   const updateNoteDraftDirty = useCallback(
     (dirty: boolean) => synchronizeDirtyDraft(noteDraftDirtyRef, setNoteDraftDirty, dirty),
@@ -247,6 +261,7 @@ export function App() {
       workspaceDialog !== null ||
       taskDialog !== null ||
       scheduleDialog !== null ||
+      automationDialog !== null ||
       dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
@@ -259,6 +274,7 @@ export function App() {
     );
   }, [
     activeWorkspace,
+    automationDialog,
     scheduleDialog,
     dataState.importPreview,
     taskDialog,
@@ -273,6 +289,7 @@ export function App() {
         workspaceDialog !== null ||
         quickCaptureTarget !== null ||
         scheduleDialog !== null ||
+        automationDialog !== null ||
         dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
@@ -288,6 +305,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      automationDialog,
       quickCaptureTarget,
       scheduleDialog,
       dataState.importPreview,
@@ -304,6 +322,7 @@ export function App() {
       quickCaptureTarget !== null ||
       taskDialog !== null ||
       scheduleDialog !== null ||
+      automationDialog !== null ||
       dataState.importPreview !== null ||
       workspaceController.pendingOperation !== null
     ) {
@@ -321,6 +340,7 @@ export function App() {
     });
   }, [
     activeWorkspace,
+    automationDialog,
     quickCaptureTarget,
     scheduleController.snapshot,
     scheduleDialog,
@@ -329,6 +349,70 @@ export function App() {
     workspaceController.pendingOperation,
     workspaceDialog,
   ]);
+
+  const openAutomationCreate = useCallback(() => {
+    if (
+      !activeWorkspace ||
+      workspaceDialog !== null ||
+      quickCaptureTarget !== null ||
+      taskDialog !== null ||
+      scheduleDialog !== null ||
+      automationDialog !== null ||
+      dataState.importPreview !== null ||
+      workspaceController.pendingOperation !== null
+    ) {
+      return;
+    }
+    setPaletteOpen(false);
+    setAutomationDialog({
+      mode: 'create',
+      workspaceId: activeWorkspace.id,
+      workspaceName: activeWorkspace.name,
+    });
+  }, [
+    activeWorkspace,
+    automationDialog,
+    dataState.importPreview,
+    quickCaptureTarget,
+    scheduleDialog,
+    taskDialog,
+    workspaceController.pendingOperation,
+    workspaceDialog,
+  ]);
+
+  const openAutomationEdit = useCallback(
+    (item: AutomationItem) => {
+      if (
+        !activeWorkspace ||
+        workspaceDialog !== null ||
+        quickCaptureTarget !== null ||
+        taskDialog !== null ||
+        scheduleDialog !== null ||
+        automationDialog !== null ||
+        dataState.importPreview !== null ||
+        workspaceController.pendingOperation !== null
+      ) {
+        return;
+      }
+      setPaletteOpen(false);
+      setAutomationDialog({
+        mode: 'edit',
+        workspaceId: activeWorkspace.id,
+        workspaceName: activeWorkspace.name,
+        item,
+      });
+    },
+    [
+      activeWorkspace,
+      automationDialog,
+      dataState.importPreview,
+      quickCaptureTarget,
+      scheduleDialog,
+      taskDialog,
+      workspaceController.pendingOperation,
+      workspaceDialog,
+    ],
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -421,6 +505,7 @@ export function App() {
         workspaceDialog !== null ||
         taskDialog !== null ||
         scheduleDialog !== null ||
+        automationDialog !== null ||
         dataState.importPreview !== null ||
         workspaceController.pendingOperation !== null
       ) {
@@ -477,6 +562,7 @@ export function App() {
     return () => window.removeEventListener('keydown', handleShortcut);
   }, [
     browserOpen,
+    automationDialog,
     dataState.importPreview,
     paletteOpen,
     quickCaptureTarget,
@@ -690,6 +776,15 @@ export function App() {
         action: () => openTaskCreate('none'),
       },
       {
+        id: 'automation:create',
+        label: '新建自动化',
+        description: '按每日或每周计划创建任务或笔记',
+        group: '操作',
+        icon: Bot,
+        keywords: '自动化 定时 每日 每周 任务 笔记',
+        action: openAutomationCreate,
+      },
+      {
         id: 'data:backup',
         label: '立即备份数据',
         description: '创建一份一致性的本地 SQLite 备份',
@@ -855,6 +950,7 @@ export function App() {
     dataState.activeOperation,
     dataState.importPreview,
     exportData,
+    openAutomationCreate,
     openQuickCapture,
     openTerminalSettings,
     openTaskCreate,
@@ -1261,10 +1357,17 @@ export function App() {
                     onChooseImport={chooseImport}
                   />
                 ) : (
-                  <SectionPage
-                    view="automations"
-                    onOpenBrowser={() => updatePreferences({ browserOpen: true })}
-                    onOpenTerminal={() => updatePreferences({ terminalOpen: true })}
+                  <AutomationPage
+                    items={automationController.items}
+                    status={automationController.status}
+                    loadError={automationController.loadError}
+                    operationError={automationController.operationError}
+                    pendingItemIds={automationController.pendingItemIds}
+                    pendingCreate={automationController.pendingCreate}
+                    onRetry={automationController.retry}
+                    onOpenCreate={openAutomationCreate}
+                    onOpenEdit={openAutomationEdit}
+                    onSetEnabled={automationController.setEnabled}
                   />
                 )}
               </div>
@@ -1366,6 +1469,7 @@ export function App() {
                   taskController.operationError ||
                   noteController.operationError ||
                   scheduleController.operationError ||
+                  automationController.operationError ||
                   dataState.feedback?.tone === 'error'
                     ? 'alert'
                     : undefined
@@ -1376,6 +1480,7 @@ export function App() {
                   taskController.operationError ??
                   noteController.operationError ??
                   scheduleController.operationError ??
+                  automationController.operationError ??
                   (dataState.feedback?.tone === 'error' ? dataState.feedback.message : null) ??
                   (noteDraftDirty ? '笔记有未保存的更改' : null) ??
                   '已就绪'}
@@ -1488,6 +1593,30 @@ export function App() {
               throw new Error('工作区已经切换，请重新打开日程窗口。');
             }
             await scheduleController.archive(item, scheduleDialog.expectedDate);
+          }}
+        />
+      ) : null}
+      {automationDialog ? (
+        <AutomationDialog
+          state={automationDialog}
+          onClose={() => setAutomationDialog(null)}
+          onCreate={async (name, schedule, action) => {
+            if (automationDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开自动化窗口。');
+            }
+            await automationController.create(name, schedule, action);
+          }}
+          onUpdate={async (item, name, schedule, action) => {
+            if (automationDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开自动化窗口。');
+            }
+            await automationController.update(item, name, schedule, action);
+          }}
+          onArchive={async (item) => {
+            if (automationDialog.workspaceId !== snapshot.currentWorkspaceId) {
+              throw new Error('工作区已经切换，请重新打开自动化窗口。');
+            }
+            await automationController.archive(item);
           }}
         />
       ) : null}

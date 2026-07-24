@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertNoArguments,
+  parseAutomationCreateInput,
+  parseAutomationSetEnabledInput,
+  parseAutomationTargetInput,
+  parseAutomationUpdateInput,
   parseBackupPolicyUpdateInput,
   parseBoolean,
   parseBrowserBookmarkTargetInput,
@@ -59,6 +63,7 @@ const TAB_ID = '723e4567-e89b-42d3-a456-426614174000';
 const BOOKMARK_ID = '823e4567-e89b-42d3-a456-426614174000';
 const DOWNLOAD_ID = '923e4567-e89b-42d3-a456-426614174000';
 const IMPORT_ID = 'a23e4567-e89b-42d3-a456-426614174000';
+const AUTOMATION_ID = 'b23e4567-e89b-42d3-a456-426614174000';
 const WSL_DISTRIBUTION_ID = `wsl-${'a'.repeat(64)}`;
 
 describe('IPC validation', () => {
@@ -281,6 +286,114 @@ describe('IPC validation', () => {
         importId: IMPORT_ID,
         previewDigest: 'a'.repeat(64),
         path: '/tmp/import.dwbx',
+      }),
+    ).toThrow(TypeError);
+  });
+
+  it('accepts only fixed, exact automation schedules and actions', () => {
+    expect(
+      parseAutomationCreateInput({
+        workspaceId: WORKSPACE_ID,
+        name: ' 每日准备 ',
+        schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+        action: { kind: 'create-today-task', title: ' 检查今日计划 ' },
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      name: '每日准备',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task', title: '检查今日计划' },
+    });
+    expect(
+      parseAutomationUpdateInput({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 2,
+        name: '周回顾',
+        schedule: { cadence: 'weekly', localTimeMinute: 1_050, weekday: 5 },
+        action: { kind: 'create-note', title: '回顾', body: '## 本周\r\n' },
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      expectedRevision: 2,
+      name: '周回顾',
+      schedule: { cadence: 'weekly', localTimeMinute: 1_050, weekday: 5 },
+      action: { kind: 'create-note', title: '回顾', body: '## 本周\n' },
+    });
+    expect(
+      parseAutomationSetEnabledInput({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 3,
+        enabled: true,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      expectedRevision: 3,
+      enabled: true,
+    });
+    expect(
+      parseAutomationTargetInput({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 4,
+      }),
+    ).toEqual({
+      workspaceId: WORKSPACE_ID,
+      automationId: AUTOMATION_ID,
+      expectedRevision: 4,
+    });
+  });
+
+  it('rejects automation commands, paths, forged runtime fields, and surplus payload keys', () => {
+    const base = {
+      workspaceId: WORKSPACE_ID,
+      name: 'unsafe',
+      schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
+    };
+    expect(() =>
+      parseAutomationCreateInput({
+        ...base,
+        action: { kind: 'run-command', command: 'whoami' },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseAutomationCreateInput({
+        ...base,
+        action: {
+          kind: 'create-today-task',
+          title: '检查',
+          executable: 'powershell.exe',
+          argv: ['whoami'],
+        },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseAutomationCreateInput({
+        ...base,
+        schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null, timezone: 'UTC' },
+        action: { kind: 'create-today-task', title: '检查' },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseAutomationSetEnabledInput({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+        enabled: true,
+        occurrenceBucket: 'daily:2026-07-23',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      parseAutomationUpdateInput({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+        name: 'note',
+        schedule: { cadence: 'weekly', localTimeMinute: 510, weekday: null },
+        action: { kind: 'create-note', title: 'note', body: '', path: '/tmp/note.md' },
       }),
     ).toThrow(TypeError);
   });

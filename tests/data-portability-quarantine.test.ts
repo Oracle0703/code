@@ -16,6 +16,33 @@ afterEach(async () => {
 });
 
 describe('ImportQuarantine', () => {
+  it('previews v2 automation counts while preserving the paused-import contract', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'workbench-import-automation-preview-'));
+    directories.push(directory);
+    const quarantine = new ImportQuarantine({
+      directory,
+      stager: new AtomicImportStager({
+        directory,
+        idFactory: () => '71717171-7171-4171-8171-717171717171',
+        driver: {
+          build: async (_packageData, path) => writeFile(path, 'valid-stage'),
+          validate: async () => undefined,
+        },
+      }),
+      idFactory: () => '72727272-7272-4272-8272-727272727272',
+      now: () => new Date('2026-07-22T12:00:00.000Z'),
+    });
+    const preview = await quarantine.prepare(createAutomationPackage());
+    expect(preview).toMatchObject({
+      sourceSchemaVersion: 9,
+      counts: {
+        automations: 1,
+        enabledAutomations: 1,
+      },
+    });
+    await quarantine.cancel({ importId: preview.importId });
+  });
+
   it('stages an immutable package behind a one-time preview token', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'workbench-import-quarantine-'));
     directories.push(directory);
@@ -399,6 +426,45 @@ function createPackage(): Buffer {
         data: {
           id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
           name: '主工作区',
+          archivedAt: null,
+        },
+      },
+    ],
+  });
+}
+
+function createAutomationPackage(): Buffer {
+  const workspaceId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  return serializePortablePackage({
+    exportId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    exportedAt: '2026-07-22T11:00:00.000Z',
+    sourceAppVersion: '0.1.0',
+    sourceSchemaVersion: 9,
+    records: [
+      {
+        type: 'app-state',
+        data: { currentWorkspaceId: workspaceId },
+      },
+      {
+        type: 'workspace',
+        data: {
+          id: workspaceId,
+          name: '主工作区',
+          archivedAt: null,
+        },
+      },
+      {
+        type: 'automation-definition',
+        data: {
+          id: '73737373-7373-4373-8373-737373737373',
+          workspaceId,
+          name: '每日计划',
+          enabled: true,
+          schedule: { cadence: 'daily', localTimeMinute: 480, weekday: null },
+          action: { kind: 'create-today-task', title: '整理计划' },
+          revision: 1,
+          createdAt: '2026-07-22T10:00:00.000Z',
+          updatedAt: '2026-07-22T10:00:00.000Z',
           archivedAt: null,
         },
       },

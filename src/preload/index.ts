@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC_CHANNELS,
+  type AutomationChangedEvent,
+  type AutomationCreateInput,
+  type AutomationSetEnabledInput,
+  type AutomationSnapshot,
+  type AutomationTargetInput,
+  type AutomationUpdateInput,
   type BrowserBoundsInput,
   type BrowserBookmarkTargetInput,
   type BrowserCreateTabInput,
@@ -235,6 +241,20 @@ const workbenchApi: WorkbenchApi = Object.freeze({
       invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.update, input),
     archive: (input: ScheduleTargetInput) =>
       invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.archive, input),
+  }),
+  automation: Object.freeze({
+    getSnapshot: (input: WorkspaceTargetInput) =>
+      invoke<AutomationSnapshot>(IPC_CHANNELS.automation.getSnapshot, input),
+    create: (input: AutomationCreateInput) =>
+      invoke<AutomationSnapshot>(IPC_CHANNELS.automation.create, input),
+    update: (input: AutomationUpdateInput) =>
+      invoke<AutomationSnapshot>(IPC_CHANNELS.automation.update, input),
+    setEnabled: (input: AutomationSetEnabledInput) =>
+      invoke<AutomationSnapshot>(IPC_CHANNELS.automation.setEnabled, input),
+    archive: (input: AutomationTargetInput) =>
+      invoke<AutomationSnapshot>(IPC_CHANNELS.automation.archive, input),
+    onChanged: (listener: (event: AutomationChangedEvent) => void) =>
+      subscribe(IPC_CHANNELS.automation.changed, listener),
   }),
   window: Object.freeze({
     minimize: () => invoke<void>(IPC_CHANNELS.window.minimize),
