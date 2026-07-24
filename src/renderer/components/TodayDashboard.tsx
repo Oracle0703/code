@@ -21,9 +21,11 @@ import {
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import type {
   FocusSnapshot,
+  PlanningDayToken,
   ScheduleItem,
   ScheduleSnapshot,
   Task,
+  TaskPlanning,
   TaskSnapshot,
   TaskStatus,
 } from '../../shared/contracts';
@@ -32,6 +34,7 @@ import { describeFocusTimer, FOCUS_DURATION_SECONDS, formatFocusTimer } from '..
 import { formatScheduleInputMinute } from '../schedule-state';
 import { toLocalDateKey } from '../task-state';
 import { FocusSessionDialog } from './FocusSessionDialog';
+import { RollingPlan } from './RollingPlan';
 
 export interface TodayDashboardProps {
   inboxStatus: 'loading' | 'ready' | 'error';
@@ -59,11 +62,13 @@ export interface TodayDashboardProps {
   onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
   onOpenTasks: () => void;
-  onCreateToday: () => void;
+  onRetryTasks: () => void;
+  onCreateTask: (planning: PlanningDayToken) => void;
   onOpenTask: (task: Task) => void;
   onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<void>;
+  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
   onRetrySchedule: () => void;
-  onCreateSchedule: () => void;
+  onCreateSchedule: (expectedDate: string) => void;
   onOpenSchedule: (item: ScheduleItem) => void;
   onOpenAssistant: () => void;
   onRetryFocus: () => void;
@@ -101,9 +106,11 @@ export function TodayDashboard({
   onCapture,
   onOpenInbox,
   onOpenTasks,
-  onCreateToday,
+  onRetryTasks,
+  onCreateTask,
   onOpenTask,
   onUpdateTaskStatus,
+  onUpdateTaskPlanning,
   onRetrySchedule,
   onCreateSchedule,
   onOpenSchedule,
@@ -127,6 +134,20 @@ export function TodayDashboard({
   const todayTasks = useMemo(
     () => taskSnapshot?.tasks.filter((task) => task.plannedFor === taskSnapshot.todayDate) ?? [],
     [taskSnapshot],
+  );
+  const todayScheduleSnapshot =
+    scheduleSnapshot && (!taskSnapshot || scheduleSnapshot.todayDate === taskSnapshot.todayDate)
+      ? scheduleSnapshot
+      : null;
+  const scheduleWindowMismatch = scheduleSnapshot !== null && todayScheduleSnapshot === null;
+  const todayScheduleItems = useMemo(
+    () =>
+      todayScheduleSnapshot
+        ? scheduleItems.filter(
+            ({ scheduledFor }) => scheduledFor === todayScheduleSnapshot.todayDate,
+          )
+        : [],
+    [scheduleItems, todayScheduleSnapshot],
   );
   const remainingTasks = todayTasks.filter(({ status }) => status !== 'completed').length;
   const completedTasks = todayTasks.length - remainingTasks;
@@ -398,7 +419,7 @@ export function TodayDashboard({
           <button
             type="button"
             className="add-row"
-            onClick={onCreateToday}
+            onClick={() => onCreateTask('day-0')}
             disabled={taskCreatePending}
           >
             {taskCreatePending ? (
@@ -561,8 +582,10 @@ export function TodayDashboard({
               <button
                 type="button"
                 className="agenda-card__add"
-                onClick={onCreateSchedule}
-                disabled={scheduleCreatePending || !scheduleSnapshot}
+                onClick={() =>
+                  todayScheduleSnapshot && onCreateSchedule(todayScheduleSnapshot.todayDate)
+                }
+                disabled={scheduleCreatePending || !todayScheduleSnapshot}
                 aria-label="添加今日日程"
               >
                 {scheduleCreatePending ? (
@@ -572,25 +595,25 @@ export function TodayDashboard({
                 )}
               </button>
             </div>
-            {scheduleOperationError ? (
+            {scheduleOperationError && todayScheduleSnapshot ? (
               <p className="agenda-card__error" role="alert">
                 {scheduleOperationError}
               </p>
             ) : null}
-            {scheduleStatus === 'loading' && !scheduleSnapshot ? (
+            {(scheduleStatus === 'loading' && !todayScheduleSnapshot) || scheduleWindowMismatch ? (
               <div className="agenda-card__state" aria-live="polite">
                 <LoaderCircle className="is-spinning" size={16} /> 正在同步日程…
               </div>
-            ) : scheduleStatus === 'error' && !scheduleSnapshot ? (
+            ) : scheduleStatus === 'error' && !todayScheduleSnapshot ? (
               <div className="agenda-card__state is-error" role="alert">
                 <span>{scheduleLoadError ?? '今日日程暂时无法读取。'}</span>
                 <button type="button" onClick={onRetrySchedule}>
                   重试
                 </button>
               </div>
-            ) : scheduleSnapshot && scheduleItems.length > 0 ? (
+            ) : todayScheduleSnapshot && todayScheduleItems.length > 0 ? (
               <div className="agenda-list">
-                {scheduleItems.map((item) => {
+                {todayScheduleItems.map((item) => {
                   const pending = pendingScheduleItemIds.has(item.id);
                   return (
                     <button
@@ -620,19 +643,45 @@ export function TodayDashboard({
                 <CalendarClock size={19} />
                 <strong>今天还没有日程</strong>
                 <span>安排一段明确的开始与结束时间。</span>
-                <button type="button" onClick={onCreateSchedule} disabled={!scheduleSnapshot}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    todayScheduleSnapshot && onCreateSchedule(todayScheduleSnapshot.todayDate)
+                  }
+                  disabled={!todayScheduleSnapshot}
+                >
                   <Plus size={13} /> 添加日程
                 </button>
               </div>
             )}
-            {scheduleSnapshot && scheduleItems.length > 0 ? (
+            {todayScheduleSnapshot && todayScheduleItems.length > 0 ? (
               <div className="agenda-footer">
-                <CalendarClock size={13} /> {scheduleItems.length} 段本地日程
+                <CalendarClock size={13} /> {todayScheduleItems.length} 段本地日程
               </div>
             ) : null}
           </section>
         </div>
       </div>
+      <RollingPlan
+        taskSnapshot={taskSnapshot}
+        scheduleSnapshot={scheduleSnapshot}
+        taskStatus={taskStatus}
+        scheduleStatus={scheduleStatus}
+        taskError={taskLoadError}
+        scheduleError={scheduleLoadError}
+        pendingTaskIds={pendingTaskIds}
+        pendingScheduleItemIds={pendingScheduleItemIds}
+        taskCreatePending={taskCreatePending}
+        scheduleCreatePending={scheduleCreatePending}
+        onRetryTasks={onRetryTasks}
+        onRetrySchedule={onRetrySchedule}
+        onCreateTask={onCreateTask}
+        onOpenTask={onOpenTask}
+        onUpdateTaskStatus={onUpdateTaskStatus}
+        onUpdateTaskPlanning={onUpdateTaskPlanning}
+        onCreateSchedule={onCreateSchedule}
+        onOpenSchedule={onOpenSchedule}
+      />
       {focusDialogOpen ? (
         <FocusSessionDialog
           tasks={unfinishedTodayTasks}

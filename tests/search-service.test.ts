@@ -146,7 +146,7 @@ describe('SearchService', () => {
     database.close();
   });
 
-  it('only returns active items from the Main-computed current schedule date', async () => {
+  it('returns active schedule items across the Main-computed seven-day window', async () => {
     const { database, service } = await createSearchContext();
     seedWorkspace(database, WORKSPACE_A, '当前工作区');
     seedSchedule(database, WORKSPACE_A, idFor(130), 'daily review today', TODAY, timestamp(1));
@@ -162,10 +162,34 @@ describe('SearchService', () => {
       database,
       WORKSPACE_A,
       idFor(132),
+      'daily review day six',
+      '2026-07-29',
+      timestamp(3),
+    );
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(133),
+      'daily review past',
+      '2026-07-22',
+      timestamp(4),
+    );
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(134),
+      'daily review day seven',
+      '2026-07-30',
+      timestamp(5),
+    );
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(135),
       'daily review archived',
       TODAY,
-      timestamp(4),
-      timestamp(4),
+      timestamp(6),
+      timestamp(6),
     );
 
     const snapshot = await service.query({
@@ -173,11 +197,109 @@ describe('SearchService', () => {
       query: 'daily review',
       scope: 'workspace',
     });
+    expect(snapshot.results).toHaveLength(3);
+    expect(snapshot.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entityId: idFor(130),
+          excerpt: `${TODAY} · 09:00–10:00`,
+        }),
+        expect.objectContaining({
+          entityId: idFor(131),
+          excerpt: '2026-07-24 · 09:00–10:00',
+        }),
+        expect.objectContaining({
+          entityId: idFor(132),
+          excerpt: '2026-07-29 · 09:00–10:00',
+        }),
+      ]),
+    );
+    database.close();
+  });
+
+  it('keeps leap-month future schedule results valid at the rolling boundary', async () => {
+    const { database, service } = await createSearchContext('2024-02-27');
+    seedWorkspace(database, WORKSPACE_A, '当前工作区');
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(140),
+      'boundary schedule leap day',
+      '2024-02-29',
+      timestamp(1),
+    );
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(141),
+      'boundary schedule day six',
+      '2024-03-04',
+      timestamp(2),
+    );
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(142),
+      'boundary schedule past',
+      '2024-02-26',
+      timestamp(3),
+    );
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(143),
+      'boundary schedule day seven',
+      '2024-03-05',
+      timestamp(4),
+    );
+
+    const snapshot = await service.query({
+      workspaceId: WORKSPACE_A,
+      query: 'boundary schedule',
+      scope: 'workspace',
+    });
+    expect(snapshot.results).toHaveLength(2);
     expect(snapshot.results).toEqual([
       expect.objectContaining({
-        entityId: idFor(130),
-        excerpt: `${TODAY} · 09:00–10:00`,
+        entityId: idFor(141),
+        excerpt: '2024-03-04 · 09:00–10:00',
       }),
+      expect.objectContaining({
+        entityId: idFor(140),
+        excerpt: '2024-02-29 · 09:00–10:00',
+      }),
+    ]);
+    database.close();
+  });
+
+  it('resolves the rolling date after a queued search operation begins', async () => {
+    const { database } = await createSearchContext();
+    seedWorkspace(database, WORKSPACE_A, '当前工作区');
+    seedSchedule(
+      database,
+      WORKSPACE_A,
+      idFor(150),
+      'queued midnight schedule',
+      '2026-07-30',
+      timestamp(1),
+    );
+    let todayDate = TODAY;
+    const service = new SearchService({
+      execute: async (operation) => {
+        todayDate = '2026-07-24';
+        return operation(database);
+      },
+      todayFactory: () => todayDate,
+    });
+
+    const snapshot = await service.query({
+      workspaceId: WORKSPACE_A,
+      query: 'queued midnight',
+      scope: 'workspace',
+    });
+
+    expect(snapshot.results).toEqual([
+      expect.objectContaining({ entityId: idFor(150), kind: 'schedule' }),
     ]);
     database.close();
   });
@@ -350,7 +472,7 @@ describe('SearchService', () => {
   });
 });
 
-async function createSearchContext(): Promise<{
+async function createSearchContext(todayDate = TODAY): Promise<{
   readonly database: SqliteAdapter;
   readonly service: SearchService;
 }> {
@@ -364,7 +486,7 @@ async function createSearchContext(): Promise<{
     database,
     service: new SearchService({
       execute: async (operation) => operation(database),
-      todayFactory: () => TODAY,
+      todayFactory: () => todayDate,
     }),
   };
 }

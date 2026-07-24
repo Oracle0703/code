@@ -11,6 +11,7 @@ import {
   type AssistantSnapshot,
   type TaskSnapshot,
 } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import { ActivityRail } from '../src/renderer/components/ActivityRail';
 import { AssistantPage } from '../src/renderer/components/AssistantPage';
 import { NotePage } from '../src/renderer/components/NotePage';
@@ -240,6 +241,7 @@ describe('assistant renderer surfaces', () => {
     const snapshot: TaskSnapshot = {
       workspaceId: WORKSPACE_ID,
       todayDate: '2026-07-23',
+      planningDays: createRollingPlanningDays('2026-07-23'),
       tasks: [
         {
           id: TASK_ID,
@@ -279,6 +281,7 @@ describe('assistant renderer surfaces', () => {
     const taskSnapshot: TaskSnapshot = {
       workspaceId: WORKSPACE_ID,
       todayDate: '2026-07-23',
+      planningDays: createRollingPlanningDays('2026-07-23'),
       tasks: [],
     };
     const today = renderToStaticMarkup(
@@ -296,6 +299,7 @@ describe('assistant renderer surfaces', () => {
         scheduleSnapshot: {
           workspaceId: WORKSPACE_ID,
           todayDate: '2026-07-23',
+          planningDays: createRollingPlanningDays('2026-07-23'),
           items: [],
         },
         scheduleItems: [],
@@ -318,9 +322,11 @@ describe('assistant renderer surfaces', () => {
         onCapture: async () => undefined,
         onOpenInbox: () => undefined,
         onOpenTasks: () => undefined,
-        onCreateToday: () => undefined,
+        onRetryTasks: () => undefined,
+        onCreateTask: () => undefined,
         onOpenTask: () => undefined,
         onUpdateTaskStatus: async () => undefined,
+        onUpdateTaskPlanning: async () => undefined,
         onRetrySchedule: () => undefined,
         onCreateSchedule: () => undefined,
         onOpenSchedule: () => undefined,

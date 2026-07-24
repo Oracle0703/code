@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { WORKSPACE_COLORS, type BackupPolicy, type SearchSnapshot } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import { DatabaseService } from '../src/main/database';
 import { DEFAULT_MIGRATIONS } from '../src/main/database/default-migrations';
 import { MetadataRepository } from '../src/main/database/metadata-repository';
@@ -62,6 +63,9 @@ const AUTOMATION_NOTE_ID = '38383838-3838-4838-8838-383838383838';
 const FOCUS_SESSION_ID = '40404040-4040-4040-8040-404040404040';
 const FIXED_NOW = new Date('2026-07-22T12:34:56.000Z');
 const FIXED_TODAY = '2026-07-22';
+const FIXED_DAY_SIX = '2026-07-28';
+const FIXED_DAY_SEVEN = '2026-07-29';
+const FIXED_PLANNING_DAYS = createRollingPlanningDays(FIXED_TODAY);
 
 async function main(): Promise<void> {
   assert.ok(
@@ -253,11 +257,12 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
 
     let tasks = await service.getTaskSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(tasks.todayDate, FIXED_TODAY);
+    assert.deepEqual(tasks.planningDays, FIXED_PLANNING_DAYS);
     assert.deepEqual(tasks.tasks, []);
     tasks = await service.createTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       title: '  打包后的任务 / e\u0301 / 👩‍💻  ',
-      planning: 'today',
+      planning: 'day-0',
     });
     let task = tasks.tasks.find(({ id }) => id === FIRST_TASK_ID);
     assert.ok(task);
@@ -270,11 +275,21 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     tasks = await service.createTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       title: '稍后处理的任务',
-      planning: 'none',
+      planning: 'day-6',
     });
     task = tasks.tasks.find(({ id }) => id === SECOND_TASK_ID);
     assert.ok(task);
-    assert.equal(task.plannedFor, null);
+    assert.equal(task.plannedFor, FIXED_DAY_SIX);
+    await assert.rejects(
+      service.startFocusSession({
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        taskId: SECOND_TASK_ID,
+      }),
+      {
+        name: 'FocusConflictError',
+        message: 'A focus task must be unfinished and planned for today in this workspace.',
+      },
+    );
     tasks = await service.renameTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       taskId: FIRST_TASK_ID,
@@ -298,9 +313,34 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     tasks = await service.updateTaskPlanning({
       workspaceId: DEFAULT_WORKSPACE_ID,
       taskId: SECOND_TASK_ID,
-      planning: 'today',
+      planning: 'day-0',
     });
     assert.equal(tasks.tasks.find(({ id }) => id === SECOND_TASK_ID)?.plannedFor, FIXED_TODAY);
+    const taskValidationService = service;
+    assert.throws(
+      () =>
+        taskValidationService.updateTaskPlanning({
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          taskId: SECOND_TASK_ID,
+          planning: 'today' as never,
+        }),
+      {
+        name: 'TaskValidationError',
+        message: 'Task planning value is invalid.',
+      },
+    );
+    assert.throws(
+      () =>
+        taskValidationService.updateTaskPlanning({
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          taskId: SECOND_TASK_ID,
+          planning: 'day-7' as never,
+        }),
+      {
+        name: 'TaskValidationError',
+        message: 'Task planning value is invalid.',
+      },
+    );
     tasks = await service.updateTaskPlanning({
       workspaceId: DEFAULT_WORKSPACE_ID,
       taskId: SECOND_TASK_ID,
@@ -349,6 +389,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
 
     let schedule = await service.getScheduleSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.equal(schedule.todayDate, FIXED_TODAY);
+    assert.deepEqual(schedule.planningDays, FIXED_PLANNING_DAYS);
     assert.deepEqual(schedule.items, []);
     schedule = await service.createScheduleItem({
       workspaceId: DEFAULT_WORKSPACE_ID,
@@ -390,7 +431,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     );
     schedule = await service.createScheduleItem({
       workspaceId: DEFAULT_WORKSPACE_ID,
-      expectedDate: FIXED_TODAY,
+      expectedDate: FIXED_DAY_SIX,
       title: '待归档的个人安排',
       kind: 'personal',
       startMinute: 18 * 60,
@@ -400,11 +441,55 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       schedule.items.some(({ id }) => id === SECOND_SCHEDULE_ID),
       true,
     );
+    assert.equal(
+      schedule.items.find(({ id }) => id === SECOND_SCHEDULE_ID)?.scheduledFor,
+      FIXED_DAY_SIX,
+    );
+    schedule = await service.updateScheduleItem({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      scheduleId: SECOND_SCHEDULE_ID,
+      expectedDate: FIXED_DAY_SIX,
+      expectedRevision: 1,
+      title: '六日后的个人回顾',
+      kind: 'review',
+      startMinute: 18 * 60 + 15,
+      endMinute: 19 * 60 + 15,
+    });
+    assert.equal(schedule.items.find(({ id }) => id === SECOND_SCHEDULE_ID)?.revision, 2);
+    const daySixSearch = await service.search({
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      query: '六日后的个人回顾',
+      scope: 'workspace',
+    });
+    assert.deepEqual(
+      daySixSearch.results.map(({ kind, entityId }) => ({
+        kind,
+        entityId,
+      })),
+      [{ kind: 'schedule', entityId: SECOND_SCHEDULE_ID }],
+    );
+    await assert.rejects(
+      service.updateScheduleItem({
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        scheduleId: SECOND_SCHEDULE_ID,
+        expectedDate: FIXED_DAY_SEVEN,
+        expectedRevision: 2,
+        title: '窗口外安排',
+        kind: 'personal',
+        startMinute: 18 * 60,
+        endMinute: 19 * 60,
+      }),
+      {
+        name: 'ScheduleConflictError',
+        message:
+          'The selected schedule date is outside the current planning window. Reload the plan first.',
+      },
+    );
     schedule = await service.archiveScheduleItem({
       workspaceId: DEFAULT_WORKSPACE_ID,
       scheduleId: SECOND_SCHEDULE_ID,
-      expectedDate: FIXED_TODAY,
-      expectedRevision: 1,
+      expectedDate: FIXED_DAY_SIX,
+      expectedRevision: 2,
     });
     assert.deepEqual(
       schedule.items.map(({ id }) => id),
@@ -526,7 +611,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     const conversion = await service.convertInboxToTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       entryId: FIRST_INBOX_ID,
-      planning: 'today',
+      planning: 'day-0',
     });
     assert.equal(conversion.inboxSnapshot.workspaceId, DEFAULT_WORKSPACE_ID);
     assert.deepEqual(
@@ -837,10 +922,18 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       assert.equal(activeScheduleRow?.active, 1);
       const archivedScheduleRow = backup
         .prepare(
-          'SELECT revision, archived_at IS NOT NULL AS archived FROM schedule_items WHERE id = ?',
+          `SELECT title, kind, scheduled_for, start_minute, end_minute, revision,
+                  archived_at IS NOT NULL AS archived
+           FROM schedule_items
+           WHERE id = ?`,
         )
         .get(SECOND_SCHEDULE_ID);
-      assert.equal(archivedScheduleRow?.revision, 2);
+      assert.equal(archivedScheduleRow?.title, '六日后的个人回顾');
+      assert.equal(archivedScheduleRow?.kind, 'review');
+      assert.equal(archivedScheduleRow?.scheduled_for, FIXED_DAY_SIX);
+      assert.equal(archivedScheduleRow?.start_minute, 18 * 60 + 15);
+      assert.equal(archivedScheduleRow?.end_minute, 19 * 60 + 15);
+      assert.equal(archivedScheduleRow?.revision, 3);
       assert.equal(archivedScheduleRow?.archived, 1);
       const archivedWorkspaceScheduleRow = backup
         .prepare(
@@ -1684,7 +1777,7 @@ async function smokeVersionThreeUpgrade(dataDirectory: string): Promise<void> {
     const converted = await service.convertInboxToTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       entryId: FIRST_INBOX_ID,
-      planning: 'today',
+      planning: 'day-0',
     });
     assert.deepEqual(converted.inboxSnapshot.entries, []);
     assert.equal(converted.taskSnapshot.tasks.length, 1);
@@ -1734,7 +1827,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
   await legacyTasks.create({
     workspaceId: DEFAULT_WORKSPACE_ID,
     title: 'v4 必须保留的真实任务',
-    planning: 'today',
+    planning: 'day-0',
   });
   database.close();
 
@@ -2231,7 +2324,7 @@ async function smokeVersionNineUpgrade(dataDirectory: string): Promise<void> {
     await legacy.createTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       title: 'v9 → v10 专注迁移保留任务',
-      planning: 'today',
+      planning: 'day-0',
     });
     await legacy.close();
     legacy = undefined;

@@ -7,6 +7,7 @@ import {
   normalizeScheduleRevision,
   normalizeScheduleTitle,
 } from '../../shared/schedule-domain';
+import { createRollingPlanningDays, planningWindowEndDate } from '../../shared/planning-domain';
 import { normalizeWorkspaceId } from '../../shared/workspace-domain';
 import { DatabaseIntegrityError } from '../database/errors';
 import type { SqliteAdapter } from '../database/sqlite-adapter';
@@ -49,17 +50,21 @@ export class ScheduleRepository {
   }
 
   readSnapshot(workspaceId: string, todayDate: string): ScheduleSnapshot {
+    const planningDays = createRollingPlanningDays(todayDate);
     return {
       workspaceId,
       todayDate,
+      planningDays,
       items: this.#database
         .all<ScheduleRow>(
           `SELECT id, workspace_id, title, kind, scheduled_for, start_minute, end_minute,
                   revision, created_at, updated_at, archived_at
            FROM schedule_items
-           WHERE workspace_id = ? AND scheduled_for = ? AND archived_at IS NULL
-           ORDER BY start_minute, end_minute, id`,
-          [workspaceId, todayDate],
+           WHERE workspace_id = ?
+             AND scheduled_for BETWEEN ? AND ?
+             AND archived_at IS NULL
+           ORDER BY scheduled_for, start_minute, end_minute, created_at, id`,
+          [workspaceId, todayDate, planningWindowEndDate(todayDate)],
         )
         .map((row) => toPublicItem(mapScheduleRow(row, workspaceId, false))),
     };

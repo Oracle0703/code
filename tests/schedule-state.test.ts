@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   defaultScheduleRange,
+  defaultScheduleRangeForPlanningDate,
   formatScheduleInputMinute,
   isScheduleRequestLatest,
   isScheduleSequenceCurrent,
@@ -10,6 +11,7 @@ import {
   sortScheduleItems,
 } from '../src/renderer/schedule-state';
 import type { ScheduleItem, ScheduleSnapshot } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
@@ -31,6 +33,7 @@ describe('schedule renderer state', () => {
     const snapshot: ScheduleSnapshot = {
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
+      planningDays: createRollingPlanningDays(TODAY),
       items: [],
     };
     const localToday = new Date(2026, 6, 22, 9, 30);
@@ -81,6 +84,20 @@ describe('schedule renderer state', () => {
       endMinute: 1_440,
     });
     expect(() => defaultScheduleRange(new Date(Number.NaN))).toThrow(TypeError);
+  });
+
+  it('uses current time for today and a stable morning default for future days', () => {
+    const now = new Date(2026, 6, 22, 9, 7);
+    expect(defaultScheduleRangeForPlanningDate(TODAY, TODAY, now)).toEqual({
+      expectedDate: TODAY,
+      startMinute: 570,
+      endMinute: 600,
+    });
+    expect(defaultScheduleRangeForPlanningDate('2026-07-25', TODAY, now)).toEqual({
+      expectedDate: '2026-07-25',
+      startMinute: 540,
+      endMinute: 570,
+    });
   });
 });
 

@@ -1,6 +1,6 @@
 import type { ScheduleItem, ScheduleSnapshot } from '../shared/contracts';
 import { formatScheduleMinute } from '../shared/schedule-domain';
-import { isTaskSnapshotDateCurrent, toLocalDateKey } from './task-state';
+import { toLocalDateKey } from './task-state';
 
 export function isScheduleSequenceCurrent(sequence: number, lastAppliedSequence: number): boolean {
   return Number.isSafeInteger(sequence) && sequence >= 0 && sequence >= lastAppliedSequence;
@@ -21,10 +21,7 @@ export function isScheduleWorkspaceCurrent(
 }
 
 export function isScheduleSnapshotDateCurrent(snapshot: ScheduleSnapshot, value: Date): boolean {
-  return isTaskSnapshotDateCurrent(
-    { workspaceId: snapshot.workspaceId, todayDate: snapshot.todayDate, tasks: [] },
-    value,
-  );
+  return snapshot.todayDate === toLocalDateKey(value);
 }
 
 export function sortScheduleItems(items: readonly ScheduleItem[]): readonly ScheduleItem[] {
@@ -61,5 +58,23 @@ export function defaultScheduleRange(value: Date): {
     expectedDate: toLocalDateKey(value),
     startMinute,
     endMinute: Math.min(startMinute + 30, 1_440),
+  };
+}
+
+export function defaultScheduleRangeForPlanningDate(
+  expectedDate: string,
+  todayDate: string,
+  value: Date,
+): {
+  readonly expectedDate: string;
+  readonly startMinute: number;
+  readonly endMinute: number;
+} {
+  const todayRange = defaultScheduleRange(value);
+  if (expectedDate === todayDate) return todayRange;
+  return {
+    expectedDate,
+    startMinute: 9 * 60,
+    endMinute: 9 * 60 + 30,
   };
 }

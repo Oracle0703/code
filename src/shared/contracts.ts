@@ -518,7 +518,24 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'completed'] as const;
 
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-export const TASK_PLANNING = ['today', 'none'] as const;
+export const PLANNING_DAY_TOKENS = [
+  'day-0',
+  'day-1',
+  'day-2',
+  'day-3',
+  'day-4',
+  'day-5',
+  'day-6',
+] as const;
+
+export type PlanningDayToken = (typeof PLANNING_DAY_TOKENS)[number];
+
+export interface PlanningDay {
+  readonly token: PlanningDayToken;
+  readonly date: string;
+}
+
+export const TASK_PLANNING = [...PLANNING_DAY_TOKENS, 'none'] as const;
 
 export type TaskPlanning = (typeof TASK_PLANNING)[number];
 
@@ -536,6 +553,7 @@ export interface Task {
 export interface TaskSnapshot {
   readonly workspaceId: string;
   readonly todayDate: string;
+  readonly planningDays: readonly PlanningDay[];
   readonly tasks: readonly Task[];
 }
 
@@ -638,6 +656,7 @@ export interface ScheduleItem {
 export interface ScheduleSnapshot {
   readonly workspaceId: string;
   readonly todayDate: string;
+  readonly planningDays: readonly PlanningDay[];
   readonly items: readonly ScheduleItem[];
 }
 

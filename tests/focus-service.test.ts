@@ -50,7 +50,7 @@ describe('focus service', () => {
     await service.createTask({
       workspaceId: WORKSPACE_A,
       title: '完成今日重点',
-      planning: 'today',
+      planning: 'day-0',
     });
     await service.createWorkspace({ name: '空间 B', color: WORKSPACE_COLORS[1] });
 
@@ -150,7 +150,16 @@ describe('focus service', () => {
     await service.updateTaskPlanning({
       workspaceId: WORKSPACE_A,
       taskId: TASK_A,
-      planning: 'today',
+      planning: 'day-1',
+    });
+    await expect(
+      service.startFocusSession({ workspaceId: WORKSPACE_A, taskId: TASK_A }),
+    ).rejects.toBeInstanceOf(FocusConflictError);
+
+    await service.updateTaskPlanning({
+      workspaceId: WORKSPACE_A,
+      taskId: TASK_A,
+      planning: 'day-0',
     });
     await service.updateTaskStatus({
       workspaceId: WORKSPACE_A,

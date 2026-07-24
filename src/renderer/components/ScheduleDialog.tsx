@@ -111,7 +111,9 @@ export function ScheduleDialog({
   const archive = async () => {
     if (state.mode !== 'edit' || busy) return;
     if (
-      !window.confirm(`归档今天的日程“${state.item.title}”？它会从今天隐藏，但仍保留在本地备份中。`)
+      !window.confirm(
+        `归档 ${formatCivilDate(state.expectedDate)} 的日程“${state.item.title}”？它会从计划中隐藏，但仍保留在本地备份中。`,
+      )
     ) {
       return;
     }
@@ -151,9 +153,7 @@ export function ScheduleDialog({
             )}
           </span>
           <div>
-            <h2 id="schedule-dialog-title">
-              {state.mode === 'create' ? '添加今日日程' : '编辑日程'}
-            </h2>
+            <h2 id="schedule-dialog-title">{state.mode === 'create' ? '添加日程' : '编辑日程'}</h2>
             <p id="schedule-dialog-description">
               {formatCivilDate(state.expectedDate)} · <strong>{state.workspaceName}</strong>
             </p>

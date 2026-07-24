@@ -17,10 +17,13 @@ import {
   DEFAULT_WORKSPACE_PREFERENCES,
   type AssistantCredentialStatus,
 } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
 const OTHER_WORKSPACE_ID = '22222222-2222-4222-8222-222222222222';
 const API_KEY = `sk-proj-${'a'.repeat(48)}`;
+const TODAY = '2026-07-23';
+const PLANNING_DAYS = createRollingPlanningDays(TODAY);
 
 afterEach(() => {
   vi.useRealTimers();
@@ -441,13 +444,15 @@ function createContextBuilder(): AssistantContextBuilder {
     })),
     getTaskSnapshot: vi.fn(async () => ({
       workspaceId: WORKSPACE_ID,
-      todayDate: '2026-07-23',
+      todayDate: TODAY,
+      planningDays: PLANNING_DAYS,
       tasks: [],
     })),
     getNoteSnapshot: vi.fn(async () => ({ workspaceId: WORKSPACE_ID, notes: [] })),
     getScheduleSnapshot: vi.fn(async () => ({
       workspaceId: WORKSPACE_ID,
-      todayDate: '2026-07-23',
+      todayDate: TODAY,
+      planningDays: PLANNING_DAYS,
       items: [],
     })),
   });
