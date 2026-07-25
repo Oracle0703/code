@@ -63,6 +63,7 @@ import { AutomationPage } from './components/AutomationPage';
 import { BrowserPanel } from './components/BrowserPanel';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { DataImportDialog } from './components/DataImportDialog';
+import { FocusSessionDialog } from './components/FocusSessionDialog';
 import { IconButton } from './components/IconButton';
 import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
@@ -96,6 +97,15 @@ import {
 } from './search-navigation';
 import { EMPTY_ASSISTANT_CONTEXT, assistantEntryContextForWorkspace } from './assistant-state';
 import {
+  createFocusWorkspaceIdentity,
+  focusStartUnavailableReason,
+  focusTaskOptionsUnavailableReason,
+  isFocusDialogActivationCurrent,
+  isTaskEligibleForFocus,
+  taskFocusStartUnavailableReason,
+  type FocusWorkspaceIdentity,
+} from './focus-state';
+import {
   evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
   synchronizeDirtyDraft,
@@ -126,6 +136,15 @@ function isTerminalTarget(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('.xterm') !== null;
 }
 
+interface FocusDialogState {
+  readonly id: number;
+  readonly activation: FocusWorkspaceIdentity;
+  readonly initialTask: {
+    readonly id: string;
+    readonly title: string;
+  } | null;
+}
+
 export function App() {
   const workspaceController = useWorkspaceController();
   const {
@@ -147,7 +166,8 @@ export function App() {
   const [taskDialog, setTaskDialog] = useState<TaskDialogState | null>(null);
   const [scheduleDialog, setScheduleDialog] = useState<ScheduleDialogState | null>(null);
   const [automationDialog, setAutomationDialog] = useState<AutomationDialogState | null>(null);
-  const [focusDialogOpen, setFocusDialogOpen] = useState(false);
+  const [focusDialog, setFocusDialog] = useState<FocusDialogState | null>(null);
+  const [focusSuccessSequence, setFocusSuccessSequence] = useState(0);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [assistantSurfaceOpen, setAssistantSurfaceOpen] = useState(false);
@@ -169,12 +189,17 @@ export function App() {
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
   const activeResizeFinishRef = useRef<(() => void) | null>(null);
+  const focusDialogSequenceRef = useRef(0);
   const currentWorkspaceIdRef = useRef<string | null>(null);
   const noteDraftDirtyRef = useRef(false);
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
   const snapshot = workspaceController.snapshot;
   const archiveManager = workspaceController.archiveManager;
+  const focusActivation = useMemo(
+    () => createFocusWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -211,6 +236,40 @@ export function App() {
     workspaceId: snapshot?.currentWorkspaceId ?? null,
   });
   const activeWorkspace = snapshot ? findCurrentWorkspace(snapshot) : null;
+  const focusStartBlockReason = focusStartUnavailableReason(
+    snapshot?.currentWorkspaceId ?? null,
+    focusController.snapshot,
+    focusController.status,
+    focusController.operation,
+  );
+  const taskFocusStartBlockReason = taskFocusStartUnavailableReason(
+    snapshot?.currentWorkspaceId ?? null,
+    taskController.snapshot,
+    focusController.snapshot,
+    taskController.status,
+    focusController.status,
+    focusController.operation,
+  );
+  const focusTaskOptionsBlockReason = focusTaskOptionsUnavailableReason(
+    snapshot?.currentWorkspaceId ?? null,
+    taskController.snapshot,
+    focusController.snapshot,
+    taskController.status,
+  );
+  const focusDialogTasks = useMemo(() => {
+    const taskSnapshot = taskController.snapshot;
+    const focusSnapshot = focusController.snapshot;
+    if (
+      taskController.status !== 'ready' ||
+      taskSnapshot === null ||
+      focusSnapshot === null ||
+      taskSnapshot.workspaceId !== focusSnapshot.workspaceId ||
+      taskSnapshot.todayDate !== focusSnapshot.todayDate
+    ) {
+      return [];
+    }
+    return taskSnapshot.tasks.filter((task) => isTaskEligibleForFocus(task, taskSnapshot));
+  }, [focusController.snapshot, taskController.snapshot, taskController.status]);
   const assistantInitialContext = assistantEntryContextForWorkspace(
     snapshot?.currentWorkspaceId ?? null,
     assistantEntry.workspaceId,
@@ -236,6 +295,13 @@ export function App() {
     theme,
   } = preferences;
   const activeSurface: AppSurfaceId = assistantSurfaceOpen ? 'assistant' : activeView;
+  const focusDialogOpen =
+    focusDialog !== null &&
+    isFocusDialogActivationCurrent(
+      focusDialog.activation,
+      focusActivation,
+      snapshot?.currentWorkspaceId ?? null,
+    );
   const overlayOpen =
     paletteOpen ||
     archiveManager.open ||
@@ -530,6 +596,62 @@ export function App() {
       quickCaptureTarget,
       scheduleDialog,
       taskDialog,
+      workspaceController.pendingOperation,
+      workspaceDialog,
+    ],
+  );
+
+  const openFocusDialog = useCallback(
+    (taskId?: string) => {
+      if (
+        !activeWorkspace ||
+        archiveManager.open ||
+        workspaceDialog !== null ||
+        quickCaptureTarget !== null ||
+        taskDialog !== null ||
+        scheduleDialog !== null ||
+        automationDialog !== null ||
+        focusDialogOpen ||
+        dataState.importPreview !== null ||
+        workspaceController.pendingOperation !== null ||
+        focusStartBlockReason !== null
+      ) {
+        return;
+      }
+
+      let initialTask: FocusDialogState['initialTask'] = null;
+      if (taskId !== undefined) {
+        const task = taskController.snapshot?.tasks.find(({ id }) => id === taskId);
+        if (
+          taskFocusStartBlockReason !== null ||
+          !task ||
+          !isTaskEligibleForFocus(task, taskController.snapshot)
+        ) {
+          return;
+        }
+        initialTask = { id: task.id, title: task.title };
+      }
+
+      setPaletteOpen(false);
+      setFocusDialog({
+        id: ++focusDialogSequenceRef.current,
+        activation: focusActivation,
+        initialTask,
+      });
+    },
+    [
+      activeWorkspace,
+      archiveManager.open,
+      automationDialog,
+      dataState.importPreview,
+      focusActivation,
+      focusDialogOpen,
+      focusStartBlockReason,
+      quickCaptureTarget,
+      scheduleDialog,
+      taskController.snapshot,
+      taskDialog,
+      taskFocusStartBlockReason,
       workspaceController.pendingOperation,
       workspaceDialog,
     ],
@@ -1385,6 +1507,8 @@ export function App() {
                     focusError={focusController.error}
                     focusOperation={focusController.operation}
                     focusRemainingSeconds={focusController.remainingSeconds}
+                    focusSuccessSequence={focusSuccessSequence}
+                    taskFocusStartUnavailableReason={taskFocusStartBlockReason}
                     onOpenInbox={() => requestActiveView('inbox')}
                     onOpenTasks={() => requestActiveView('tasks')}
                     onRetryTasks={taskController.retry}
@@ -1411,12 +1535,11 @@ export function App() {
                       })
                     }
                     onRetryFocus={focusController.retry}
-                    onStartFocus={focusController.start}
+                    onOpenFocus={openFocusDialog}
                     onPauseFocus={focusController.pause}
                     onResumeFocus={focusController.resume}
                     onCancelFocus={focusController.cancel}
                     onSwitchFocusWorkspace={requestWorkspaceActivation}
-                    onFocusDialogOpenChange={setFocusDialogOpen}
                     onOpenAssistant={() => openAssistant({ kind: 'today' })}
                   />
                 ) : activeSurface === 'inbox' ? (
@@ -1486,6 +1609,9 @@ export function App() {
                     }
                     onUpdateStatus={taskController.updateStatus}
                     onUpdatePlanning={taskController.updatePlanning}
+                    taskFocusStartUnavailableReason={taskFocusStartBlockReason}
+                    onOpenFocus={openFocusDialog}
+                    onOpenFocusStatus={() => requestActiveView('today')}
                     assistantTaskLimit={ASSISTANT_SELECTED_TASK_MAX_COUNT}
                     onOpenAssistant={(tasks) =>
                       openAssistant({
@@ -1871,6 +1997,51 @@ export function App() {
               throw new Error('工作区已经切换，请重新打开自动化窗口。');
             }
             await automationController.archive(item);
+          }}
+        />
+      ) : null}
+      {focusDialogOpen && focusDialog ? (
+        <FocusSessionDialog
+          key={focusDialog.id}
+          tasks={focusDialogTasks}
+          initialTask={focusDialog.initialTask ?? undefined}
+          startBlockedReason={focusStartBlockReason}
+          taskOptionsUnavailableReason={focusTaskOptionsBlockReason}
+          onClose={() =>
+            setFocusDialog((current) => (current?.id === focusDialog.id ? null : current))
+          }
+          onStart={async (taskId) => {
+            if (
+              !isFocusDialogActivationCurrent(
+                focusDialog.activation,
+                focusActivation,
+                snapshot.currentWorkspaceId,
+              )
+            ) {
+              throw new Error('工作区已经切换，请重新打开专注窗口。');
+            }
+            if (focusStartBlockReason !== null) {
+              throw new Error(focusStartBlockReason);
+            }
+            if (taskId !== undefined && !focusDialogTasks.some(({ id }) => id === taskId)) {
+              throw new Error(
+                '所选任务已完成、改期或不再可用。请选择另一项今日任务，或显式选择自由专注（不关联任务）。',
+              );
+            }
+            await focusController.start(taskId);
+          }}
+          onStarted={() => {
+            if (
+              !isFocusDialogActivationCurrent(
+                focusDialog.activation,
+                focusActivation,
+                snapshot.currentWorkspaceId,
+              )
+            ) {
+              return;
+            }
+            requestActiveView('today');
+            setFocusSuccessSequence((current) => current + 1);
           }}
         />
       ) : null}

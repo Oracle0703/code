@@ -18,7 +18,7 @@ import {
   Target,
   XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type {
   FocusSnapshot,
   PlanningDayToken,
@@ -33,7 +33,6 @@ import { INBOX_CONTENT_MAX_LENGTH } from '../../shared/inbox-domain';
 import { describeFocusTimer, FOCUS_DURATION_SECONDS, formatFocusTimer } from '../focus-state';
 import { formatScheduleInputMinute } from '../schedule-state';
 import { toLocalDateKey } from '../task-state';
-import { FocusSessionDialog } from './FocusSessionDialog';
 import { RollingPlan } from './RollingPlan';
 
 export interface TodayDashboardProps {
@@ -59,6 +58,8 @@ export interface TodayDashboardProps {
   focusError: string | null;
   focusOperation: 'start' | 'pause' | 'resume' | 'cancel' | null;
   focusRemainingSeconds: number;
+  focusSuccessSequence: number;
+  taskFocusStartUnavailableReason: string | null;
   onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
   onOpenTasks: () => void;
@@ -72,12 +73,11 @@ export interface TodayDashboardProps {
   onOpenSchedule: (item: ScheduleItem) => void;
   onOpenAssistant: () => void;
   onRetryFocus: () => void;
-  onStartFocus: (taskId?: string) => Promise<void>;
+  onOpenFocus: (taskId?: string) => void;
   onPauseFocus: () => Promise<void>;
   onResumeFocus: () => Promise<void>;
   onCancelFocus: () => Promise<void>;
   onSwitchFocusWorkspace: (workspaceId: string) => void;
-  onFocusDialogOpenChange: (open: boolean) => void;
 }
 
 export function TodayDashboard({
@@ -103,6 +103,8 @@ export function TodayDashboard({
   focusError,
   focusOperation,
   focusRemainingSeconds,
+  focusSuccessSequence,
+  taskFocusStartUnavailableReason,
   onCapture,
   onOpenInbox,
   onOpenTasks,
@@ -116,17 +118,16 @@ export function TodayDashboard({
   onOpenSchedule,
   onOpenAssistant,
   onRetryFocus,
-  onStartFocus,
+  onOpenFocus,
   onPauseFocus,
   onResumeFocus,
   onCancelFocus,
   onSwitchFocusWorkspace,
-  onFocusDialogOpenChange,
 }: TodayDashboardProps) {
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
-  const [focusDialogOpen, setFocusDialogOpen] = useState(false);
+  const focusCardRef = useRef<HTMLElement>(null);
   const captureLength = Array.from(capture.trim()).length;
   const captureTooLong = captureLength > INBOX_CONTENT_MAX_LENGTH;
   const todayDate =
@@ -163,22 +164,13 @@ export function TodayDashboard({
   const displayedFocusSeconds = focusReady ? focusRemainingSeconds : FOCUS_DURATION_SECONDS;
   const focusAnnouncement = focusStatusMessage(focusSnapshot, focusStatus, focusRemainingSeconds);
 
-  useEffect(
-    () => () => {
-      onFocusDialogOpenChange(false);
-    },
-    [onFocusDialogOpenChange],
-  );
-
-  const openFocusDialog = () => {
-    onFocusDialogOpenChange(true);
-    setFocusDialogOpen(true);
-  };
-
-  const closeFocusDialog = () => {
-    onFocusDialogOpenChange(false);
-    setFocusDialogOpen(false);
-  };
+  useEffect(() => {
+    if (focusSuccessSequence === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      focusCardRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusSuccessSequence]);
 
   const addCapture = async (event: FormEvent) => {
     event.preventDefault();
@@ -368,6 +360,14 @@ export function TodayDashboard({
               {todayTasks.slice(0, 6).map((task) => {
                 const pending = pendingTaskIds.has(task.id);
                 const completed = task.status === 'completed';
+                const focusUnavailableReason = pending
+                  ? '任务正在更新，请稍候。'
+                  : taskFocusStartUnavailableReason;
+                const focusDescriptionId = pending
+                  ? `today-task-focus-pending-${task.id}`
+                  : taskFocusStartUnavailableReason
+                    ? 'today-task-focus-unavailable'
+                    : undefined;
                 return (
                   <div className={`task-row ${completed ? 'is-done' : ''}`} key={task.id}>
                     <button
@@ -402,6 +402,26 @@ export function TodayDashboard({
                         {task.sourceInboxEntryId ? ' · 来自收件箱' : ''}
                       </small>
                     </button>
+                    {!completed ? (
+                      <button
+                        type="button"
+                        className="task-row__focus"
+                        aria-label={`开始专注：${task.title}`}
+                        aria-describedby={focusDescriptionId}
+                        aria-disabled={focusUnavailableReason !== null}
+                        onClick={() => {
+                          if (focusUnavailableReason === null) onOpenFocus(task.id);
+                        }}
+                      >
+                        <Play size={12} fill="currentColor" aria-hidden="true" />
+                        专注
+                      </button>
+                    ) : null}
+                    {!completed && pending ? (
+                      <span className="sr-only" id={`today-task-focus-pending-${task.id}`}>
+                        {focusUnavailableReason}
+                      </span>
+                    ) : null}
                     <time dateTime={task.plannedFor ?? undefined}>
                       <Clock3 size={12} /> 今天
                     </time>
@@ -416,6 +436,15 @@ export function TodayDashboard({
               <span>把一项任务安排到今天，形成清晰的下一步。</span>
             </div>
           )}
+          {unfinishedTodayTasks.length > 0 && taskFocusStartUnavailableReason ? (
+            <p
+              className="today-task-focus-unavailable"
+              id="today-task-focus-unavailable"
+              role="status"
+            >
+              {taskFocusStartUnavailableReason}
+            </p>
+          ) : null}
           <button
             type="button"
             className="add-row"
@@ -433,9 +462,11 @@ export function TodayDashboard({
 
         <div className="dashboard-side-stack">
           <section
+            ref={focusCardRef}
             className={`focus-card${focusSession?.status === 'paused' ? ' is-paused' : ''}`}
             aria-labelledby="focus-session-heading"
             aria-busy={focusStatus === 'loading' || focusBusy}
+            tabIndex={-1}
           >
             <div className="focus-card__topline">
               <span id="focus-session-heading">
@@ -553,7 +584,7 @@ export function TodayDashboard({
                 <div className="focus-card__actions">
                   <button
                     type="button"
-                    onClick={openFocusDialog}
+                    onClick={() => onOpenFocus()}
                     disabled={!focusReady || focusBusy}
                   >
                     <Play size={14} fill="currentColor" aria-hidden="true" />
@@ -682,13 +713,6 @@ export function TodayDashboard({
         onCreateSchedule={onCreateSchedule}
         onOpenSchedule={onOpenSchedule}
       />
-      {focusDialogOpen ? (
-        <FocusSessionDialog
-          tasks={unfinishedTodayTasks}
-          onClose={closeFocusDialog}
-          onStart={onStartFocus}
-        />
-      ) : null}
     </div>
   );
 }

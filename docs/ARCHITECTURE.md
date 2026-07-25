@@ -104,7 +104,8 @@ v7 追加外部内容 FTS5 索引和应用级备份策略/运行状态；v8 追�
 - `running` 使用 Main 按实际 wall clock 写入的绝对 `deadline_at`，并以进程内单调时钟维护不会回增的剩余上限。Controller 最长 60 秒重新评估并把更小的上限 checkpoint 到 SQLite；系统时间回拨不会延长原 deadline，系统恢复和应用重启也会立即对账。审计时间戳保持逻辑单调，因此在回拨后可以晚于独立的倒计时 deadline。
 - 正常退出和数据替换会在关闭数据库前把运行会话暂停。进程异常终止不能依赖退出回调，因此下次启动按持久截止时间完成或恢复倒计时，不使用 Renderer `setInterval` 作为权威状态。
 - 状态机只允许 `running ↔ paused`、`running → completed/cancelled` 和 `paused → cancelled`；内部 checkpoint 只能在 deadline 逐字不变时严格减少 running 的剩余值。终态不可改写也不可永久删除。归档所属工作区会在同一数据库事务中取消未结束会话。
-- 可选任务必须属于同一活动工作区、计划到 Main 当前本地日期且未完成；会话一旦创建，工作区、任务和 `local_date` 都不可改写。Today 的完成轮次按持久 `local_date` 计算。
+- Today 与任务页只为当前 Main 任务快照中计划到今天且未完成的任务提供专注入口；入口只打开同一个固定 25 分钟确认窗口并预选 opaque 任务 ID，不直接写入数据库。预选任务在确认前完成、改期、消失或跨午夜失效时，Renderer 保留原选择身份并阻止提交，不能静默降级为自由专注；用户必须显式改选仍有效的今日任务或自由专注。
+- 可选任务必须属于同一活动工作区、计划到 Main 当前本地日期且未完成；Main 在事务中重新读取任务并拒绝旧窗口或竞态，会话一旦创建，工作区、任务和 `local_date` 都不可改写。Today 的完成轮次按持久 `local_date` 计算。
 - `.dwbx` v3 保留已完成历史；导出时，尚未到期的 running 会话按绝对截止时间降为 paused，已经到期但尚未持久对账的会话只在包中投影为 completed，源库读取保持无副作用。导入只接受 paused/completed，取消记录不进入逻辑包。完整 SQLite 备份则保留所有状态。
 
 ## 工作区 AI 助手

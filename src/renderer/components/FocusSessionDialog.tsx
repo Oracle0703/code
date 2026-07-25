@@ -2,35 +2,62 @@ import { Clock3, Play, Target, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { Task } from '../../shared/contracts';
 import { FOCUS_DURATION_SECONDS } from '../../shared/focus-domain';
-import { formatFocusTimer } from '../focus-state';
+import {
+  submitFocusDialogSelection,
+  unavailableFocusTaskMessage,
+  type FocusDialogSubmissionGate,
+} from '../focus-dialog-submission';
+import { formatFocusTimer, resolveFocusTaskSelection } from '../focus-state';
 
 interface FocusSessionDialogProps {
   readonly tasks: readonly Task[];
+  readonly initialTask?: Pick<Task, 'id' | 'title'>;
+  readonly startBlockedReason: string | null;
+  readonly taskOptionsUnavailableReason: string | null;
   readonly onClose: () => void;
   readonly onStart: (taskId?: string) => Promise<void>;
+  readonly onStarted: () => void;
 }
 
-export function FocusSessionDialog({ tasks, onClose, onStart }: FocusSessionDialogProps) {
+export function FocusSessionDialog({
+  tasks,
+  initialTask,
+  startBlockedReason,
+  taskOptionsUnavailableReason,
+  onClose,
+  onStart,
+  onStarted,
+}: FocusSessionDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const taskSelectRef = useRef<HTMLSelectElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
-  const [taskId, setTaskId] = useState('');
+  const restoreInvokerRef = useRef(true);
+  const submissionGateRef = useRef<FocusDialogSubmissionGate>({
+    mounted: true,
+    submitting: false,
+  });
+  const [taskId, setTaskId] = useState(initialTask?.id ?? '');
+  const [taskLabel, setTaskLabel] = useState(initialTask?.title ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const selectedTask = tasks.find((task) => task.id === taskId) ?? null;
-  const selectedTaskId = selectedTask?.id ?? '';
+  const selection = resolveFocusTaskSelection(tasks, taskId);
+  const selectedTask = selection.task;
+  const visibleBlockedReason = submitting ? null : startBlockedReason;
 
   useEffect(() => {
+    const submissionGate = submissionGateRef.current;
+    submissionGate.mounted = true;
     const dialog = dialogRef.current;
     returnFocusRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (dialog && !dialog.open) dialog.showModal();
     const frame = window.requestAnimationFrame(() => taskSelectRef.current?.focus());
     return () => {
+      submissionGate.mounted = false;
       window.cancelAnimationFrame(frame);
       if (dialog?.open) dialog.close();
       const returnTarget = returnFocusRef.current;
-      if (returnTarget?.isConnected) {
+      if (restoreInvokerRef.current && returnTarget?.isConnected) {
         window.requestAnimationFrame(() => returnTarget.focus());
       }
     };
@@ -38,21 +65,22 @@ export function FocusSessionDialog({ tasks, onClose, onStart }: FocusSessionDial
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (submitting) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await onStart(selectedTaskId || undefined);
-      onClose();
-    } catch (submitError) {
-      setError(
-        submitError instanceof Error && submitError.message.trim()
-          ? submitError.message
-          : '无法开始专注，请重试。',
-      );
-    } finally {
-      setSubmitting(false);
-    }
+    await submitFocusDialogSelection(
+      submissionGateRef.current,
+      selection,
+      startBlockedReason,
+      taskLabel,
+      {
+        onStart,
+        onSubmittingChange: setSubmitting,
+        onError: setError,
+        onSucceeded: () => {
+          restoreInvokerRef.current = false;
+          onClose();
+          onStarted();
+        },
+      },
+    );
   };
 
   return (
@@ -91,11 +119,31 @@ export function FocusSessionDialog({ tasks, onClose, onStart }: FocusSessionDial
             <span>关联今日任务（可选）</span>
             <select
               ref={taskSelectRef}
-              value={selectedTaskId}
-              onChange={(event) => setTaskId(event.target.value)}
+              value={taskId}
+              onChange={(event) => {
+                const nextTaskId = event.target.value;
+                const nextTask = tasks.find(({ id }) => id === nextTaskId);
+                setTaskId(nextTaskId);
+                setTaskLabel(nextTask?.title ?? '');
+                setError(null);
+              }}
               disabled={submitting}
+              aria-invalid={selection.invalid}
+              aria-describedby={
+                selection.invalid
+                  ? 'focus-session-task-error'
+                  : taskOptionsUnavailableReason
+                    ? 'focus-session-task-options-status'
+                    : undefined
+              }
+              aria-errormessage={selection.invalid ? 'focus-session-task-error' : undefined}
             >
-              <option value="">不关联任务</option>
+              <option value="">自由专注（不关联任务）</option>
+              {selection.invalid ? (
+                <option value={taskId} disabled>
+                  不再可用 · {taskLabel || '原任务'}
+                </option>
+              ) : null}
               {tasks.map((task) => (
                 <option value={task.id} key={task.id}>
                   {task.title}
@@ -107,17 +155,37 @@ export function FocusSessionDialog({ tasks, onClose, onStart }: FocusSessionDial
             <Clock3 size={16} aria-hidden="true" />
             <span>
               <strong>{formatFocusTimer(FOCUS_DURATION_SECONDS)}</strong>
-              {selectedTask?.title ?? '自由专注'}
+              {selection.invalid
+                ? `任务不可用 · ${taskLabel || '原任务'}`
+                : (selectedTask?.title ?? '自由专注（不关联任务）')}
             </span>
           </div>
-          {tasks.length === 0 ? (
+          {taskOptionsUnavailableReason ? (
+            <p
+              className="focus-session-dialog__hint"
+              id="focus-session-task-options-status"
+              role="status"
+            >
+              {taskOptionsUnavailableReason}仍可开始自由专注（不关联任务）。
+            </p>
+          ) : tasks.length === 0 ? (
             <p className="focus-session-dialog__hint">
-              今天没有未完成任务，仍可开始一轮不关联任务的专注。
+              今天没有未完成任务，仍可开始自由专注（不关联任务）。
+            </p>
+          ) : null}
+          {selection.invalid ? (
+            <p className="focus-session-dialog__error" id="focus-session-task-error" role="alert">
+              {unavailableFocusTaskMessage(taskLabel)}
+            </p>
+          ) : null}
+          {visibleBlockedReason ? (
+            <p className="focus-session-dialog__error" role="alert">
+              {visibleBlockedReason}
             </p>
           ) : null}
         </div>
 
-        {error ? (
+        {error && !selection.invalid && visibleBlockedReason === null ? (
           <p className="focus-session-dialog__error" role="alert">
             {error}
           </p>
@@ -127,7 +195,11 @@ export function FocusSessionDialog({ tasks, onClose, onStart }: FocusSessionDial
           <button type="button" onClick={onClose} disabled={submitting}>
             取消
           </button>
-          <button type="submit" className="focus-session-dialog__primary" disabled={submitting}>
+          <button
+            type="submit"
+            className="focus-session-dialog__primary"
+            disabled={submitting || selection.invalid || visibleBlockedReason !== null}
+          >
             <Play size={14} fill="currentColor" aria-hidden="true" />
             {submitting ? '正在开始…' : '开始专注'}
           </button>
