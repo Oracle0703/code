@@ -31,8 +31,8 @@ interface TaskPageProps {
   onRetry: () => void;
   onOpenCreate: () => void;
   onOpenRename: (task: Task) => void;
-  onUpdateStatus: (taskId: string, status: TaskStatus) => Promise<void>;
-  onUpdatePlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
+  onUpdateStatus: (taskId: string, status: TaskStatus) => Promise<boolean | void>;
+  onUpdatePlanning: (taskId: string, planning: TaskPlanning) => Promise<boolean | void>;
   taskFocusStartUnavailableReason: string | null;
   onOpenFocus: (taskId: string) => void;
   onOpenFocusStatus: () => void;

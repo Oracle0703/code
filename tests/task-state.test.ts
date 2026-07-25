@@ -3,12 +3,17 @@ import type { Task, TaskSnapshot } from '../src/shared/contracts';
 import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   countTasks,
+  createTaskRequestIdentity,
+  createTaskWorkspaceIdentity,
   filterTasks,
   isTaskRequestLatest,
+  isTaskRequestCurrent,
   isTaskSequenceCurrent,
   isTaskSnapshotDateCurrent,
   isTaskWorkspaceCurrent,
   millisecondsUntilNextLocalDay,
+  shouldApplyTaskSnapshot,
+  taskSnapshotForActivation,
   toLocalDateKey,
 } from '../src/renderer/task-state';
 
@@ -25,6 +30,59 @@ const tasks: readonly Task[] = [
 ];
 
 describe('task renderer state', () => {
+  it('uses activation identity to reject an old A request after A to B to A', () => {
+    const firstA = createTaskWorkspaceIdentity(WORKSPACE_A);
+    const oldRequest = createTaskRequestIdentity(firstA, 1);
+    expect(oldRequest).not.toBeNull();
+    if (!oldRequest) return;
+
+    const identityB = createTaskWorkspaceIdentity(WORKSPACE_B);
+    const currentA = createTaskWorkspaceIdentity(WORKSPACE_A);
+    const currentRequest = createTaskRequestIdentity(currentA, 2);
+    expect(currentRequest).not.toBeNull();
+    if (!currentRequest) return;
+
+    expect(identityB.workspaceId).toBe(WORKSPACE_B);
+    expect(currentA).not.toBe(firstA);
+    expect(isTaskRequestCurrent(currentA, oldRequest)).toBe(false);
+    expect(isTaskRequestCurrent(currentA, currentRequest)).toBe(true);
+    expect(
+      shouldApplyTaskSnapshot(currentA, -1, oldRequest, snapshot(), new Date(2026, 6, 22, 12)),
+    ).toBe(false);
+    expect(
+      shouldApplyTaskSnapshot(currentA, -1, currentRequest, snapshot(), new Date(2026, 6, 22, 12)),
+    ).toBe(true);
+  });
+
+  it('binds a stored snapshot to one activation and keeps request validation exact', () => {
+    const firstA = createTaskWorkspaceIdentity(WORKSPACE_A);
+    const currentA = createTaskWorkspaceIdentity(WORKSPACE_A);
+    const request = createTaskRequestIdentity(currentA, 7)!;
+    const stored = { activation: firstA, snapshot: snapshot() };
+    const now = new Date(2026, 6, 22, 12);
+
+    expect(taskSnapshotForActivation(firstA, stored, now)).toBe(stored.snapshot);
+    expect(taskSnapshotForActivation(currentA, stored, now)).toBeNull();
+    expect(shouldApplyTaskSnapshot(currentA, 7, request, snapshot(), now)).toBe(false);
+    expect(
+      shouldApplyTaskSnapshot(currentA, -1, request, snapshot({ workspaceId: WORKSPACE_B }), now),
+    ).toBe(false);
+    expect(
+      shouldApplyTaskSnapshot(
+        currentA,
+        -1,
+        request,
+        snapshot({
+          todayDate: '2026-07-21',
+          planningDays: createRollingPlanningDays('2026-07-21'),
+        }),
+        now,
+      ),
+    ).toBe(false);
+    expect(createTaskRequestIdentity(createTaskWorkspaceIdentity(null), 8)).toBeNull();
+    expect(createTaskRequestIdentity(currentA, -1)).toBeNull();
+  });
+
   it('applies successful snapshots monotonically while failures must be latest', () => {
     expect(isTaskSequenceCurrent(4, 5)).toBe(false);
     expect(isTaskSequenceCurrent(5, 5)).toBe(true);
@@ -112,5 +170,15 @@ function task(id: string, title: string, status: Task['status'], plannedFor: str
     createdAt: '2026-07-22T12:00:00.000Z',
     updatedAt: '2026-07-22T12:00:00.000Z',
     completedAt: status === 'completed' ? '2026-07-22T12:00:00.000Z' : null,
+  };
+}
+
+function snapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
+  return {
+    workspaceId: WORKSPACE_A,
+    todayDate: TODAY,
+    planningDays: PLANNING_DAYS,
+    tasks: [],
+    ...overrides,
   };
 }

@@ -6,7 +6,7 @@ import {
   LoaderCircle,
   Plus,
 } from 'lucide-react';
-import { useMemo, useState, type KeyboardEvent } from 'react';
+import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type {
   PlanningDayToken,
   ScheduleItem,
@@ -18,6 +18,9 @@ import type {
 } from '../../shared/contracts';
 import { planningDayLabel, planningSnapshotsMatch, planningTokenAt } from '../planning-state';
 import { formatScheduleInputMinute, sortScheduleItems } from '../schedule-state';
+import { OverdueTaskReview } from './OverdueTaskReview';
+
+type TaskMutationResult = boolean | void;
 
 interface RollingPlanProps {
   taskSnapshot: TaskSnapshot | null;
@@ -34,8 +37,8 @@ interface RollingPlanProps {
   onRetrySchedule: () => void;
   onCreateTask: (planning: PlanningDayToken) => void;
   onOpenTask: (task: Task) => void;
-  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<void>;
-  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
+  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<TaskMutationResult>;
+  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<TaskMutationResult>;
   onCreateSchedule: (expectedDate: string) => void;
   onOpenSchedule: (item: ScheduleItem) => void;
 }
@@ -60,6 +63,7 @@ export function RollingPlan({
   onCreateSchedule,
   onOpenSchedule,
 }: RollingPlanProps) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const snapshotsMatch = planningSnapshotsMatch(taskSnapshot, scheduleSnapshot);
   const planningIdentity = snapshotsMatch
     ? `${taskSnapshot!.workspaceId}:${taskSnapshot!.todayDate}`
@@ -134,7 +138,9 @@ export function RollingPlan({
           <span>
             <CalendarDays size={14} aria-hidden="true" /> 接下来 7 天
           </span>
-          <h2 id="rolling-plan-heading">滚动计划</h2>
+          <h2 ref={headingRef} id="rolling-plan-heading" tabIndex={-1}>
+            滚动计划
+          </h2>
           <p>任务与日程共用同一日期窗口；每天午夜由本机重新对账。</p>
         </div>
         {selectedDay ? (
@@ -166,6 +172,20 @@ export function RollingPlan({
           </div>
         ) : null}
       </header>
+
+      <OverdueTaskReview
+        key={
+          taskSnapshot
+            ? `${taskSnapshot.workspaceId}:${taskSnapshot.todayDate}`
+            : 'no-task-snapshot'
+        }
+        snapshot={taskSnapshot}
+        pendingTaskIds={pendingTaskIds}
+        fallbackFocusRef={headingRef}
+        onOpenTask={onOpenTask}
+        onUpdateTaskStatus={onUpdateTaskStatus}
+        onUpdateTaskPlanning={onUpdateTaskPlanning}
+      />
 
       {snapshotsMatch ? (
         <>
@@ -268,8 +288,8 @@ function PlanningTaskList({
   planningDays: TaskSnapshot['planningDays'];
   pendingTaskIds: ReadonlySet<string>;
   onOpenTask: (task: Task) => void;
-  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<void>;
-  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
+  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<TaskMutationResult>;
+  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<TaskMutationResult>;
 }) {
   return (
     <section className="rolling-plan__column" aria-labelledby="rolling-plan-tasks-heading">

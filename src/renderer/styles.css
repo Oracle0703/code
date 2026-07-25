@@ -7995,6 +7995,163 @@ textarea:focus-visible,
   opacity: 0.55;
 }
 
+.overdue-task-review {
+  padding: 11px 14px 13px;
+  border-top: 1px solid color-mix(in srgb, var(--warning) 28%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 5%, var(--bg-input));
+}
+
+.overdue-task-review__header {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.overdue-task-review__icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 11%, transparent);
+}
+
+.overdue-task-review__header h3 {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.overdue-task-review__header p {
+  margin: 2px 0 0;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+}
+
+.overdue-task-review__expand {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 7px;
+  gap: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  font-size: 8.5px;
+}
+
+.overdue-task-review__expand:hover {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border-default));
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--warning) 7%, var(--bg-card));
+}
+
+.overdue-task-review ul {
+  padding: 0;
+  margin: 9px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-card);
+  list-style: none;
+}
+
+.overdue-task-review li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(128px, auto) 64px;
+  min-height: 46px;
+  align-items: center;
+  padding: 6px 7px;
+  gap: 7px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.overdue-task-review li:last-child {
+  border-bottom: 0;
+}
+
+.overdue-task-review li:hover {
+  background: var(--bg-card-hover);
+}
+
+.overdue-task-review li:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: var(--focus-ring);
+}
+
+.overdue-task-review__complete {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--text-tertiary);
+  background: transparent;
+}
+
+.overdue-task-review__complete:hover:not(:disabled) {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+}
+
+.overdue-task-review__title {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 3px;
+  gap: 1px;
+  overflow: hidden;
+  border-radius: 5px;
+  color: var(--text-primary);
+  background: transparent;
+  text-align: left;
+}
+
+.overdue-task-review__title strong {
+  width: 100%;
+  overflow: hidden;
+  font-size: 9.5px;
+  font-weight: 590;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overdue-task-review__title small {
+  color: var(--text-tertiary);
+  font-size: 8px;
+}
+
+.overdue-task-review__planning select {
+  width: 100%;
+  max-width: 142px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--bg-input);
+  font-size: 8.5px;
+}
+
+.overdue-task-review__status {
+  color: var(--warning);
+  font-size: 8px;
+  text-align: right;
+}
+
+.overdue-task-review button:disabled,
+.overdue-task-review select:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .rolling-plan__days {
   display: grid;
   grid-template-columns: repeat(7, minmax(76px, 1fr));
@@ -8365,6 +8522,19 @@ textarea:focus-visible,
   .rolling-plan__header {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .overdue-task-review__header {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+  .overdue-task-review__expand {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .overdue-task-review li {
+    grid-template-columns: 28px minmax(0, 1fr) minmax(120px, auto);
+  }
+  .overdue-task-review__status {
+    display: none;
   }
   .rolling-plan__content {
     grid-template-columns: 1fr;

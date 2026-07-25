@@ -98,6 +98,71 @@ describe('rolling planning renderer components', () => {
     expect(markup).not.toContain('role="tab"');
   });
 
+  it('reviews overdue tasks separately without adding them to Today counts', () => {
+    const overdueTasks = Array.from({ length: 6 }, (_, index) =>
+      taskWithId(
+        `overdue ${index + 1}`,
+        index === 0 ? '2025-12-31' : index < 3 ? '2026-07-21' : '2026-07-22',
+        `overdue-${index + 1}`,
+      ),
+    );
+    const markup = renderToStaticMarkup(
+      createElement(RollingPlan, {
+        taskSnapshot: {
+          workspaceId: WORKSPACE_ID,
+          todayDate: TODAY,
+          planningDays: PLANNING_DAYS,
+          tasks: [...overdueTasks, taskWithId('today task', TODAY, 'today-task')],
+        },
+        scheduleSnapshot: {
+          workspaceId: WORKSPACE_ID,
+          todayDate: TODAY,
+          planningDays: PLANNING_DAYS,
+          items: [],
+        },
+        taskStatus: 'ready',
+        scheduleStatus: 'ready',
+        taskError: null,
+        scheduleError: null,
+        pendingTaskIds: new Set(['overdue-2']),
+        pendingScheduleItemIds: new Set<string>(),
+        taskCreatePending: false,
+        scheduleCreatePending: false,
+        onRetryTasks: () => undefined,
+        onRetrySchedule: () => undefined,
+        onCreateTask: () => undefined,
+        onOpenTask: () => undefined,
+        onUpdateTaskStatus: async () => true,
+        onUpdateTaskPlanning: async () => true,
+        onCreateSchedule: () => undefined,
+        onOpenSchedule: () => undefined,
+      }),
+    );
+    const overdueMarkup =
+      /<section class="overdue-task-review"[\s\S]*?<\/section>/u.exec(markup)?.[0] ?? '';
+
+    expect(markup).toContain('待重新安排');
+    expect(markup).toContain('6 项任务仍保留旧计划');
+    expect(markup).toContain('展开其余 1 项');
+    expect(markup).toContain('overdue 1');
+    expect(markup).toContain('overdue 5');
+    expect(markup).not.toContain('overdue 6');
+    expect(overdueMarkup).toContain('2025年12月31日');
+    expect(markup).toContain('aria-label="今天，7月23日，周四，1 项任务，0 段日程"');
+    expect(markup).toContain('aria-busy="true" data-overdue-task-id="overdue-2"');
+    expect(overdueMarkup).toContain('value="day-0"');
+    expect(overdueMarkup).toContain('value="day-6"');
+    expect(overdueMarkup).toContain('value="none"');
+    expect(overdueMarkup).not.toContain('value="today"');
+    const planningSelects = overdueMarkup.match(/<select[\s\S]*?<\/select>/gu) ?? [];
+    expect(planningSelects).toHaveLength(5);
+    for (const planningSelect of planningSelects) {
+      expect(
+        [...planningSelect.matchAll(/<option value="([^"]*)"/gu)].map((match) => match[1]),
+      ).toEqual(['', 'day-0', 'day-1', 'day-2', 'day-3', 'day-4', 'day-5', 'day-6', 'none']);
+    }
+  });
+
   it('offers only Main-defined planning tokens in the task dialog', () => {
     const markup = renderToStaticMarkup(
       createElement(TaskDialog, {
@@ -136,6 +201,13 @@ function task(title: string, plannedFor: string): Task {
     createdAt: '2026-07-23T08:00:00.000Z',
     updatedAt: '2026-07-23T08:00:00.000Z',
     completedAt: null,
+  };
+}
+
+function taskWithId(title: string, plannedFor: string, id: string): Task {
+  return {
+    ...task(title, plannedFor),
+    id,
   };
 }
 
