@@ -350,6 +350,25 @@ export function App() {
     theme,
   } = preferences;
   const activeSurface: AppSurfaceId = assistantSurfaceOpen ? 'assistant' : activeView;
+  const statusbarErrorSource = workspaceController.operationError
+    ? 'workspace'
+    : inboxController.operationError
+      ? 'inbox'
+      : taskController.operationError
+        ? 'task'
+        : noteController.operationError
+          ? 'note'
+          : scheduleController.operationError
+            ? 'schedule'
+            : automationController.operationError
+              ? 'automation'
+              : assistantController.credentialError || assistantController.runtimeError
+                ? 'assistant'
+                : dataState.feedback?.tone === 'error'
+                  ? 'data'
+                  : null;
+  const statusbarErrorIsMirrored =
+    statusbarErrorSource === 'task' && (activeSurface === 'today' || activeSurface === 'tasks');
   const focusDialogOpen =
     focusDialog !== null &&
     isFocusDialogActivationCurrent(
@@ -2047,17 +2066,7 @@ export function App() {
               <span className="status-dot" />
               <span
                 role={
-                  workspaceController.operationError ||
-                  inboxController.operationError ||
-                  taskController.operationError ||
-                  noteController.operationError ||
-                  scheduleController.operationError ||
-                  automationController.operationError ||
-                  assistantController.credentialError ||
-                  assistantController.runtimeError ||
-                  dataState.feedback?.tone === 'error'
-                    ? 'alert'
-                    : undefined
+                  statusbarErrorSource !== null && !statusbarErrorIsMirrored ? 'alert' : undefined
                 }
               >
                 {workspaceController.operationError ??

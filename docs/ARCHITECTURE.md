@@ -182,7 +182,8 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 - 任务 ID、时间戳、`plannedFor`、`completedAt` 和收件箱来源只由 Main 生成或推进。
 - 状态固定为 `todo`、`in_progress`、`completed`；完成时间必须与状态一致。
 - `plannedFor` 是本地民用 `YYYY-MM-DD` 或 `null`。Today 的今日清单只展示计划到 `todayDate` 的任务；滚动计划与完整任务页使用同一真实快照展示接下来 7 天，窗口外历史日期仍可读取但不能由 Renderer 伪造成新计划。
-- 标题可重命名，任务可在当前 7 日窗口内移动或移出计划。所有 mutation 返回新的完整快照，Renderer 仍按工作区、民用日期和请求序号处理迟到响应。
+- Today 从同一完整快照中独立派生 `plannedFor < todayDate` 的未完成遗留项，按旧计划日期、创建时间与 opaque ID 稳定排序并有界预览。它们不计入今日进度、AI Today 上下文或专注候选，也不会自动顺延；用户只能逐项完成、提交 Main 签发的 `day-0…day-6`，或提交 `none` 移出计划。
+- 标题可重命名，任务可在当前 7 日窗口内移动或移出计划。所有 mutation 返回新的完整快照；Renderer 只有在权威快照实际提交到当前 activation 后才报告成功，并按工作区激活对象、民用日期、请求序号与 task ID 淘汰 A→B→A、跨午夜、重复操作和迟到响应。
 - `sourceInboxEntryId` 为可空且唯一的来源关系。显式转换会原子创建任务并归档来源收件箱条目；迁移到 v4 时不会把旧 `task` 分类自动转换为任务。
 - 归档工作区保留任务和来源关系以进入一致性备份，但 Service 与数据库触发器都拒绝继续修改。
 - Today 中的今日任务、进度、今日日程和 7 日计划都使用真实 SQLite 数据；未来任务不会进入专注任务选择。

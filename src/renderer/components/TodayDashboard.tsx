@@ -72,8 +72,8 @@ export interface TodayDashboardProps {
   onRetryTasks: () => void;
   onCreateTask: (planning: PlanningDayToken) => void;
   onOpenTask: (task: Task) => void;
-  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<void>;
-  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
+  onUpdateTaskStatus: (taskId: string, status: TaskStatus) => Promise<boolean | void>;
+  onUpdateTaskPlanning: (taskId: string, planning: TaskPlanning) => Promise<boolean | void>;
   onRetrySchedule: () => void;
   onCreateSchedule: (expectedDate: string) => void;
   onOpenSchedule: (item: ScheduleItem) => void;

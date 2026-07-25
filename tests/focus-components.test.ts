@@ -435,11 +435,17 @@ describe('focus renderer components', () => {
       title: '尚未安排',
       plannedFor: null,
     };
+    const overdueTask = {
+      ...task(),
+      id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      title: '昨日遗留',
+      plannedFor: '2026-07-22',
+    };
     const taskSnapshot: TaskSnapshot = {
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
       planningDays: PLANNING_DAYS,
-      tasks: [task(), completedToday, futureTask, unplannedTask],
+      tasks: [task(), completedToday, futureTask, unplannedTask, overdueTask],
     };
     const todayMarkup = renderToStaticMarkup(
       createElement(
@@ -475,7 +481,10 @@ describe('focus renderer components', () => {
       expect(markup).not.toContain('aria-label="开始专注：已经完成"');
       expect(markup).not.toContain('aria-label="开始专注：明天处理"');
       expect(markup).not.toContain('aria-label="开始专注：尚未安排"');
+      expect(markup).not.toContain('aria-label="开始专注：昨日遗留"');
     }
+    expect(todayMarkup).toContain(`data-overdue-task-id="${overdueTask.id}"`);
+    expect(todayMarkup).toContain('aria-label="今日已完成 1 项，共 2 项"');
   });
 
   it('keeps blocked direct entries focusable with an explicit reason and recovery path', () => {
@@ -538,6 +547,23 @@ describe('focus renderer components', () => {
     expect(markup).toContain(`aria-describedby="today-task-focus-pending-${TASK_ID}"`);
     expect(markup).toContain('aria-disabled="true"');
     expect(markup).toContain('任务正在更新，请稍候。');
+  });
+
+  it('announces task operation errors once from the active task surface', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          taskOperationError: '任务更新失败，请重试。',
+        }),
+      ),
+    );
+    const appSource = readFileSync(new URL('../src/renderer/App.tsx', import.meta.url), 'utf8');
+
+    expect(markup).toContain('<p class="today-task-error" role="alert">任务更新失败，请重试。</p>');
+    expect(appSource).toContain("statusbarErrorSource === 'task'");
+    expect(appSource).toContain("activeSurface === 'today' || activeSurface === 'tasks'");
+    expect(appSource).toContain('statusbarErrorSource !== null && !statusbarErrorIsMirrored');
   });
 
   it('adapts task actions to the actual page pane width', () => {

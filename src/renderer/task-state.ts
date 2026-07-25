@@ -2,6 +2,48 @@ import type { Task, TaskSnapshot } from '../shared/contracts';
 
 export type TaskFilter = 'open' | 'today' | 'completed' | 'all';
 
+export interface TaskWorkspaceIdentity {
+  readonly workspaceId: string | null;
+}
+
+export interface TaskRequestIdentity {
+  readonly workspace: TaskWorkspaceIdentity;
+  readonly workspaceId: string;
+  readonly sequence: number;
+}
+
+export interface TaskSnapshotState {
+  readonly activation: TaskWorkspaceIdentity;
+  readonly snapshot: TaskSnapshot;
+}
+
+export function createTaskWorkspaceIdentity(workspaceId: string | null): TaskWorkspaceIdentity {
+  return { workspaceId };
+}
+
+export function createTaskRequestIdentity(
+  workspace: TaskWorkspaceIdentity,
+  sequence: number,
+): TaskRequestIdentity | null {
+  if (workspace.workspaceId === null || !Number.isSafeInteger(sequence) || sequence < 0) {
+    return null;
+  }
+  return {
+    workspace,
+    workspaceId: workspace.workspaceId,
+    sequence,
+  };
+}
+
+export function isTaskRequestCurrent(
+  currentWorkspace: TaskWorkspaceIdentity,
+  request: TaskRequestIdentity,
+): boolean {
+  return (
+    currentWorkspace === request.workspace && currentWorkspace.workspaceId === request.workspaceId
+  );
+}
+
 export function isTaskSequenceCurrent(sequence: number, lastAppliedSequence: number): boolean {
   return Number.isSafeInteger(sequence) && sequence >= 0 && sequence >= lastAppliedSequence;
 }
@@ -33,6 +75,34 @@ export function millisecondsUntilNextLocalDay(value: Date): number {
 
 export function isTaskSnapshotDateCurrent(snapshot: TaskSnapshot, value: Date): boolean {
   return snapshot.todayDate === toLocalDateKey(value);
+}
+
+export function shouldApplyTaskSnapshot(
+  currentWorkspace: TaskWorkspaceIdentity,
+  lastAppliedSequence: number,
+  request: TaskRequestIdentity,
+  snapshot: TaskSnapshot,
+  value: Date,
+): boolean {
+  return (
+    isTaskRequestCurrent(currentWorkspace, request) &&
+    snapshot.workspaceId === request.workspaceId &&
+    request.sequence > lastAppliedSequence &&
+    isTaskSnapshotDateCurrent(snapshot, value)
+  );
+}
+
+export function taskSnapshotForActivation(
+  currentWorkspace: TaskWorkspaceIdentity,
+  state: TaskSnapshotState | null,
+  value: Date,
+): TaskSnapshot | null {
+  return state !== null &&
+    state.activation === currentWorkspace &&
+    state.snapshot.workspaceId === currentWorkspace.workspaceId &&
+    isTaskSnapshotDateCurrent(state.snapshot, value)
+    ? state.snapshot
+    : null;
 }
 
 export function countTasks(tasks: readonly Task[], todayDate: string) {

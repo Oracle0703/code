@@ -1,138 +1,210 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Task, TaskPlanning, TaskSnapshot, TaskStatus } from '../../shared/contracts';
 import {
   countTasks,
+  createTaskRequestIdentity,
+  createTaskWorkspaceIdentity,
   isTaskRequestLatest,
-  isTaskSequenceCurrent,
+  isTaskRequestCurrent,
   isTaskSnapshotDateCurrent,
-  isTaskWorkspaceCurrent,
   millisecondsUntilNextLocalDay,
+  shouldApplyTaskSnapshot,
+  taskSnapshotForActivation,
+  type TaskRequestIdentity,
+  type TaskSnapshotState,
+  type TaskWorkspaceIdentity,
 } from '../task-state';
 
 type TaskControllerStatus = 'loading' | 'ready' | 'error';
+
+interface TaskLoadState {
+  readonly activation: TaskWorkspaceIdentity;
+  readonly status: TaskControllerStatus;
+  readonly error: string | null;
+}
+
+interface TaskOperationError {
+  readonly activation: TaskWorkspaceIdentity;
+  readonly message: string;
+}
+
 const EMPTY_TASKS: readonly Task[] = Object.freeze([]);
+const INACTIVE_ACTIVATION = Object.freeze(createTaskWorkspaceIdentity(null));
 
 export function useTaskController(workspaceId: string | null) {
-  const [storedSnapshot, setStoredSnapshot] = useState<TaskSnapshot | null>(null);
-  const [status, setStatus] = useState<TaskControllerStatus>('loading');
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [operationErrorState, setOperationErrorState] = useState<{
-    readonly workspaceId: string;
-    readonly message: string;
-  } | null>(null);
-  const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [pendingConversionEntryIds, setPendingConversionEntryIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const [pendingCreateWorkspaces, setPendingCreateWorkspaces] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const activeWorkspaceRef = useRef(workspaceId);
-  const storedSnapshotRef = useRef<TaskSnapshot | null>(null);
+  const activation = useMemo(() => createTaskWorkspaceIdentity(workspaceId), [workspaceId]);
+  const activeActivationRef = useRef<TaskWorkspaceIdentity>(activation);
+  const [storedSnapshot, setStoredSnapshot] = useState<TaskSnapshotState | null>(null);
+  const storedSnapshotRef = useRef<TaskSnapshotState | null>(null);
+  const [loadState, setLoadState] = useState<TaskLoadState>({
+    activation,
+    status: 'loading',
+    error: null,
+  });
+  const [operationErrorState, setOperationErrorState] = useState<TaskOperationError | null>(null);
+  const [pendingTaskOperations, setPendingTaskOperations] = useState<
+    ReadonlyMap<string, TaskWorkspaceIdentity>
+  >(() => new Map());
+  const [pendingConversionOperations, setPendingConversionOperations] = useState<
+    ReadonlyMap<string, TaskWorkspaceIdentity>
+  >(() => new Map());
+  const [pendingCreateActivations, setPendingCreateActivations] = useState<
+    ReadonlySet<TaskWorkspaceIdentity>
+  >(() => new Set());
   const requestSequenceRef = useRef(0);
-  const latestRequestSequenceRef = useRef(new Map<string, number>());
-  const appliedSequenceRef = useRef(new Map<string, number>());
-  const pendingTaskIdsRef = useRef(new Set<string>());
-  const pendingConversionEntryIdsRef = useRef(new Set<string>());
-  const pendingCreateWorkspacesRef = useRef(new Set<string>());
+  const latestRequestSequenceRef = useRef(-1);
+  const appliedSequenceRef = useRef(-1);
+  const pendingTaskOperationsRef = useRef(new Map<string, TaskWorkspaceIdentity>());
+  const pendingConversionOperationsRef = useRef(new Map<string, TaskWorkspaceIdentity>());
+  const pendingCreateActivationsRef = useRef(new Set<TaskWorkspaceIdentity>());
 
-  const beginRequest = useCallback((targetWorkspaceId: string): number => {
+  const setStored = useCallback((value: TaskSnapshotState | null) => {
+    storedSnapshotRef.current = value;
+    setStoredSnapshot(value);
+  }, []);
+
+  const beginRequest = useCallback((target: TaskWorkspaceIdentity): TaskRequestIdentity | null => {
+    if (target.workspaceId === null) return null;
     const sequence = ++requestSequenceRef.current;
-    latestRequestSequenceRef.current.set(targetWorkspaceId, sequence);
-    return sequence;
+    latestRequestSequenceRef.current = sequence;
+    return createTaskRequestIdentity(target, sequence);
   }, []);
 
-  const applySnapshot = useCallback((snapshot: TaskSnapshot, sequence: number): boolean => {
-    if (!isTaskSnapshotDateCurrent(snapshot, new Date())) return false;
-    const lastApplied = appliedSequenceRef.current.get(snapshot.workspaceId) ?? -1;
-    if (!isTaskSequenceCurrent(sequence, lastApplied)) return false;
-    appliedSequenceRef.current.set(snapshot.workspaceId, sequence);
-    if (!isTaskWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return false;
-    storedSnapshotRef.current = snapshot;
-    setStoredSnapshot(snapshot);
-    setStatus('ready');
-    setLoadError(null);
-    return true;
-  }, []);
+  const requestIsCurrent = useCallback(
+    (request: TaskRequestIdentity): boolean =>
+      isTaskRequestCurrent(activeActivationRef.current, request),
+    [],
+  );
+
+  const applySnapshot = useCallback(
+    (snapshot: TaskSnapshot, request: TaskRequestIdentity): boolean => {
+      if (
+        !shouldApplyTaskSnapshot(
+          activeActivationRef.current,
+          appliedSequenceRef.current,
+          request,
+          snapshot,
+          new Date(),
+        )
+      ) {
+        return false;
+      }
+      appliedSequenceRef.current = request.sequence;
+      setStored({ activation: request.workspace, snapshot });
+      setLoadState({
+        activation: request.workspace,
+        status: 'ready',
+        error: null,
+      });
+      return true;
+    },
+    [setStored],
+  );
 
   const load = useCallback(
-    async (targetWorkspaceId: string): Promise<void> => {
-      const sequence = beginRequest(targetWorkspaceId);
-      if (activeWorkspaceRef.current === targetWorkspaceId) {
-        setStatus('loading');
-        setLoadError(null);
+    async (target: TaskWorkspaceIdentity): Promise<void> => {
+      const request = beginRequest(target);
+      if (!request) return;
+      if (requestIsCurrent(request)) {
+        setLoadState({
+          activation: request.workspace,
+          status: 'loading',
+          error: null,
+        });
       }
       try {
         const snapshot = await window.workbench.task.getSnapshot({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
         });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(snapshot, request);
       } catch (error) {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
         if (
-          isTaskRequestLatest(sequence, latestRequested) &&
-          activeWorkspaceRef.current === targetWorkspaceId
+          requestIsCurrent(request) &&
+          isTaskRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
-          storedSnapshotRef.current = null;
-          setStoredSnapshot(null);
-          setStatus('error');
-          setLoadError(toMessage(error, '任务暂时无法读取。'));
+          setStored(null);
+          setLoadState({
+            activation: request.workspace,
+            status: 'error',
+            error: toMessage(error, '任务暂时无法读取。'),
+          });
         }
         throw error;
       }
     },
-    [applySnapshot, beginRequest],
+    [applySnapshot, beginRequest, requestIsCurrent, setStored],
   );
 
   const prepareSnapshotRefresh = useCallback(async () => {
-    const targetWorkspaceId = activeWorkspaceRef.current;
-    if (!targetWorkspaceId) throw new Error('当前工作区不可用，无法读取任务。');
-    const sequence = beginRequest(targetWorkspaceId);
+    const target = activeActivationRef.current;
+    const request = beginRequest(target);
+    if (!request) throw new Error('当前工作区不可用，无法读取任务。');
     const snapshot = await window.workbench.task.getSnapshot({
-      workspaceId: targetWorkspaceId,
+      workspaceId: request.workspaceId,
     });
     return {
       snapshot,
-      commit: () => {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
-        return isTaskRequestLatest(sequence, latestRequested) && applySnapshot(snapshot, sequence);
-      },
+      commit: () =>
+        isTaskRequestLatest(request.sequence, latestRequestSequenceRef.current) &&
+        applySnapshot(snapshot, request),
     };
   }, [applySnapshot, beginRequest]);
 
-  useEffect(() => {
-    activeWorkspaceRef.current = workspaceId;
-    if (workspaceId) void load(workspaceId).catch(() => undefined);
-  }, [load, workspaceId]);
+  useLayoutEffect(() => {
+    activeActivationRef.current = activation;
+    return () => {
+      if (activeActivationRef.current === activation) {
+        activeActivationRef.current = INACTIVE_ACTIVATION;
+      }
+    };
+  }, [activation]);
 
   useEffect(() => {
-    if (!workspaceId) return;
+    if (activation.workspaceId !== null && activeActivationRef.current === activation) {
+      void load(activation).catch(() => undefined);
+    }
+  }, [activation, load]);
+
+  useEffect(() => {
+    if (activation.workspaceId === null) return;
     let timeout = 0;
 
     const scheduleRollover = () => {
       window.clearTimeout(timeout);
       timeout = window.setTimeout(() => {
+        if (activeActivationRef.current !== activation) return;
         const current = storedSnapshotRef.current;
-        if (current && !isTaskSnapshotDateCurrent(current, new Date())) {
-          storedSnapshotRef.current = null;
-          setStoredSnapshot(null);
-          setStatus('loading');
-          setLoadError(null);
+        if (
+          current?.activation === activation &&
+          !isTaskSnapshotDateCurrent(current.snapshot, new Date())
+        ) {
+          setStored(null);
+          setLoadState({
+            activation,
+            status: 'loading',
+            error: null,
+          });
         }
-        void load(workspaceId).catch(() => undefined);
+        void load(activation).catch(() => undefined);
         scheduleRollover();
       }, millisecondsUntilNextLocalDay(new Date()));
     };
     const refreshIfDateChanged = () => {
+      if (activeActivationRef.current !== activation) return;
       const current = storedSnapshotRef.current;
-      if (!current || !isTaskSnapshotDateCurrent(current, new Date())) {
-        if (current) {
-          storedSnapshotRef.current = null;
-          setStoredSnapshot(null);
-          setStatus('loading');
-          setLoadError(null);
+      if (
+        current?.activation !== activation ||
+        !isTaskSnapshotDateCurrent(current.snapshot, new Date())
+      ) {
+        if (current?.activation === activation) {
+          setStored(null);
+          setLoadState({
+            activation,
+            status: 'loading',
+            error: null,
+          });
         }
-        void load(workspaceId).catch(() => undefined);
+        void load(activation).catch(() => undefined);
       }
       scheduleRollover();
     };
@@ -148,58 +220,70 @@ export function useTaskController(workspaceId: string | null) {
       window.removeEventListener('focus', refreshIfDateChanged);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [load, workspaceId]);
+  }, [activation, load, setStored]);
 
-  const beginPendingTask = useCallback((taskId: string): boolean => {
-    if (pendingTaskIdsRef.current.has(taskId)) return false;
-    pendingTaskIdsRef.current = new Set(pendingTaskIdsRef.current).add(taskId);
-    setPendingTaskIds(pendingTaskIdsRef.current);
+  const beginPendingTask = useCallback((target: TaskWorkspaceIdentity, taskId: string): boolean => {
+    if (pendingTaskOperationsRef.current.get(taskId) === target) return false;
+    pendingTaskOperationsRef.current = new Map(pendingTaskOperationsRef.current).set(
+      taskId,
+      target,
+    );
+    setPendingTaskOperations(pendingTaskOperationsRef.current);
     return true;
   }, []);
 
-  const endPendingTask = useCallback((taskId: string): void => {
-    const next = new Set(pendingTaskIdsRef.current);
+  const endPendingTask = useCallback((target: TaskWorkspaceIdentity, taskId: string): void => {
+    if (pendingTaskOperationsRef.current.get(taskId) !== target) return;
+    const next = new Map(pendingTaskOperationsRef.current);
     next.delete(taskId);
-    pendingTaskIdsRef.current = next;
-    setPendingTaskIds(next);
+    pendingTaskOperationsRef.current = next;
+    setPendingTaskOperations(next);
   }, []);
 
-  const beginPendingCreate = useCallback((targetWorkspaceId: string): boolean => {
-    if (pendingCreateWorkspacesRef.current.has(targetWorkspaceId)) return false;
-    pendingCreateWorkspacesRef.current = new Set(pendingCreateWorkspacesRef.current).add(
-      targetWorkspaceId,
-    );
-    setPendingCreateWorkspaces(pendingCreateWorkspacesRef.current);
+  const beginPendingCreate = useCallback((target: TaskWorkspaceIdentity): boolean => {
+    if (pendingCreateActivationsRef.current.has(target)) return false;
+    pendingCreateActivationsRef.current = new Set(pendingCreateActivationsRef.current).add(target);
+    setPendingCreateActivations(pendingCreateActivationsRef.current);
     return true;
   }, []);
 
-  const endPendingCreate = useCallback((targetWorkspaceId: string): void => {
-    const next = new Set(pendingCreateWorkspacesRef.current);
-    next.delete(targetWorkspaceId);
-    pendingCreateWorkspacesRef.current = next;
-    setPendingCreateWorkspaces(next);
+  const endPendingCreate = useCallback((target: TaskWorkspaceIdentity): void => {
+    const next = new Set(pendingCreateActivationsRef.current);
+    next.delete(target);
+    pendingCreateActivationsRef.current = next;
+    setPendingCreateActivations(next);
   }, []);
 
-  const beginPendingConversion = useCallback((entryId: string): boolean => {
-    if (pendingConversionEntryIdsRef.current.has(entryId)) return false;
-    pendingConversionEntryIdsRef.current = new Set(pendingConversionEntryIdsRef.current).add(
-      entryId,
-    );
-    setPendingConversionEntryIds(pendingConversionEntryIdsRef.current);
-    return true;
-  }, []);
+  const beginPendingConversion = useCallback(
+    (target: TaskWorkspaceIdentity, entryId: string): boolean => {
+      if (pendingConversionOperationsRef.current.get(entryId) === target) return false;
+      pendingConversionOperationsRef.current = new Map(pendingConversionOperationsRef.current).set(
+        entryId,
+        target,
+      );
+      setPendingConversionOperations(pendingConversionOperationsRef.current);
+      return true;
+    },
+    [],
+  );
 
-  const endPendingConversion = useCallback((entryId: string): void => {
-    const next = new Set(pendingConversionEntryIdsRef.current);
-    next.delete(entryId);
-    pendingConversionEntryIdsRef.current = next;
-    setPendingConversionEntryIds(next);
-  }, []);
+  const endPendingConversion = useCallback(
+    (target: TaskWorkspaceIdentity, entryId: string): void => {
+      if (pendingConversionOperationsRef.current.get(entryId) !== target) return;
+      const next = new Map(pendingConversionOperationsRef.current);
+      next.delete(entryId);
+      pendingConversionOperationsRef.current = next;
+      setPendingConversionOperations(next);
+    },
+    [],
+  );
 
   const createOperationError = useCallback(
-    (error: unknown, targetWorkspaceId: string, fallback: string): Error => {
+    (error: unknown, target: TaskWorkspaceIdentity, fallback: string): Error => {
       const message = toMessage(error, fallback);
-      setOperationErrorState({ workspaceId: targetWorkspaceId, message });
+      if (activeActivationRef.current === target) {
+        setOperationErrorState({ activation: target, message });
+      }
       return new Error(message, { cause: error });
     },
     [],
@@ -207,23 +291,27 @@ export function useTaskController(workspaceId: string | null) {
 
   const create = useCallback(
     async (title: string, planning: TaskPlanning): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingCreate(targetWorkspaceId)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingCreate(target)) {
         throw new Error('这个工作区正在创建另一项任务。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingCreate(target);
+        throw new Error('当前工作区不可用，无法创建任务。');
+      }
       setOperationErrorState(null);
       try {
         const snapshot = await window.workbench.task.create({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
           title,
           planning,
         });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(snapshot, request);
       } catch (error) {
-        throw createOperationError(error, targetWorkspaceId, '任务创建失败，请重试。');
+        throw createOperationError(error, request.workspace, '任务创建失败，请重试。');
       } finally {
-        endPendingCreate(targetWorkspaceId);
+        endPendingCreate(request.workspace);
       }
     },
     [applySnapshot, beginPendingCreate, beginRequest, createOperationError, endPendingCreate],
@@ -233,27 +321,32 @@ export function useTaskController(workspaceId: string | null) {
     async (
       taskId: string,
       action: (workspaceId: string) => Promise<TaskSnapshot>,
-    ): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingTask(taskId)) return;
-      const sequence = beginRequest(targetWorkspaceId);
+    ): Promise<boolean> => {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingTask(target, taskId)) return false;
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingTask(target, taskId);
+        return false;
+      }
       setOperationErrorState(null);
       try {
-        applySnapshot(await action(targetWorkspaceId), sequence);
+        return applySnapshot(await action(request.workspaceId), request);
       } catch (error) {
-        throw createOperationError(error, targetWorkspaceId, '任务更新失败，请重试。');
+        throw createOperationError(error, request.workspace, '任务更新失败，请重试。');
       } finally {
-        endPendingTask(taskId);
+        endPendingTask(request.workspace, taskId);
       }
     },
     [applySnapshot, beginPendingTask, beginRequest, createOperationError, endPendingTask],
   );
 
   const rename = useCallback(
-    (taskId: string, title: string) =>
-      runTaskMutation(taskId, (targetWorkspaceId) =>
+    async (taskId: string, title: string): Promise<void> => {
+      await runTaskMutation(taskId, (targetWorkspaceId) =>
         window.workbench.task.rename({ workspaceId: targetWorkspaceId, taskId, title }),
-      ),
+      );
+    },
     [runTaskMutation],
   );
 
@@ -283,24 +376,28 @@ export function useTaskController(workspaceId: string | null) {
 
   const convertInbox = useCallback(
     async (entryId: string, planning: TaskPlanning) => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingConversion(entryId)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingConversion(target, entryId)) {
         throw new Error('这条记录正在转换。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingConversion(target, entryId);
+        throw new Error('当前工作区不可用，无法转换记录。');
+      }
       setOperationErrorState(null);
       try {
         const result = await window.workbench.task.convertInbox({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
           entryId,
           planning,
         });
-        applySnapshot(result.taskSnapshot, sequence);
+        applySnapshot(result.taskSnapshot, request);
         return result;
       } catch (error) {
-        throw createOperationError(error, targetWorkspaceId, '无法转换为任务，请重试。');
+        throw createOperationError(error, request.workspace, '无法转换为任务，请重试。');
       } finally {
-        endPendingConversion(entryId);
+        endPendingConversion(request.workspace, entryId);
       }
     },
     [
@@ -312,44 +409,64 @@ export function useTaskController(workspaceId: string | null) {
     ],
   );
 
-  const snapshot =
-    storedSnapshot?.workspaceId === workspaceId &&
-    workspaceId !== null &&
-    isTaskSnapshotDateCurrent(storedSnapshot, new Date())
-      ? storedSnapshot
-      : null;
+  const snapshot = taskSnapshotForActivation(activation, storedSnapshot, new Date());
+  const visibleLoadState =
+    loadState.activation === activation && !(loadState.status === 'ready' && snapshot === null)
+      ? loadState
+      : {
+          activation,
+          status: 'loading' as const,
+          error: null,
+        };
   const tasks = snapshot?.tasks ?? EMPTY_TASKS;
   const counts = useMemo(
     () => (snapshot ? countTasks(tasks, snapshot.todayDate) : null),
     [snapshot, tasks],
   );
+  const pendingTaskIds = useMemo(
+    () =>
+      new Set(
+        [...pendingTaskOperations]
+          .filter(([, target]) => target === activation)
+          .map(([taskId]) => taskId),
+      ),
+    [activation, pendingTaskOperations],
+  );
+  const pendingConversionEntryIds = useMemo(
+    () =>
+      new Set(
+        [...pendingConversionOperations]
+          .filter(([, target]) => target === activation)
+          .map(([entryId]) => entryId),
+      ),
+    [activation, pendingConversionOperations],
+  );
   const operationErrorMessage =
-    operationErrorState?.workspaceId === workspaceId ? operationErrorState.message : null;
+    operationErrorState?.activation === activation ? operationErrorState.message : null;
 
   return {
     snapshot,
     tasks,
     counts,
-    status:
-      snapshot !== null
-        ? ('ready' as const)
-        : storedSnapshot !== null
-          ? ('loading' as const)
-          : status,
-    loadError,
+    status: snapshot !== null ? ('ready' as const) : visibleLoadState.status,
+    loadError: visibleLoadState.error,
     operationError: operationErrorMessage,
     pendingTaskIds,
     pendingConversionEntryIds,
-    pendingCreate: workspaceId ? pendingCreateWorkspaces.has(workspaceId) : false,
-    isPending: (taskId: string) => pendingTaskIdsRef.current.has(taskId),
+    pendingCreate: pendingCreateActivations.has(activation),
+    isPending: (taskId: string) =>
+      pendingTaskOperationsRef.current.get(taskId) === activeActivationRef.current,
     refresh: async () => {
-      if (workspaceId) await load(workspaceId);
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
     retry: () => {
-      if (workspaceId) void load(workspaceId).catch(() => undefined);
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) void load(current).catch(() => undefined);
     },
-    clearOperationError: () => setOperationErrorState(null),
+    clearOperationError: () =>
+      setOperationErrorState((current) => (current?.activation === activation ? null : current)),
     create,
     rename,
     updateStatus,

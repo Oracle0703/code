@@ -50,6 +50,7 @@ describe('assistant context builder', () => {
           ...unfinished,
           task('44444444-4444-4444-8444-444444444444', '已完成', 'completed', TODAY),
           task('55555555-5555-4555-8555-555555555555', '以后', 'todo', null),
+          task('66666666-6666-4666-8666-666666666666', '昨日遗留', 'todo', '2026-07-22'),
         ],
       },
       schedule: {
@@ -95,6 +96,9 @@ describe('assistant context builder', () => {
 
     expect(payload.context.tasks).toHaveLength(50);
     expect(payload.context.tasks[0]).toEqual({ title: '未完成 0', status: 'todo' });
+    expect(payload.context.tasks).not.toContainEqual(
+      expect.objectContaining({ title: '昨日遗留' }),
+    );
     expect(payload.context.schedule).toHaveLength(3);
     expect(payload.context.schedule).not.toContainEqual(
       expect.objectContaining({ title: '六天后的日程' }),
