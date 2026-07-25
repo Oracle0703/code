@@ -42,16 +42,17 @@ export function useTaskController(workspaceId: string | null) {
     return sequence;
   }, []);
 
-  const applySnapshot = useCallback((snapshot: TaskSnapshot, sequence: number) => {
-    if (!isTaskSnapshotDateCurrent(snapshot, new Date())) return;
+  const applySnapshot = useCallback((snapshot: TaskSnapshot, sequence: number): boolean => {
+    if (!isTaskSnapshotDateCurrent(snapshot, new Date())) return false;
     const lastApplied = appliedSequenceRef.current.get(snapshot.workspaceId) ?? -1;
-    if (!isTaskSequenceCurrent(sequence, lastApplied)) return;
+    if (!isTaskSequenceCurrent(sequence, lastApplied)) return false;
     appliedSequenceRef.current.set(snapshot.workspaceId, sequence);
-    if (!isTaskWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return;
+    if (!isTaskWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return false;
     storedSnapshotRef.current = snapshot;
     setStoredSnapshot(snapshot);
     setStatus('ready');
     setLoadError(null);
+    return true;
   }, []);
 
   const load = useCallback(
@@ -82,6 +83,22 @@ export function useTaskController(workspaceId: string | null) {
     },
     [applySnapshot, beginRequest],
   );
+
+  const prepareSnapshotRefresh = useCallback(async () => {
+    const targetWorkspaceId = activeWorkspaceRef.current;
+    if (!targetWorkspaceId) throw new Error('当前工作区不可用，无法读取任务。');
+    const sequence = beginRequest(targetWorkspaceId);
+    const snapshot = await window.workbench.task.getSnapshot({
+      workspaceId: targetWorkspaceId,
+    });
+    return {
+      snapshot,
+      commit: () => {
+        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
+        return isTaskRequestLatest(sequence, latestRequested) && applySnapshot(snapshot, sequence);
+      },
+    };
+  }, [applySnapshot, beginRequest]);
 
   useEffect(() => {
     activeWorkspaceRef.current = workspaceId;
@@ -327,6 +344,7 @@ export function useTaskController(workspaceId: string | null) {
     refresh: async () => {
       if (workspaceId) await load(workspaceId);
     },
+    prepareSnapshotRefresh,
     retry: () => {
       if (workspaceId) void load(workspaceId).catch(() => undefined);
     },

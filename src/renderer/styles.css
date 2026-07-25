@@ -3794,6 +3794,7 @@ textarea:focus-visible,
 }
 .automation-feedback {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   margin: 12px 0 0;
   padding: 9px 11px;
@@ -3801,6 +3802,10 @@ textarea:focus-visible,
   border: 1px solid var(--border-default);
   border-radius: 8px;
   font-size: 9.5px;
+}
+.automation-feedback > span {
+  min-width: 0;
+  flex: 1 1 220px;
 }
 .automation-feedback.is-error {
   border-color: color-mix(in srgb, var(--danger) 30%, var(--border-default));
@@ -3811,6 +3816,37 @@ textarea:focus-visible,
   border-color: color-mix(in srgb, var(--success) 30%, var(--border-default));
   color: var(--success);
   background: color-mix(in srgb, var(--success) 8%, transparent);
+}
+.automation-feedback__action {
+  display: inline-flex;
+  min-height: 27px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 4px 8px;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--success) 38%, var(--border-default));
+  border-radius: 6px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--bg-card));
+  font-size: 8.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.automation-feedback__action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--success) 58%, var(--border-default));
+  background: color-mix(in srgb, var(--success) 16%, var(--bg-card));
+}
+.automation-feedback__action:focus-visible,
+.automation-feedback.is-error:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
+.automation-feedback__action:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .automation-state {
   display: grid;

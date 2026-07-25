@@ -23,7 +23,24 @@ export interface AutomationRunFeedback {
   readonly automationId: string;
   readonly outputKind: 'task' | 'note';
   readonly outputId: string;
+  readonly outputTitle: string;
   readonly message: string;
+}
+
+export interface AutomationWorkspaceIdentity {
+  readonly workspaceId: string | null;
+}
+
+export interface AutomationRunRequestIdentity {
+  readonly workspace: AutomationWorkspaceIdentity;
+  readonly workspaceId: string;
+  readonly automationId: string;
+  readonly sequence: number;
+}
+
+export interface AutomationRunFeedbackState {
+  readonly workspace: AutomationWorkspaceIdentity;
+  readonly feedback: AutomationRunFeedback;
 }
 
 export type AutomationRunNowConfirmation = (message: string) => boolean;
@@ -53,6 +70,56 @@ export function isAutomationWorkspaceCurrent(
   snapshot: AutomationSnapshot,
 ): boolean {
   return activeWorkspaceId !== null && snapshot.workspaceId === activeWorkspaceId;
+}
+
+export function createAutomationWorkspaceIdentity(
+  workspaceId: string | null,
+): AutomationWorkspaceIdentity {
+  return { workspaceId };
+}
+
+export function createAutomationRunRequestIdentity(
+  workspace: AutomationWorkspaceIdentity,
+  automationId: string,
+  sequence: number,
+): AutomationRunRequestIdentity | null {
+  if (
+    workspace.workspaceId === null ||
+    automationId.length === 0 ||
+    !Number.isSafeInteger(sequence) ||
+    sequence < 0
+  ) {
+    return null;
+  }
+  return {
+    workspace,
+    workspaceId: workspace.workspaceId,
+    automationId,
+    sequence,
+  };
+}
+
+export function isAutomationRunRequestCurrent(
+  currentWorkspace: AutomationWorkspaceIdentity,
+  latestSequence: number,
+  request: AutomationRunRequestIdentity,
+): boolean {
+  return (
+    currentWorkspace === request.workspace &&
+    currentWorkspace.workspaceId === request.workspaceId &&
+    latestSequence === request.sequence
+  );
+}
+
+export function automationRunFeedbackForActivation(
+  currentWorkspace: AutomationWorkspaceIdentity,
+  state: AutomationRunFeedbackState | null,
+): AutomationRunFeedback | null {
+  return state !== null &&
+    state.workspace === currentWorkspace &&
+    state.workspace.workspaceId === state.feedback.workspaceId
+    ? state.feedback
+    : null;
 }
 
 export function sortAutomationItems(items: readonly AutomationItem[]): readonly AutomationItem[] {
@@ -125,7 +192,7 @@ export function automationRunFeedbackForCurrentWorkspace(
     result.automationId !== item.id ||
     result.outputKind !== expectedOutputKind ||
     typeof result.outputId !== 'string' ||
-    result.outputId.length === 0
+    result.outputId.trim().length === 0
   ) {
     return null;
   }
@@ -134,11 +201,25 @@ export function automationRunFeedbackForCurrentWorkspace(
     automationId: result.automationId,
     outputKind: result.outputKind,
     outputId: result.outputId,
+    outputTitle: item.action.title,
     message:
       result.outputKind === 'task'
         ? `已立即创建今日任务：${item.action.title}`
         : `已立即创建笔记：${item.action.title}`,
   };
+}
+
+export function automationRunOutputLabel(feedback: AutomationRunFeedback): string {
+  return feedback.outputKind === 'task' ? '打开任务' : '打开笔记';
+}
+
+export function automationRunFeedbackKey(feedback: AutomationRunFeedback): string {
+  return JSON.stringify([
+    feedback.workspaceId,
+    feedback.automationId,
+    feedback.outputKind,
+    feedback.outputId,
+  ]);
 }
 
 export function describeAutomationLastRun(lastRun: AutomationLastRun): string {

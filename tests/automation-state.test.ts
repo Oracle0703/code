@@ -1,13 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { AutomationItem, AutomationSnapshot } from '../src/shared/contracts';
 import {
+  automationRunFeedbackForActivation,
+  automationRunFeedbackKey,
+  automationRunOutputLabel,
   automationRunFeedbackForCurrentWorkspace,
   automationRunNowConfirmation,
+  createAutomationRunRequestIdentity,
+  createAutomationWorkspaceIdentity,
   describeAutomationAction,
   describeAutomationLastRun,
   formatAutomationInputMinute,
   formatAutomationSchedule,
   isAutomationRequestLatest,
+  isAutomationRunRequestCurrent,
   isAutomationSequenceCurrent,
   isAutomationWorkspaceCurrent,
   parseAutomationInputMinute,
@@ -19,6 +25,53 @@ const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
 
 describe('automation renderer state', () => {
+  it('binds immediate-run responses to one workspace activation and the latest request', () => {
+    const firstWorkspaceA = createAutomationWorkspaceIdentity(WORKSPACE_A);
+    const request = createAutomationRunRequestIdentity(
+      firstWorkspaceA,
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      4,
+    );
+    expect(request).not.toBeNull();
+    if (!request) return;
+
+    expect(isAutomationRunRequestCurrent(firstWorkspaceA, 4, request)).toBe(true);
+    expect(isAutomationRunRequestCurrent(firstWorkspaceA, 5, request)).toBe(false);
+    expect(
+      isAutomationRunRequestCurrent(createAutomationWorkspaceIdentity(WORKSPACE_B), 4, request),
+    ).toBe(false);
+    expect(
+      isAutomationRunRequestCurrent(createAutomationWorkspaceIdentity(WORKSPACE_A), 4, request),
+    ).toBe(false);
+    expect(
+      createAutomationRunRequestIdentity(firstWorkspaceA, request.automationId, -1),
+    ).toBeNull();
+    expect(
+      createAutomationRunRequestIdentity(
+        createAutomationWorkspaceIdentity(null),
+        request.automationId,
+        5,
+      ),
+    ).toBeNull();
+
+    const currentFeedback = {
+      workspaceId: WORKSPACE_A,
+      automationId: request.automationId,
+      outputKind: 'task' as const,
+      outputId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      outputTitle: '检查备份',
+      message: '已立即创建今日任务：检查备份',
+    };
+    const state = { workspace: firstWorkspaceA, feedback: currentFeedback };
+    expect(automationRunFeedbackForActivation(firstWorkspaceA, state)).toBe(currentFeedback);
+    expect(
+      automationRunFeedbackForActivation(createAutomationWorkspaceIdentity(WORKSPACE_A), state),
+    ).toBeNull();
+    expect(
+      automationRunFeedbackForActivation(createAutomationWorkspaceIdentity(WORKSPACE_B), state),
+    ).toBeNull();
+  });
+
   it('guards request ordering and active workspace snapshots', () => {
     expect(isAutomationSequenceCurrent(4, 5)).toBe(false);
     expect(isAutomationSequenceCurrent(5, 5)).toBe(true);
@@ -141,8 +194,20 @@ describe('automation renderer state', () => {
       workspaceId: WORKSPACE_A,
       automationId: automation.id,
       outputKind: 'task',
+      outputId: result.outputId,
+      outputTitle: '检查备份',
       message: '已立即创建今日任务：检查备份',
     });
+    const taskFeedback = automationRunFeedbackForCurrentWorkspace(
+      WORKSPACE_A,
+      WORKSPACE_A,
+      automation,
+      result,
+    );
+    expect(taskFeedback && automationRunOutputLabel(taskFeedback)).toBe('打开任务');
+    expect(taskFeedback && automationRunFeedbackKey(taskFeedback)).toBe(
+      JSON.stringify([WORKSPACE_A, automation.id, 'task', result.outputId]),
+    );
     expect(
       automationRunFeedbackForCurrentWorkspace(WORKSPACE_B, WORKSPACE_A, automation, result),
     ).toBeNull();
@@ -161,12 +226,24 @@ describe('automation renderer state', () => {
       }),
     ).toMatchObject({
       outputKind: 'note',
+      outputTitle: '每周回顾',
       message: '已立即创建笔记：每周回顾',
     });
+    const noteFeedback = automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, note, {
+      ...result,
+      outputKind: 'note',
+    });
+    expect(noteFeedback && automationRunOutputLabel(noteFeedback)).toBe('打开笔记');
     expect(
       automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, automation, {
         ...result,
         automationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      }),
+    ).toBeNull();
+    expect(
+      automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, automation, {
+        ...result,
+        outputId: '   ',
       }),
     ).toBeNull();
   });
