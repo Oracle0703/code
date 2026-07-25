@@ -2,6 +2,13 @@
   "schemaVersion": 1,
   "exceptions": [
     {
+      "package": "brace-expansion",
+      "advisoryIds": ["GHSA-MH99-V99M-4GVG"],
+      "expiresOn": "2026-08-31",
+      "scope": "Development-only Forge, ESLint, and TypeScript glob expansion chains",
+      "rationale": "All affected nodes are dev-only paths through minimatch. npm reports no compatible automatic fix, and forcing brace-expansion 5.x across consumers that declare ^1.1.7, ^2.0.1/^2.0.2, and ^5.0.5 ranges is unsupported and could break the quality and packaging toolchain."
+    },
+    {
       "package": "tar",
       "advisoryIds": [
         "GHSA-34x7-hfp2-rc4v",
@@ -14,7 +21,8 @@
         "GHSA-w8wr-v893-vjvp",
         "GHSA-23hp-3jrh-7fpw",
         "GHSA-8x88-c5mf-7j5w",
-        "GHSA-gvwx-54wh-qm9j"
+        "GHSA-gvwx-54wh-qm9j",
+        "GHSA-R292-9MHP-454M"
       ],
       "expiresOn": "2026-10-31",
       "scope": "Development-only Electron Forge rebuild chain",
