@@ -9,12 +9,15 @@ import {
   LoaderCircle,
   MessageSquareText,
   Pencil,
+  Play,
   Plus,
   Search,
   Sparkles,
   Square,
+  Target,
 } from 'lucide-react';
 import type { Task, TaskPlanning, TaskSnapshot, TaskStatus } from '../../shared/contracts';
+import { isTaskEligibleForFocus } from '../focus-state';
 import { planningDayLabel, planningValueForTask } from '../planning-state';
 import { filterTasks, type TaskFilter } from '../task-state';
 
@@ -30,6 +33,9 @@ interface TaskPageProps {
   onOpenRename: (task: Task) => void;
   onUpdateStatus: (taskId: string, status: TaskStatus) => Promise<void>;
   onUpdatePlanning: (taskId: string, planning: TaskPlanning) => Promise<void>;
+  taskFocusStartUnavailableReason: string | null;
+  onOpenFocus: (taskId: string) => void;
+  onOpenFocusStatus: () => void;
   assistantTaskLimit: number;
   onOpenAssistant: (tasks: readonly Task[]) => void;
 }
@@ -59,6 +65,9 @@ export function TaskPage({
   onOpenRename,
   onUpdateStatus,
   onUpdatePlanning,
+  taskFocusStartUnavailableReason,
+  onOpenFocus,
+  onOpenFocusStatus,
   assistantTaskLimit,
   onOpenAssistant,
 }: TaskPageProps) {
@@ -72,6 +81,9 @@ export function TaskPage({
     [filter, query, tasks, todayDate],
   );
   const openCount = tasks.filter(({ status: taskStatus }) => taskStatus !== 'completed').length;
+  const eligibleFocusTaskCount = tasks.filter((task) =>
+    isTaskEligibleForFocus(task, snapshot),
+  ).length;
   const effectiveSelectedTaskIds = useMemo(() => {
     const eligibleIds = new Set(
       tasks.filter(({ status: taskStatus }) => taskStatus !== 'completed').map(({ id }) => id),
@@ -203,12 +215,35 @@ export function TaskPage({
               {operationError}
             </p>
           ) : null}
+          {eligibleFocusTaskCount > 0 && taskFocusStartUnavailableReason ? (
+            <div className="task-focus-unavailable" id="task-focus-unavailable" role="status">
+              <span>
+                <Target size={14} aria-hidden="true" />
+                {taskFocusStartUnavailableReason}
+              </span>
+              <button type="button" onClick={onOpenFocusStatus}>
+                前往今日处理
+              </button>
+            </div>
+          ) : null}
 
           {visibleTasks.length > 0 ? (
             <ul className="task-page-list" aria-label="任务列表">
               {visibleTasks.map((task) => {
                 const pending = pendingTaskIds.has(task.id);
                 const completed = task.status === 'completed';
+                const focusEligible = isTaskEligibleForFocus(task, snapshot);
+                const focusUnavailableReason = pending
+                  ? '任务正在更新，请稍候。'
+                  : assistantSelectionOpen
+                    ? '请先退出 AI 多选模式。'
+                    : taskFocusStartUnavailableReason;
+                const focusDescriptionId =
+                  pending || assistantSelectionOpen
+                    ? `task-focus-disabled-${task.id}`
+                    : taskFocusStartUnavailableReason
+                      ? 'task-focus-unavailable'
+                      : undefined;
                 const planningValue = planningValueForTask(task, snapshot?.planningDays ?? []);
                 return (
                   <li className={`task-page-row${completed ? ' is-completed' : ''}`} key={task.id}>
@@ -331,6 +366,27 @@ export function TaskPage({
                         <option value="none">不安排</option>
                       </select>
                     </label>
+
+                    {focusEligible ? (
+                      <button
+                        type="button"
+                        className="task-page-row__focus"
+                        aria-label={`开始专注：${task.title}`}
+                        aria-describedby={focusDescriptionId}
+                        aria-disabled={focusUnavailableReason !== null}
+                        onClick={() => {
+                          if (focusUnavailableReason === null) onOpenFocus(task.id);
+                        }}
+                      >
+                        <Play size={13} fill="currentColor" aria-hidden="true" />
+                        专注
+                      </button>
+                    ) : null}
+                    {focusEligible && (pending || assistantSelectionOpen) ? (
+                      <span className="sr-only" id={`task-focus-disabled-${task.id}`}>
+                        {focusUnavailableReason}
+                      </span>
+                    ) : null}
 
                     <button
                       type="button"

@@ -1,14 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import type { FocusSession, FocusSnapshot } from '../src/shared/contracts';
+import type { FocusSession, FocusSnapshot, Task, TaskSnapshot } from '../src/shared/contracts';
+import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   FOCUS_DURATION_SECONDS,
   createFocusRequestIdentity,
   createFocusWorkspaceIdentity,
   describeFocusTimer,
   focusRemainingSeconds,
+  focusStartUnavailableReason,
   focusStableClockNow,
   formatFocusTimer,
+  isFocusDialogActivationCurrent,
+  isTaskEligibleForFocus,
+  resolveFocusTaskSelection,
   shouldApplyFocusSnapshot,
+  taskFocusStartUnavailableReason,
 } from '../src/renderer/focus-state';
 
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
@@ -29,6 +35,8 @@ describe('focus renderer state', () => {
 
     expect(identityB.workspaceId).toBe(WORKSPACE_B);
     expect(currentA).not.toBe(firstA);
+    expect(isFocusDialogActivationCurrent(firstA, currentA, WORKSPACE_A)).toBe(false);
+    expect(isFocusDialogActivationCurrent(currentA, currentA, WORKSPACE_A)).toBe(true);
     expect(
       shouldApplyFocusSnapshot(currentA, -1, oldRequest!, snapshot(), new Date(2026, 6, 23, 12)),
     ).toBe(false);
@@ -121,6 +129,94 @@ describe('focus renderer state', () => {
     expect(describeFocusTimer(65)).toBe('剩余 1 分 5 秒');
     expect(describeFocusTimer(60)).toBe('剩余 1 分钟');
   });
+
+  it('opens task focus only for an aligned current-day unfinished task window', () => {
+    const taskSnapshot = tasksSnapshot();
+    const todayTask = taskSnapshot.tasks[0]!;
+    const futureTask = taskSnapshot.tasks[1]!;
+    const completedTask = taskSnapshot.tasks[2]!;
+
+    expect(isTaskEligibleForFocus(todayTask, taskSnapshot)).toBe(true);
+    expect(isTaskEligibleForFocus(futureTask, taskSnapshot)).toBe(false);
+    expect(isTaskEligibleForFocus(completedTask, taskSnapshot)).toBe(false);
+    expect(
+      taskFocusStartUnavailableReason(
+        WORKSPACE_A,
+        taskSnapshot,
+        snapshot(),
+        'ready',
+        'ready',
+        null,
+      ),
+    ).toBeNull();
+    expect(
+      taskFocusStartUnavailableReason(
+        WORKSPACE_A,
+        { ...taskSnapshot, todayDate: '2026-07-24' },
+        snapshot(),
+        'ready',
+        'ready',
+        null,
+      ),
+    ).toMatch(/日期窗口/u);
+    expect(
+      taskFocusStartUnavailableReason(
+        WORKSPACE_A,
+        taskSnapshot,
+        snapshot(),
+        'loading',
+        'ready',
+        null,
+      ),
+    ).toMatch(/同步任务/u);
+  });
+
+  it('blocks another local or foreign focus session with an explicit reason', () => {
+    expect(
+      focusStartUnavailableReason(
+        WORKSPACE_A,
+        snapshot({ session: session({ status: 'paused', deadlineAt: null }) }),
+        'ready',
+        null,
+      ),
+    ).toMatch(/暂停/u);
+    expect(
+      focusStartUnavailableReason(
+        WORKSPACE_A,
+        snapshot({
+          session: session({
+            workspaceId: WORKSPACE_B,
+            workspaceName: '研发',
+          }),
+        }),
+        'ready',
+        null,
+      ),
+    ).toContain('研发');
+    expect(focusStartUnavailableReason(WORKSPACE_A, snapshot(), 'ready', 'start')).toMatch(
+      /正在进行/u,
+    );
+  });
+
+  it('keeps an invalid selected task distinct from an explicit free-focus choice', () => {
+    const selectedTask = tasksSnapshot().tasks[0]!;
+
+    expect(resolveFocusTaskSelection([selectedTask], selectedTask.id)).toEqual({
+      task: selectedTask,
+      taskId: selectedTask.id,
+      invalid: false,
+    });
+    expect(resolveFocusTaskSelection([], selectedTask.id)).toEqual({
+      task: null,
+      taskId: undefined,
+      invalid: true,
+    });
+    expect(resolveFocusTaskSelection([], '')).toEqual({
+      task: null,
+      taskId: undefined,
+      invalid: false,
+    });
+  });
 });
 
 function snapshot(overrides: Partial<FocusSnapshot> = {}): FocusSnapshot {
@@ -148,5 +244,31 @@ function session(overrides: Partial<FocusSession> = {}): FocusSession {
     createdAt: OBSERVED_AT,
     updatedAt: OBSERVED_AT,
     ...overrides,
+  };
+}
+
+function tasksSnapshot(): TaskSnapshot {
+  return {
+    workspaceId: WORKSPACE_A,
+    todayDate: TODAY,
+    planningDays: createRollingPlanningDays(TODAY),
+    tasks: [
+      task('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '今天待办', 'todo', TODAY),
+      task('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '明天待办', 'todo', '2026-07-24'),
+      task('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '今天完成', 'completed', TODAY),
+    ],
+  };
+}
+
+function task(id: string, title: string, status: Task['status'], plannedFor: string | null): Task {
+  return {
+    id,
+    title,
+    status,
+    plannedFor,
+    sourceInboxEntryId: null,
+    createdAt: OBSERVED_AT,
+    updatedAt: OBSERVED_AT,
+    completedAt: status === 'completed' ? OBSERVED_AT : null,
   };
 }
