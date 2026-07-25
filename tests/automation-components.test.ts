@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { AutomationItem } from '../src/shared/contracts';
 import { AutomationDialog } from '../src/renderer/components/AutomationDialog';
 import { AutomationPage } from '../src/renderer/components/AutomationPage';
+import { NotePage } from '../src/renderer/components/NotePage';
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -34,6 +35,7 @@ describe('automation renderer components', () => {
         onOpenEdit: () => undefined,
         onSetEnabled: () => undefined,
         onRunNow: () => undefined,
+        onOpenRunOutput: () => undefined,
       }),
     );
 
@@ -63,6 +65,7 @@ describe('automation renderer components', () => {
           automationId: item.id,
           outputKind: 'task',
           outputId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          outputTitle: '检查备份',
           message: '已立即创建今日任务：检查备份',
         },
         pendingItemIds: new Set([item.id]),
@@ -73,6 +76,7 @@ describe('automation renderer components', () => {
         onOpenEdit: () => undefined,
         onSetEnabled: () => undefined,
         onRunNow: () => undefined,
+        onOpenRunOutput: () => undefined,
       }),
     );
 
@@ -87,7 +91,87 @@ describe('automation renderer components', () => {
     expect(markup).toContain('运行中…');
     expect(markup).toContain('role="status"');
     expect(markup).toContain('已立即创建今日任务：检查备份');
-    expect(markup).toContain('正在立即运行自动化');
+    expect(markup).toContain('打开任务');
+    expect(markup).toContain('aria-label="打开任务：刚创建的任务“检查备份”"');
+    expect(markup).toContain('可以打开刚创建的任务');
+  });
+
+  it('shows an unavailable state instead of falling back when a requested note disappeared', () => {
+    const markup = renderToStaticMarkup(
+      createElement(NotePage, {
+        workspaceName: '个人',
+        notes: [
+          {
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            title: '其他笔记',
+            body: '# 其他内容',
+            revision: 1,
+            sourceInboxEntryId: null,
+            createdAt: '2026-07-25T12:00:00.000Z',
+            updatedAt: '2026-07-25T12:00:00.000Z',
+          },
+        ],
+        status: 'ready',
+        loadError: null,
+        operationError: null,
+        pendingNoteIds: new Set<string>(),
+        pendingCreate: false,
+        requestedNoteId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+        onRequestedNoteHandled: () => undefined,
+        onDirtyChange: () => undefined,
+        onRetry: () => undefined,
+        onCreate: async () => {
+          throw new Error('not used');
+        },
+        onUpdate: async () => {
+          throw new Error('not used');
+        },
+        onArchive: async () => undefined,
+        onOpenLink: () => undefined,
+        onOpenAssistant: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('要打开的笔记已不可用');
+    expect(markup).toContain('没有打开其他笔记');
+    expect(markup).toContain('返回笔记列表');
+    expect(markup).not.toContain('value="其他笔记"');
+  });
+
+  it('offers an explicit note output action without navigating automatically', () => {
+    const item = {
+      ...automationItem(),
+      action: { kind: 'create-note' as const, title: '每周回顾', body: '# 本周' },
+    };
+    const markup = renderToStaticMarkup(
+      createElement(AutomationPage, {
+        items: [item],
+        status: 'ready',
+        loadError: null,
+        operationError: null,
+        runFeedback: {
+          workspaceId: WORKSPACE_ID,
+          automationId: item.id,
+          outputKind: 'note',
+          outputId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          outputTitle: '每周回顾',
+          message: '已立即创建笔记：每周回顾',
+        },
+        pendingItemIds: new Set<string>(),
+        runningItemIds: new Set<string>(),
+        pendingCreate: false,
+        onRetry: () => undefined,
+        onOpenCreate: () => undefined,
+        onOpenEdit: () => undefined,
+        onSetEnabled: () => undefined,
+        onRunNow: () => undefined,
+        onOpenRunOutput: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('打开笔记');
+    expect(markup).toContain('aria-label="打开笔记：刚创建的笔记“每周回顾”"');
+    expect(markup).toContain('可以打开刚创建的笔记');
   });
 
   it('makes the create default-disabled behavior explicit and groups schedule and action fields', () => {

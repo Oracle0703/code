@@ -78,6 +78,8 @@ export function NotePage({
   const [archiving, setArchiving] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const visibleNotes = useMemo(() => filterNotes(notes, query), [notes, query]);
+  const requestedNoteUnavailable =
+    requestedNoteId !== null && !notes.some(({ id }) => id === requestedNoteId);
   const editor = useMemo<NoteEditorState | null>(() => {
     const requestedNote = requestedNoteId
       ? (notes.find(({ id }) => id === requestedNoteId) ?? null)
@@ -85,8 +87,15 @@ export function NotePage({
     const selectedNote =
       selection?.kind === 'note' ? (notes.find(({ id }) => id === selection.noteId) ?? null) : null;
     const activeNote =
-      requestedNote ?? selectedNote ?? (selection?.kind === 'new' ? null : (notes[0] ?? null));
-    const editorKey = selection?.kind === 'new' ? 'new' : (activeNote?.id ?? null);
+      requestedNoteId !== null
+        ? requestedNote
+        : (selectedNote ?? (selection?.kind === 'new' ? null : (notes[0] ?? null)));
+    const editorKey =
+      requestedNoteId !== null
+        ? (activeNote?.id ?? null)
+        : selection?.kind === 'new'
+          ? 'new'
+          : (activeNote?.id ?? null);
     const matchingDraft = editorKey !== null && draft?.key === editorKey ? draft : null;
     const matchingDraftDirty = matchingDraft
       ? isNoteDraftDirty(matchingDraft.note, matchingDraft.title, matchingDraft.body)
@@ -145,6 +154,12 @@ export function NotePage({
   useLayoutEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  useLayoutEffect(() => {
+    if (!requestedNoteId || editor?.note?.id !== requestedNoteId) return;
+    const frame = window.requestAnimationFrame(() => titleInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [editor?.note?.id, requestedNoteId]);
 
   useLayoutEffect(
     () => () => {
@@ -304,7 +319,23 @@ export function NotePage({
             </aside>
 
             <div className="note-editor-shell">
-              {editor ? (
+              {requestedNoteUnavailable ? (
+                <div className="note-editor-empty" role="alert">
+                  <NotebookPen size={25} />
+                  <h2>要打开的笔记已不可用</h2>
+                  <p>它可能已被归档或工作区数据已经变化；没有打开其他笔记。</p>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      onRequestedNoteHandled();
+                      setSelection(null);
+                    }}
+                  >
+                    返回笔记列表
+                  </button>
+                </div>
+              ) : editor ? (
                 <form className="note-editor" onSubmit={submit}>
                   <header className="note-editor__toolbar">
                     <div className="segmented-control" role="tablist" aria-label="笔记编辑模式">

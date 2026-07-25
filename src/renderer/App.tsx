@@ -1,6 +1,7 @@
 import {
   useEffect,
   useCallback,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -88,6 +89,16 @@ import { useScheduleController } from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
+import {
+  AutomationOutputNavigationCoordinator,
+  automationOutputNavigationError,
+  resolveAutomationOutputNavigationTarget,
+} from './automation-output-navigation';
+import {
+  createAutomationWorkspaceIdentity,
+  type AutomationRunFeedback,
+  type AutomationWorkspaceIdentity,
+} from './automation-state';
 import type { AppSurfaceId } from './model';
 import { defaultScheduleRangeForPlanningDate } from './schedule-state';
 import {
@@ -185,12 +196,18 @@ export function App() {
     readonly handled: boolean;
   } | null>(null);
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
+  const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
   const activeResizeFinishRef = useRef<(() => void) | null>(null);
   const focusDialogSequenceRef = useRef(0);
   const currentWorkspaceIdRef = useRef<string | null>(null);
+  const currentSurfaceRef = useRef<AppSurfaceId>('today');
+  const automationOutputActivationRef = useRef<AutomationWorkspaceIdentity>(
+    createAutomationWorkspaceIdentity(null),
+  );
+  const automationRunFeedbackRef = useRef<AutomationRunFeedback | null>(null);
   const noteDraftDirtyRef = useRef(false);
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
@@ -198,6 +215,10 @@ export function App() {
   const archiveManager = workspaceController.archiveManager;
   const focusActivation = useMemo(
     () => createFocusWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
+  const automationOutputActivation = useMemo(
+    () => createAutomationWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
   useEffect(() => {
@@ -312,6 +333,18 @@ export function App() {
     automationDialog !== null ||
     focusDialogOpen ||
     dataState.importPreview !== null;
+  useLayoutEffect(() => {
+    automationOutputActivationRef.current = automationOutputActivation;
+    automationRunFeedbackRef.current = automationController.runFeedback;
+    currentSurfaceRef.current = activeSurface;
+    automationOutputNavigation.invalidate();
+  }, [
+    activeSurface,
+    automationOutputActivation,
+    automationOutputNavigation,
+    automationController.runFeedback,
+    overlayOpen,
+  ]);
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
@@ -372,6 +405,7 @@ export function App() {
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
+      automationOutputNavigation.invalidate();
       if (view === 'assistant') {
         setAssistantSurfaceOpen(true);
       } else {
@@ -381,7 +415,13 @@ export function App() {
         updatePreferences({ activeView: view });
       }
     },
-    [activeSurface, activeView, confirmLeaveNoteDraft, updatePreferences],
+    [
+      activeSurface,
+      activeView,
+      automationOutputNavigation,
+      confirmLeaveNoteDraft,
+      updatePreferences,
+    ],
   );
   const openAssistant = useCallback(
     (context: AssistantContextReference) => {
@@ -407,9 +447,10 @@ export function App() {
     (workspaceId: string) => {
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
+      automationOutputNavigation.invalidate();
       void workspaceController.activate(workspaceId).catch(() => undefined);
     },
-    [confirmLeaveNoteDraft, searchNavigation, workspaceController],
+    [automationOutputNavigation, confirmLeaveNoteDraft, searchNavigation, workspaceController],
   );
   const openQuickCapture = useCallback(() => {
     if (
@@ -657,6 +698,63 @@ export function App() {
     ],
   );
 
+  const openAutomationRunOutput = useCallback(
+    async (feedback: AutomationRunFeedback): Promise<void> => {
+      try {
+        const intent = automationOutputNavigation.begin(
+          automationOutputActivationRef.current,
+          feedback,
+        );
+        const assertCurrent = () =>
+          automationOutputNavigation.assertCurrent(
+            intent,
+            automationOutputActivationRef.current,
+            currentSurfaceRef.current,
+            automationRunFeedbackRef.current,
+          );
+        const target = await resolveAutomationOutputNavigationTarget(
+          intent,
+          {
+            task: taskController.prepareSnapshotRefresh,
+            note: noteController.prepareSnapshotRefresh,
+          },
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!activeWorkspace || activeWorkspace.id !== target.workspaceId) {
+          throw new Error('当前工作区已变化，无法打开刚创建的内容。');
+        }
+
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setInboxReveal(null);
+        if (target.kind === 'task') {
+          setRequestedNoteId(null);
+          updatePreferences({ activeView: 'tasks' }, true, target.workspaceId);
+          setTaskDialog({
+            mode: 'rename',
+            workspaceId: target.workspaceId,
+            workspaceName: activeWorkspace.name,
+            task: target.task,
+          });
+          return;
+        }
+
+        updatePreferences({ activeView: 'notes' }, true, target.workspaceId);
+        setRequestedNoteId(target.note.id);
+      } catch (error) {
+        throw automationOutputNavigationError(error, feedback.outputKind);
+      }
+    },
+    [
+      activeWorkspace,
+      automationOutputNavigation,
+      noteController.prepareSnapshotRefresh,
+      taskController.prepareSnapshotRefresh,
+      updatePreferences,
+    ],
+  );
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
@@ -830,6 +928,7 @@ export function App() {
       if (!confirmLeaveNoteDraft()) {
         throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
       }
+      automationOutputNavigation.invalidate();
       const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
       const intent = searchNavigation.begin(selectedResult);
       if (workspaceController.pendingOperation !== null) {
@@ -978,7 +1077,13 @@ export function App() {
         throw searchNavigationError(error);
       }
     },
-    [confirmLeaveNoteDraft, searchNavigation, updatePreferences, workspaceController],
+    [
+      automationOutputNavigation,
+      confirmLeaveNoteDraft,
+      searchNavigation,
+      updatePreferences,
+      workspaceController,
+    ],
   );
 
   const commands = useMemo<PaletteCommand[]>(() => {
@@ -1344,7 +1449,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onClickCapture={() => automationOutputNavigation.invalidate()}>
       <header
         className="titlebar"
         onDoubleClick={(event) => {
@@ -1728,6 +1833,7 @@ export function App() {
                     onOpenEdit={openAutomationEdit}
                     onSetEnabled={automationController.setEnabled}
                     onRunNow={automationController.runNow}
+                    onOpenRunOutput={openAutomationRunOutput}
                   />
                 )}
               </div>

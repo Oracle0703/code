@@ -75,6 +75,22 @@ export function useNoteController(workspaceId: string | null) {
     [applySnapshot, beginRequest],
   );
 
+  const prepareSnapshotRefresh = useCallback(async () => {
+    const targetWorkspaceId = activeWorkspaceRef.current;
+    if (!targetWorkspaceId) throw new Error('当前工作区不可用，无法读取笔记。');
+    const sequence = beginRequest(targetWorkspaceId);
+    const snapshot = await window.workbench.note.getSnapshot({
+      workspaceId: targetWorkspaceId,
+    });
+    return {
+      snapshot,
+      commit: () => {
+        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
+        return isNoteRequestLatest(sequence, latestRequested) && applySnapshot(snapshot, sequence);
+      },
+    };
+  }, [applySnapshot, beginRequest]);
+
   useEffect(() => {
     activeWorkspaceRef.current = workspaceId;
     if (workspaceId) void load(workspaceId);
@@ -268,6 +284,7 @@ export function useNoteController(workspaceId: string | null) {
     refresh: async () => {
       if (workspaceId) await load(workspaceId);
     },
+    prepareSnapshotRefresh,
     clearOperationError: () => setOperationErrorState(null),
     create,
     update,

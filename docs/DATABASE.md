@@ -150,7 +150,7 @@ v9 的 `automations` 按工作区保存定义，`automation_run_state` 一对一
 
 调度器是应用级单例，最长每 60 秒唤醒一次并保持 single-flight。应用关闭期间不运行，也不回放全部历史；启动、系统恢复或定义变化后的评估只选择每条规则最近一次已经到期且晚于 `effective_at` 的 occurrence。成功水位和唯一主键共同防止重复；失败按有界错误码从 5 分钟开始、最长 6 小时退避。
 
-立即运行是与调度账本分离的窄写入。可信 Renderer 必须先展示已保存动作并取得用户确认，随后只提交 `{workspaceId, automationId, expectedRevision}`。Main 在 `BEGIN IMMEDIATE` 事务中重新读取活动工作区与未归档定义、核对 revision，并按数据库中持久化的任务或笔记动作创建输出；启用和停用的活动定义都可以手动运行，Renderer 不能替换标题、正文、动作类型或时间。成功只返回工作区、自动化、输出类型与 opaque 输出 ID；失败会回滚，不留下半个输出。
+立即运行是与调度账本分离的窄写入。可信 Renderer 必须先展示已保存动作并取得用户确认，随后只提交 `{workspaceId, automationId, expectedRevision}`。Main 在 `BEGIN IMMEDIATE` 事务中重新读取活动工作区与未归档定义、核对 revision，并按数据库中持久化的任务或笔记动作创建输出；启用和停用的活动定义都可以手动运行，Renderer 不能替换标题、正文、动作类型或时间。成功只返回工作区、自动化、输出类型与 opaque 输出 ID；失败会回滚，不留下半个输出。Renderer 可以在成功反馈中提供显式打开入口，但必须重新读取当前工作区快照并精确匹配该 ID；找不到目标时不得按标题或列表顺序回退。
 
 手动运行不会更新 `automations.enabled`、`effective_at` 或定义 revision，也不会写入 `automation_run_state`、`automation_occurrences`，不会推进成功水位、失败退避或下一次计划时间。它不消费相邻的计划 occurrence；调度器仍按原定义和账本独立执行。
 

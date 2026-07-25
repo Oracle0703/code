@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   Bot,
   CalendarClock,
   CheckCircle2,
@@ -11,12 +12,22 @@ import {
   RefreshCw,
   Zap,
 } from 'lucide-react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { AutomationItem } from '../../shared/contracts';
+import {
+  automationOutputOpenFailed,
+  automationOutputOpenFinished,
+  automationOutputOpenStarted,
+  AutomationOutputOpenGate,
+  type AutomationOutputOpenState,
+} from '../automation-output-navigation';
 import {
   describeAutomationAction,
   describeAutomationLastRun,
   formatAutomationDateTime,
   formatAutomationSchedule,
+  automationRunFeedbackKey,
+  automationRunOutputLabel,
   requestAutomationRunNow,
   type AutomationRunFeedback,
 } from '../automation-state';
@@ -36,6 +47,7 @@ interface AutomationPageProps {
   readonly onOpenEdit: (item: AutomationItem) => void;
   readonly onSetEnabled: (item: AutomationItem, enabled: boolean) => void | Promise<void>;
   readonly onRunNow: (item: AutomationItem) => void | Promise<void>;
+  readonly onOpenRunOutput: (feedback: AutomationRunFeedback) => void | Promise<void>;
 }
 
 export function AutomationPage({
@@ -52,7 +64,53 @@ export function AutomationPage({
   onOpenEdit,
   onSetEnabled,
   onRunNow,
+  onOpenRunOutput,
 }: AutomationPageProps) {
+  const outputOpenGateRef = useRef(new AutomationOutputOpenGate());
+  const currentRunFeedbackRef = useRef(runFeedback);
+  useLayoutEffect(() => {
+    currentRunFeedbackRef.current = runFeedback;
+  }, [runFeedback]);
+  const navigationErrorRef = useRef<HTMLParagraphElement>(null);
+  const [outputOpenState, setOutputOpenState] = useState<AutomationOutputOpenState | null>(null);
+  const runFeedbackKey = runFeedback === null ? null : automationRunFeedbackKey(runFeedback);
+  const openingOutput =
+    runFeedback !== null &&
+    outputOpenState?.outputKey === runFeedbackKey &&
+    outputOpenState.opening;
+  const outputNavigationError =
+    runFeedback !== null && outputOpenState?.outputKey === runFeedbackKey
+      ? outputOpenState.error
+      : null;
+
+  const openRunOutput = async (feedback: AutomationRunFeedback): Promise<void> => {
+    const outputKey = automationRunFeedbackKey(feedback);
+    if (!outputOpenGateRef.current.begin(outputKey)) return;
+    setOutputOpenState(automationOutputOpenStarted(outputKey));
+    try {
+      await onOpenRunOutput(feedback);
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : feedback.outputKind === 'task'
+            ? '无法打开刚创建的任务，请重试。'
+            : '无法打开刚创建的笔记，请重试。';
+      setOutputOpenState((current) => automationOutputOpenFailed(current, outputKey, message));
+      window.requestAnimationFrame(() => {
+        if (
+          currentRunFeedbackRef.current !== null &&
+          automationRunFeedbackKey(currentRunFeedbackRef.current) === outputKey
+        ) {
+          navigationErrorRef.current?.focus();
+        }
+      });
+    } finally {
+      outputOpenGateRef.current.end(outputKey);
+      setOutputOpenState((current) => automationOutputOpenFinished(current, outputKey));
+    }
+  };
+
   return (
     <div className="section-page automation-page">
       <header className="section-page__header">
@@ -92,9 +150,35 @@ export function AutomationPage({
         </p>
       ) : null}
       {runFeedback ? (
-        <p className="automation-feedback is-success">
+        <div className="automation-feedback is-success" aria-busy={openingOutput}>
           <CheckCircle2 size={14} aria-hidden="true" />
-          {runFeedback.message}
+          <span>{runFeedback.message}</span>
+          <button
+            type="button"
+            className="automation-feedback__action"
+            aria-label={`${automationRunOutputLabel(runFeedback)}：刚创建的${
+              runFeedback.outputKind === 'task' ? '任务' : '笔记'
+            }“${runFeedback.outputTitle}”`}
+            disabled={openingOutput}
+            onClick={() => void openRunOutput(runFeedback)}
+          >
+            {openingOutput ? (
+              <LoaderCircle className="is-spinning" size={13} aria-hidden="true" />
+            ) : (
+              <ArrowRight size={13} aria-hidden="true" />
+            )}
+            {openingOutput ? '正在打开…' : automationRunOutputLabel(runFeedback)}
+          </button>
+        </div>
+      ) : null}
+      {outputNavigationError ? (
+        <p
+          className="automation-feedback is-error"
+          ref={navigationErrorRef}
+          role="alert"
+          tabIndex={-1}
+        >
+          {outputNavigationError}
         </p>
       ) : null}
 
@@ -203,13 +287,17 @@ export function AutomationPage({
       )}
 
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {pendingCreate
-          ? '正在创建自动化'
-          : runningItemIds.size > 0
-            ? '正在立即运行自动化'
-            : pendingItemIds.size > 0
-              ? '正在保存自动化更改'
-              : (runFeedback?.message ?? '')}
+        {runFeedback
+          ? `${runFeedback.message}；可以${
+              runFeedback.outputKind === 'task' ? '打开刚创建的任务' : '打开刚创建的笔记'
+            }。`
+          : pendingCreate
+            ? '正在创建自动化'
+            : runningItemIds.size > 0
+              ? '正在立即运行自动化'
+              : pendingItemIds.size > 0
+                ? '正在保存自动化更改'
+                : ''}
       </p>
     </div>
   );
