@@ -203,6 +203,7 @@ export class TaskService {
         return {
           taskSnapshot: tasks.readSnapshot(workspaceId, todayDate),
           inboxSnapshot: inbox.readSnapshot(workspaceId),
+          createdTaskId: taskId,
         };
       }),
     );

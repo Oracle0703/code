@@ -120,11 +120,13 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 任务 v4 也不会导入 `daily.today.tasks` 中的演示任务，或自动转换既有 `task` 分类收件箱条目。任务状态固定为 `todo`、`in_progress`、`completed`；`planned_for` 只保存 Main 计算的本地民用 `YYYY-MM-DD` 或 `NULL`，完成状态与 `completed_at` 必须一致。Renderer 只能提交 Main 快照签发语义下的 `day-0` 至 `day-6` 或 `none` 固定计划意图；Service 在数据库 FIFO 操作真正执行时把 token 映射到民用日期，不能由页面伪造日期、ID、时间戳或来源关系。这个扩展不改变 v4 表结构或当前 schema 版本。
 
-显式收件箱转换在一个事务内创建任务、写入唯一 `source_inbox_entry_id` 并软归档来源条目。任一步失败都会整体回滚；同一来源不能转换两次。归档工作区中的任务和来源关系继续进入备份，但不能再修改。
+显式收件箱转换在一个事务内创建任务、写入唯一 `source_inbox_entry_id` 并软归档来源条目。任一步失败都会整体回滚；同一来源不能转换两次。成功响应中的 `createdTaskId` 是 Main 在该事务中实际插入的任务 ID。归档工作区中的任务和来源关系继续进入备份，但不能再修改。
 
 笔记 v5 不导入 Renderer 中的演示卡片，也不会因为收件箱分类为 `note` 就自动创建笔记。标题最多 200 个 Unicode code point；正文最多 100,000 个 code point，并把 CRLF/CR 统一为 LF。正文允许 Markdown、普通换行和 Tab，但拒绝 NUL、畸形 Unicode 与不支持的控制字符。创建时 revision 为 1；更新和软归档必须携带当前 `expectedRevision`，并在数据库内只递增一次。已归档笔记和归档工作区笔记不可修改，笔记不提供永久删除。
 
-显式“收件箱转笔记”在一个事务内归档来源、创建笔记并建立唯一来源关系。任务与笔记共享同一个来源排他边界：同一收件箱条目不能同时转换为任务和笔记，已关联来源不能恢复。转换任一步失败都会整体回滚。
+显式“收件箱转笔记”在一个事务内归档来源、创建笔记并建立唯一来源关系。任务与笔记共享同一个来源排他边界：同一收件箱条目不能同时转换为任务和笔记，已关联来源不能恢复。转换任一步失败都会整体回滚；成功响应中的 `createdNoteId` 是 Main 在该事务中实际插入的笔记 ID。
+
+两个 created ID 只扩展既有转换响应，不新增 IPC 通道、schema 或 migration。转换成功后界面仍停留在 Inbox；用户显式选择打开时，Renderer 会 fresh-read 对应快照，同时复核精确 created ID 与原始 `sourceInboxEntryId`，并只在快照提交到当前工作区 activation 后导航。目标缺失、来源变化、切页、较新反馈、工作区 A→B→A 或迟到响应都不会按标题、时间或列表位置回退到其他记录。
 
 日程 v5 保存真实的单日时间段，不包含重复、提醒、通知或外部日历同步。类型固定为 `focus`、`meeting`、`review`、`personal`；`scheduled_for` 是本地民用 `YYYY-MM-DD`，时间范围使用 `start_minute`/`end_minute`，满足 `0 <= start < end <= 1440`。Renderer 提交的 `expectedDate` 必须位于 Main 在数据库 FIFO 操作执行时计算的 `[todayDate, todayDate + 6]` 窗口，不能越过过去或第 8 天；更新和软归档也必须携带当前 revision。日程日期不可原地修改，归档项和归档工作区日程不可再修改，日程不提供永久删除。这个扩展不改变 v5 表结构、当前 schema v11 或 `.dwbx` v3。
 

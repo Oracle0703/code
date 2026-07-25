@@ -1,4 +1,9 @@
-import type { Note, NoteCreateResult, NoteSnapshot } from '../shared/contracts';
+import type {
+  Note,
+  NoteConversionResult,
+  NoteCreateResult,
+  NoteSnapshot,
+} from '../shared/contracts';
 
 export interface NoteWorkspaceIdentity {
   readonly workspaceId: string | null;
@@ -87,6 +92,16 @@ export function createdNoteFromResult(
 ): Note | null {
   if (result.noteSnapshot.workspaceId !== expectedWorkspaceId) return null;
   return result.noteSnapshot.notes.find(({ id }) => id === result.createdNoteId) ?? null;
+}
+
+export function convertedNoteFromResult(
+  expectedWorkspaceId: string,
+  expectedSourceEntryId: string,
+  result: NoteConversionResult,
+): Note | null {
+  if (result.noteSnapshot.workspaceId !== expectedWorkspaceId) return null;
+  const note = result.noteSnapshot.notes.find(({ id }) => id === result.createdNoteId);
+  return note?.sourceInboxEntryId === expectedSourceEntryId ? note : null;
 }
 
 export function filterNotes(notes: readonly Note[], query: string): readonly Note[] {

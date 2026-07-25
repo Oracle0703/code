@@ -45,6 +45,7 @@ import {
   type AutomationItem,
   type DatabaseBackupRestoreInput,
   type DatabaseBackupRestoreResult,
+  type InboxEntry,
   type SearchResult,
   type TaskPlanning,
 } from '../shared/contracts';
@@ -105,6 +106,16 @@ import {
   automationOutputNavigationError,
   resolveAutomationOutputNavigationTarget,
 } from './automation-output-navigation';
+import {
+  createInboxConversionWorkspaceIdentity,
+  InboxConversionNavigationCoordinator,
+  InboxConversionRequestCoordinator,
+  InboxConversionSupersededError,
+  inboxConversionNavigationError,
+  resolveInboxConversionNavigationTarget,
+  type InboxConversionFeedback,
+  type InboxConversionWorkspaceIdentity,
+} from './inbox-conversion-navigation';
 import {
   createAutomationWorkspaceIdentity,
   type AutomationRunFeedback,
@@ -228,8 +239,19 @@ export function App() {
     readonly generation: number;
     readonly handled: boolean;
   } | null>(null);
+  const [inboxConversionFeedbackState, setInboxConversionFeedbackState] = useState<{
+    readonly activation: InboxConversionWorkspaceIdentity;
+    readonly feedback: InboxConversionFeedback;
+  } | null>(null);
+  const [focusedInboxConversionFeedbackKey, setFocusedInboxConversionFeedbackKey] = useState<
+    string | null
+  >(null);
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
+  const [inboxConversionRequestCoordinator] = useState(
+    () => new InboxConversionRequestCoordinator(),
+  );
+  const [inboxConversionNavigation] = useState(() => new InboxConversionNavigationCoordinator());
   const [assistantSavedNoteNavigation] = useState(
     () => new AssistantSavedNoteNavigationCoordinator(),
   );
@@ -253,6 +275,11 @@ export function App() {
     createAutomationWorkspaceIdentity(null),
   );
   const automationRunFeedbackRef = useRef<AutomationRunFeedback | null>(null);
+  const inboxConversionActivationRef = useRef<InboxConversionWorkspaceIdentity>(
+    createInboxConversionWorkspaceIdentity(null),
+  );
+  const inboxConversionFeedbackRef = useRef<InboxConversionFeedback | null>(null);
+  const inboxConversionSurfaceRef = useRef<AppSurfaceId>('today');
   const focusTaskCompletionActivationRef = useRef<FocusWorkspaceIdentity>(
     createFocusWorkspaceIdentity(null),
   );
@@ -291,6 +318,10 @@ export function App() {
     });
   }, [snapshot?.currentWorkspaceId]);
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
+  const visibleInboxConversionFeedback =
+    inboxConversionFeedbackState?.activation === inboxController.activation
+      ? inboxConversionFeedbackState.feedback
+      : null;
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const createNote = noteController.create;
@@ -405,9 +436,11 @@ export function App() {
                   ? 'data'
                   : null;
   const statusbarErrorIsMirrored =
-    (statusbarErrorSource === 'task' && (activeSurface === 'today' || activeSurface === 'tasks')) ||
+    (statusbarErrorSource === 'inbox' && activeSurface === 'inbox') ||
+    (statusbarErrorSource === 'task' &&
+      (activeSurface === 'today' || activeSurface === 'tasks' || taskDialog !== null)) ||
     (statusbarErrorSource === 'note' &&
-      (activeSurface === 'notes' || activeSurface === 'assistant'));
+      (activeSurface === 'notes' || activeSurface === 'assistant' || activeSurface === 'inbox'));
   const focusDialogOpen =
     focusDialog !== null &&
     isFocusDialogActivationCurrent(
@@ -436,6 +469,25 @@ export function App() {
     automationOutputNavigation,
     automationController.runFeedback,
     overlayOpen,
+  ]);
+  useLayoutEffect(() => {
+    const previousActivation = inboxConversionActivationRef.current;
+    const previousSurface = inboxConversionSurfaceRef.current;
+    inboxConversionActivationRef.current = inboxController.activation;
+    inboxConversionFeedbackRef.current = visibleInboxConversionFeedback;
+    inboxConversionSurfaceRef.current = activeSurface;
+    currentSurfaceRef.current = activeSurface;
+    inboxConversionNavigation.invalidate();
+    if (previousActivation !== inboxController.activation || previousSurface !== activeSurface) {
+      inboxConversionRequestCoordinator.invalidate();
+    }
+  }, [
+    activeSurface,
+    inboxController.activation,
+    inboxConversionNavigation,
+    inboxConversionRequestCoordinator,
+    overlayOpen,
+    visibleInboxConversionFeedback,
   ]);
   useLayoutEffect(() => {
     assistantSavedNotesRef.current = assistantSavedNotes;
@@ -531,6 +583,8 @@ export function App() {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
       automationOutputNavigation.invalidate();
       assistantSavedNoteNavigation.invalidate();
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
       if (view === 'assistant') {
         setAssistantSurfaceOpen(true);
       } else {
@@ -546,12 +600,16 @@ export function App() {
       assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
       updatePreferences,
     ],
   );
   const openAssistant = useCallback(
     (context: AssistantContextReference) => {
       if (!activeWorkspace || !confirmLeaveNoteDraft()) return;
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
       setAssistantEntry((current) => ({
         workspaceId: activeWorkspace.id,
         context,
@@ -559,7 +617,12 @@ export function App() {
       }));
       setAssistantSurfaceOpen(true);
     },
-    [activeWorkspace, confirmLeaveNoteDraft],
+    [
+      activeWorkspace,
+      confirmLeaveNoteDraft,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
+    ],
   );
   const openTerminalSettings = useCallback(() => {
     setSettingsSection('terminal');
@@ -575,12 +638,16 @@ export function App() {
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
       assistantSavedNoteNavigation.invalidate();
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
       void workspaceController.activate(workspaceId).catch(() => undefined);
     },
     [
       assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
       searchNavigation,
       workspaceController,
     ],
@@ -984,6 +1051,171 @@ export function App() {
     [assistantSavedNoteNavigation, prepareNoteSnapshotRefresh, updatePreferences],
   );
 
+  const convertInboxToTask = useCallback(
+    async (entry: InboxEntry, planning: TaskPlanning): Promise<void> => {
+      inboxConversionNavigation.invalidate();
+      const intent = inboxConversionRequestCoordinator.begin(
+        inboxConversionActivationRef.current,
+        entry.id,
+        'task',
+      );
+      if (!intent) return;
+      inboxController.clearOperationError();
+      taskController.clearOperationError();
+      noteController.clearOperationError();
+      const inboxRequest = inboxController.reserveSnapshotRequest(intent.workspace.workspaceId!);
+      if (!inboxRequest) {
+        inboxConversionRequestCoordinator.end(intent);
+        return;
+      }
+      const failureIsCurrent = () =>
+        inboxConversionRequestCoordinator.isCurrent(intent, inboxConversionActivationRef.current);
+      try {
+        const conversion = await taskController.convertInbox(entry.id, planning, failureIsCurrent);
+        const inboxCommitted = inboxController.applyReservedSnapshot(
+          conversion.result.inboxSnapshot,
+          inboxRequest,
+        );
+        if (!conversion.committed || !inboxCommitted) return;
+        const feedback = inboxConversionRequestCoordinator.createFeedback(
+          intent,
+          inboxConversionActivationRef.current,
+          {
+            outputId: conversion.createdTask.id,
+            outputTitle: conversion.createdTask.title,
+          },
+        );
+        setInboxConversionFeedbackState({
+          activation: intent.workspace,
+          feedback,
+        });
+      } catch (error) {
+        if (!failureIsCurrent() || error instanceof InboxConversionSupersededError) return;
+        throw error;
+      } finally {
+        inboxConversionRequestCoordinator.end(intent);
+      }
+    },
+    [
+      inboxController,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
+      noteController,
+      taskController,
+    ],
+  );
+
+  const convertInboxToNote = useCallback(
+    async (entry: InboxEntry): Promise<void> => {
+      inboxConversionNavigation.invalidate();
+      const intent = inboxConversionRequestCoordinator.begin(
+        inboxConversionActivationRef.current,
+        entry.id,
+        'note',
+      );
+      if (!intent) return;
+      inboxController.clearOperationError();
+      taskController.clearOperationError();
+      noteController.clearOperationError();
+      const inboxRequest = inboxController.reserveSnapshotRequest(intent.workspace.workspaceId!);
+      if (!inboxRequest) {
+        inboxConversionRequestCoordinator.end(intent);
+        return;
+      }
+      const failureIsCurrent = () =>
+        inboxConversionRequestCoordinator.isCurrent(intent, inboxConversionActivationRef.current);
+      try {
+        const conversion = await noteController.convertInbox(entry.id, failureIsCurrent);
+        const inboxCommitted = inboxController.applyReservedSnapshot(
+          conversion.result.inboxSnapshot,
+          inboxRequest,
+        );
+        if (!conversion.committed || !inboxCommitted) return;
+        const feedback = inboxConversionRequestCoordinator.createFeedback(
+          intent,
+          inboxConversionActivationRef.current,
+          {
+            outputId: conversion.createdNote.id,
+            outputTitle: conversion.createdNote.title,
+          },
+        );
+        setInboxConversionFeedbackState({
+          activation: intent.workspace,
+          feedback,
+        });
+      } catch (error) {
+        if (!failureIsCurrent() || error instanceof InboxConversionSupersededError) return;
+        throw error;
+      } finally {
+        inboxConversionRequestCoordinator.end(intent);
+      }
+    },
+    [
+      inboxController,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
+      noteController,
+      taskController,
+    ],
+  );
+
+  const openInboxConversionOutput = useCallback(
+    async (feedback: InboxConversionFeedback): Promise<void> => {
+      try {
+        const intent = inboxConversionNavigation.begin(
+          inboxConversionActivationRef.current,
+          feedback,
+        );
+        const assertCurrent = () =>
+          inboxConversionNavigation.assertCurrent(
+            intent,
+            inboxConversionActivationRef.current,
+            currentSurfaceRef.current,
+            inboxConversionFeedbackRef.current,
+          );
+        const target = await resolveInboxConversionNavigationTarget(
+          intent,
+          {
+            task: taskController.prepareSnapshotRefresh,
+            note: noteController.prepareSnapshotRefresh,
+          },
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!activeWorkspace || activeWorkspace.id !== target.workspaceId) {
+          throw new InboxConversionSupersededError();
+        }
+
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setInboxReveal(null);
+        if (target.kind === 'task') {
+          setRequestedNoteId(null);
+          updatePreferences({ activeView: 'tasks' }, true, target.workspaceId);
+          setTaskDialog({
+            mode: 'rename',
+            workspaceId: target.workspaceId,
+            workspaceName: activeWorkspace.name,
+            task: target.task,
+          });
+          return;
+        }
+
+        updatePreferences({ activeView: 'notes' }, true, target.workspaceId);
+        setRequestedNoteId(target.note.id);
+      } catch (error) {
+        throw inboxConversionNavigationError(error, feedback.outputKind);
+      }
+    },
+    [
+      activeWorkspace,
+      inboxConversionNavigation,
+      noteController.prepareSnapshotRefresh,
+      taskController.prepareSnapshotRefresh,
+      updatePreferences,
+    ],
+  );
+
   const openAutomationRunOutput = useCallback(
     async (feedback: AutomationRunFeedback): Promise<void> => {
       try {
@@ -1215,6 +1447,8 @@ export function App() {
         throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
       }
       automationOutputNavigation.invalidate();
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
       const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
       const intent = searchNavigation.begin(selectedResult);
       if (workspaceController.pendingOperation !== null) {
@@ -1366,6 +1600,8 @@ export function App() {
     [
       automationOutputNavigation,
       confirmLeaveNoteDraft,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
       searchNavigation,
       updatePreferences,
       workspaceController,
@@ -1947,7 +2183,10 @@ export function App() {
                     entries={inboxController.entries}
                     status={inboxController.status}
                     loadError={inboxController.loadError}
-                    operationError={inboxController.operationError}
+                    operationError={inboxController.operationError ?? noteController.operationError}
+                    conversionFeedback={visibleInboxConversionFeedback}
+                    conversionFeedbackFocusBlocked={overlayOpen}
+                    focusedConversionFeedbackKey={focusedInboxConversionFeedbackKey}
                     pendingEntryIds={inboxController.pendingEntryIds}
                     pendingConversionEntryIds={taskController.pendingConversionEntryIds}
                     pendingNoteConversionEntryIds={noteController.pendingConversionEntryIds}
@@ -1962,6 +2201,13 @@ export function App() {
                     onOpenCapture={openQuickCapture}
                     onCategorize={inboxController.categorize}
                     onArchive={inboxController.archive}
+                    onDismissConversionFeedback={(feedback) =>
+                      setInboxConversionFeedbackState((current) =>
+                        current?.feedback === feedback ? null : current,
+                      )
+                    }
+                    onOpenConversionOutput={openInboxConversionOutput}
+                    onConversionFeedbackFocused={setFocusedInboxConversionFeedbackKey}
                     onOpenConvert={(entry) =>
                       setTaskDialog({
                         mode: 'convert',
@@ -1971,17 +2217,7 @@ export function App() {
                         planning: 'day-0',
                       })
                     }
-                    onConvertNote={async (entry) => {
-                      const targetWorkspaceId = snapshot.currentWorkspaceId;
-                      const sequence = inboxController.reserveSnapshotRequest(targetWorkspaceId);
-                      const result = await noteController.convertInbox(entry.id);
-                      inboxController.applyReservedSnapshot(result.inboxSnapshot, sequence);
-                      const converted = result.noteSnapshot.notes.find(
-                        ({ sourceInboxEntryId }) => sourceInboxEntryId === entry.id,
-                      );
-                      if (converted) setRequestedNoteId(converted.id);
-                      requestActiveView('notes');
-                    }}
+                    onConvertNote={convertInboxToNote}
                   />
                 ) : activeSurface === 'tasks' ? (
                   <TaskPage
@@ -2299,7 +2535,10 @@ export function App() {
         <TaskDialog
           state={taskDialog}
           planningDays={taskController.snapshot?.planningDays ?? []}
-          onClose={() => setTaskDialog(null)}
+          onClose={() => {
+            if (taskDialog.mode === 'convert') taskController.clearOperationError();
+            setTaskDialog(null);
+          }}
           onCreate={async (title, planning) => {
             if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开任务窗口。');
@@ -2316,9 +2555,10 @@ export function App() {
             if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开任务窗口。');
             }
-            const sequence = inboxController.reserveSnapshotRequest(taskDialog.workspaceId);
-            const result = await taskController.convertInbox(entryId, planning);
-            inboxController.applyReservedSnapshot(result.inboxSnapshot, sequence);
+            if (taskDialog.mode !== 'convert' || taskDialog.entry.id !== entryId) {
+              throw new Error('要转换的收件箱记录已经变化，请重新打开任务窗口。');
+            }
+            await convertInboxToTask(taskDialog.entry, planning);
           }}
         />
       ) : null}

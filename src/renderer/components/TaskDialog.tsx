@@ -45,6 +45,8 @@ export function TaskDialog({
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const planningRef = useRef<HTMLSelectElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  const submitFocusReturnRef = useRef<HTMLElement | null>(null);
   const [title, setTitle] = useState(state.mode === 'rename' ? state.task.title : '');
   const [planning, setPlanning] = useState<TaskPlanning>(
     state.mode === 'rename' ? 'none' : state.planning,
@@ -79,6 +81,13 @@ export function TaskDialog({
     ) {
       return;
     }
+    const activeElement = document.activeElement;
+    submitFocusReturnRef.current =
+      activeElement instanceof HTMLElement && dialogRef.current?.contains(activeElement)
+        ? activeElement
+        : state.mode === 'convert'
+          ? planningRef.current
+          : titleRef.current;
     setSubmitting(true);
     setError(null);
     try {
@@ -88,6 +97,14 @@ export function TaskDialog({
       onClose();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : '任务操作失败，请重试。');
+      window.requestAnimationFrame(() => {
+        const returnTarget = submitFocusReturnRef.current;
+        if (returnTarget?.isConnected && !returnTarget.matches(':disabled')) {
+          returnTarget.focus({ preventScroll: true });
+        } else {
+          errorRef.current?.focus({ preventScroll: true });
+        }
+      });
     } finally {
       setSubmitting(false);
     }
@@ -190,7 +207,7 @@ export function TaskDialog({
         </div>
 
         {error ? (
-          <p className="task-dialog__error" role="alert">
+          <p className="task-dialog__error" ref={errorRef} role="alert" tabIndex={-1}>
             {error}
           </p>
         ) : null}

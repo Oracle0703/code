@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   countInboxEntries,
+  createInboxRequestIdentity,
+  createInboxWorkspaceIdentity,
   filterInboxEntries,
+  inboxSnapshotForActivation,
+  isInboxRequestCurrent,
   isInboxRequestLatest,
   isInboxSequenceCurrent,
   isInboxWorkspaceCurrent,
+  shouldApplyInboxSnapshot,
 } from '../src/renderer/inbox-state';
 import type { InboxSnapshot } from '../src/shared/contracts';
 
@@ -12,6 +17,27 @@ const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
 
 describe('inbox renderer state', () => {
+  it('binds requests to one activation object even across A to B to A', () => {
+    const firstWorkspaceA = createInboxWorkspaceIdentity(WORKSPACE_A);
+    const workspaceB = createInboxWorkspaceIdentity(WORKSPACE_B);
+    const secondWorkspaceA = createInboxWorkspaceIdentity(WORKSPACE_A);
+    const request = createInboxRequestIdentity(firstWorkspaceA, 4);
+
+    expect(firstWorkspaceA).not.toBe(secondWorkspaceA);
+    expect(request).not.toBeNull();
+    expect(request && isInboxRequestCurrent(firstWorkspaceA, request)).toBe(true);
+    expect(request && isInboxRequestCurrent(workspaceB, request)).toBe(false);
+    expect(request && isInboxRequestCurrent(secondWorkspaceA, request)).toBe(false);
+  });
+
+  it('rejects invalid request identities', () => {
+    expect(createInboxRequestIdentity(createInboxWorkspaceIdentity(null), 1)).toBeNull();
+    expect(createInboxRequestIdentity(createInboxWorkspaceIdentity(WORKSPACE_A), -1)).toBeNull();
+    expect(
+      createInboxRequestIdentity(createInboxWorkspaceIdentity(WORKSPACE_A), Number.NaN),
+    ).toBeNull();
+  });
+
   it('rejects an older response even when it belongs to the current workspace', () => {
     expect(isInboxSequenceCurrent(4, 5)).toBe(false);
     expect(isInboxSequenceCurrent(5, 5)).toBe(true);
@@ -33,6 +59,36 @@ describe('inbox renderer state', () => {
     expect(isInboxWorkspaceCurrent(WORKSPACE_B, snapshot)).toBe(false);
     expect(isInboxWorkspaceCurrent(WORKSPACE_A, snapshot)).toBe(true);
     expect(isInboxWorkspaceCurrent(null, snapshot)).toBe(false);
+  });
+
+  it('commits only a newer snapshot for the exact request activation and workspace', () => {
+    const firstWorkspaceA = createInboxWorkspaceIdentity(WORKSPACE_A);
+    const secondWorkspaceA = createInboxWorkspaceIdentity(WORKSPACE_A);
+    const request = createInboxRequestIdentity(firstWorkspaceA, 5);
+    const snapshot: InboxSnapshot = { workspaceId: WORKSPACE_A, entries: [] };
+    const foreignSnapshot: InboxSnapshot = { workspaceId: WORKSPACE_B, entries: [] };
+
+    expect(request).not.toBeNull();
+    expect(request && shouldApplyInboxSnapshot(firstWorkspaceA, 4, request, snapshot)).toBe(true);
+    expect(request && shouldApplyInboxSnapshot(firstWorkspaceA, 5, request, snapshot)).toBe(false);
+    expect(request && shouldApplyInboxSnapshot(secondWorkspaceA, -1, request, snapshot)).toBe(
+      false,
+    );
+    expect(request && shouldApplyInboxSnapshot(firstWorkspaceA, -1, request, foreignSnapshot)).toBe(
+      false,
+    );
+  });
+
+  it('reveals a stored snapshot only for the activation that committed it', () => {
+    const firstWorkspaceA = createInboxWorkspaceIdentity(WORKSPACE_A);
+    const secondWorkspaceA = createInboxWorkspaceIdentity(WORKSPACE_A);
+    const snapshot: InboxSnapshot = { workspaceId: WORKSPACE_A, entries: [] };
+    const state = { activation: firstWorkspaceA, snapshot };
+
+    expect(inboxSnapshotForActivation(firstWorkspaceA, state)).toBe(snapshot);
+    expect(inboxSnapshotForActivation(secondWorkspaceA, state)).toBeNull();
+    expect(inboxSnapshotForActivation(createInboxWorkspaceIdentity(WORKSPACE_B), state)).toBeNull();
+    expect(inboxSnapshotForActivation(firstWorkspaceA, null)).toBeNull();
   });
 
   it('derives every badge from the real active-entry snapshot', () => {

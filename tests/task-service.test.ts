@@ -189,6 +189,7 @@ describe('task service', () => {
         entryId: inboxIds[index]!,
         planning,
       });
+      expect(converted.createdTaskId).toBe(taskIds[index + 8]);
       expect(
         converted.taskSnapshot.tasks.find(({ id }) => id === taskIds[index + 8]),
       ).toMatchObject({
@@ -295,6 +296,7 @@ describe('task service', () => {
       entryId: ENTRY_A,
       planning: 'day-0',
     });
+    expect(converted.createdTaskId).toBe(TASK_A);
     expect(converted.inboxSnapshot.entries).toEqual([]);
     expect(converted.taskSnapshot.tasks).toMatchObject([
       {

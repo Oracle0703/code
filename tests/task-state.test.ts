@@ -3,6 +3,7 @@ import type { Task, TaskSnapshot } from '../src/shared/contracts';
 import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   countTasks,
+  convertedTaskFromResult,
   createTaskRequestIdentity,
   createTaskWorkspaceIdentity,
   filterTasks,
@@ -30,6 +31,30 @@ const tasks: readonly Task[] = [
 ];
 
 describe('task renderer state', () => {
+  it('resolves only the exact task identity returned by an inbox conversion', () => {
+    const sourceEntryId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+    const converted = {
+      ...task('ffffffff-ffff-4fff-8fff-ffffffffffff', '转换任务', 'todo', TODAY),
+      sourceInboxEntryId: sourceEntryId,
+    };
+    const other = task('99999999-9999-4999-8999-999999999999', '其他任务', 'todo', TODAY);
+    const taskSnapshot = snapshot({ tasks: [other, converted] });
+    const result = {
+      taskSnapshot,
+      inboxSnapshot: { workspaceId: WORKSPACE_A, entries: [] },
+      createdTaskId: converted.id,
+    };
+
+    expect(convertedTaskFromResult(WORKSPACE_A, sourceEntryId, result)).toBe(converted);
+    expect(
+      convertedTaskFromResult(WORKSPACE_A, sourceEntryId, {
+        ...result,
+        createdTaskId: other.id,
+      }),
+    ).toBeNull();
+    expect(convertedTaskFromResult(WORKSPACE_B, sourceEntryId, result)).toBeNull();
+  });
+
   it('uses activation identity to reject an old A request after A to B to A', () => {
     const firstA = createTaskWorkspaceIdentity(WORKSPACE_A);
     const oldRequest = createTaskRequestIdentity(firstA, 1);

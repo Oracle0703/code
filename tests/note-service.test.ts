@@ -144,6 +144,7 @@ describe('note service', () => {
       workspaceId: WORKSPACE_A,
       entryId: ENTRY_A,
     });
+    expect(converted.createdNoteId).toBe(NOTE_A);
     expect(converted.inboxSnapshot.entries).toEqual([]);
     expect(converted.noteSnapshot.notes).toEqual([
       expect.objectContaining({

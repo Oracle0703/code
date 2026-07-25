@@ -647,6 +647,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       entryId: FIRST_INBOX_ID,
       planning: 'day-0',
     });
+    assert.equal(conversion.createdTaskId, CONVERTED_TASK_ID);
     assert.equal(conversion.inboxSnapshot.workspaceId, DEFAULT_WORKSPACE_ID);
     assert.deepEqual(
       conversion.inboxSnapshot.entries.map(({ id }) => id),
@@ -673,6 +674,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       workspaceId: DEFAULT_WORKSPACE_ID,
       entryId: NOTE_INBOX_ID,
     });
+    assert.equal(noteConversion.createdNoteId, CONVERTED_NOTE_ID);
     assert.deepEqual(noteConversion.inboxSnapshot.entries, []);
     note = noteConversion.noteSnapshot.notes.find(({ id }) => id === CONVERTED_NOTE_ID);
     assert.ok(note);
@@ -2363,6 +2365,7 @@ async function smokeVersionThreeUpgrade(dataDirectory: string): Promise<void> {
       entryId: FIRST_INBOX_ID,
       planning: 'day-0',
     });
+    assert.equal(converted.createdTaskId, LEGACY_CONVERTED_TASK_ID);
     assert.deepEqual(converted.inboxSnapshot.entries, []);
     assert.equal(converted.taskSnapshot.tasks.length, 1);
     assert.equal(converted.taskSnapshot.tasks[0]?.id, LEGACY_CONVERTED_TASK_ID);
@@ -2478,6 +2481,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
       workspaceId: DEFAULT_WORKSPACE_ID,
       entryId: NOTE_INBOX_ID,
     });
+    assert.equal(converted.createdNoteId, CONVERTED_NOTE_ID);
     assert.deepEqual(converted.inboxSnapshot.entries, []);
     assert.equal(converted.noteSnapshot.notes.length, 1);
     assert.equal(converted.noteSnapshot.notes[0]?.id, CONVERTED_NOTE_ID);
