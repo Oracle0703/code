@@ -28,6 +28,7 @@ import type {
   NoteConversionResult,
   NoteConvertInboxInput,
   NoteCreateInput,
+  NoteCreateResult,
   NoteSnapshot,
   NoteUpdateInput,
   ScheduleCreateInput,
@@ -725,7 +726,7 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#noteService.getSnapshot(input);
   }
 
-  createNote(input: NoteCreateInput): Promise<NoteSnapshot> {
+  createNote(input: NoteCreateInput): Promise<NoteCreateResult> {
     return this.#noteService.create(input);
   }
 

@@ -1,151 +1,223 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Note, NoteConversionResult, NoteSnapshot } from '../../shared/contracts';
-import { isNoteRequestLatest, isNoteSequenceCurrent, isNoteWorkspaceCurrent } from '../note-state';
+import {
+  createdNoteFromResult,
+  createNoteRequestIdentity,
+  createNoteWorkspaceIdentity,
+  isNoteRequestCurrent,
+  isNoteRequestLatest,
+  noteSnapshotForActivation,
+  shouldApplyNoteSnapshot,
+  type NoteRequestIdentity,
+  type NoteSnapshotState,
+  type NoteWorkspaceIdentity,
+} from '../note-state';
 
 type NoteControllerStatus = 'loading' | 'ready' | 'error';
+
+interface NoteLoadState {
+  readonly activation: NoteWorkspaceIdentity;
+  readonly status: NoteControllerStatus;
+  readonly error: string | null;
+}
+
+interface NoteOperationError {
+  readonly activation: NoteWorkspaceIdentity;
+  readonly message: string;
+}
+
 const EMPTY_NOTES: readonly Note[] = Object.freeze([]);
+const INACTIVE_ACTIVATION = Object.freeze(createNoteWorkspaceIdentity(null));
 
 export function useNoteController(workspaceId: string | null) {
-  const [storedSnapshot, setStoredSnapshot] = useState<NoteSnapshot | null>(null);
-  const [status, setStatus] = useState<NoteControllerStatus>('loading');
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [operationErrorState, setOperationErrorState] = useState<{
-    readonly workspaceId: string;
-    readonly message: string;
-  } | null>(null);
-  const [pendingNoteIds, setPendingNoteIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [pendingCreateWorkspaces, setPendingCreateWorkspaces] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const [pendingConversionEntryIds, setPendingConversionEntryIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const activeWorkspaceRef = useRef(workspaceId);
-  const snapshotRef = useRef<NoteSnapshot | null>(null);
+  const activation = useMemo(() => createNoteWorkspaceIdentity(workspaceId), [workspaceId]);
+  const activeActivationRef = useRef<NoteWorkspaceIdentity>(activation);
+  const [storedSnapshot, setStoredSnapshot] = useState<NoteSnapshotState | null>(null);
+  const [loadState, setLoadState] = useState<NoteLoadState>({
+    activation,
+    status: 'loading',
+    error: null,
+  });
+  const [operationErrorState, setOperationErrorState] = useState<NoteOperationError | null>(null);
+  const [pendingNoteOperations, setPendingNoteOperations] = useState<
+    ReadonlyMap<string, NoteWorkspaceIdentity>
+  >(() => new Map());
+  const [pendingCreateActivations, setPendingCreateActivations] = useState<
+    ReadonlySet<NoteWorkspaceIdentity>
+  >(() => new Set());
+  const [pendingConversionOperations, setPendingConversionOperations] = useState<
+    ReadonlyMap<string, NoteWorkspaceIdentity>
+  >(() => new Map());
   const requestSequenceRef = useRef(0);
-  const latestRequestSequenceRef = useRef(new Map<string, number>());
-  const appliedSequenceRef = useRef(new Map<string, number>());
-  const pendingNoteIdsRef = useRef(new Set<string>());
-  const pendingCreateWorkspacesRef = useRef(new Set<string>());
-  const pendingConversionEntryIdsRef = useRef(new Set<string>());
+  const latestRequestSequenceRef = useRef(-1);
+  const appliedSequenceRef = useRef(-1);
+  const pendingNoteOperationsRef = useRef(new Map<string, NoteWorkspaceIdentity>());
+  const pendingCreateActivationsRef = useRef(new Set<NoteWorkspaceIdentity>());
+  const pendingConversionOperationsRef = useRef(new Map<string, NoteWorkspaceIdentity>());
 
-  const beginRequest = useCallback((targetWorkspaceId: string): number => {
+  const beginRequest = useCallback((target: NoteWorkspaceIdentity): NoteRequestIdentity | null => {
+    if (target.workspaceId === null) return null;
     const sequence = ++requestSequenceRef.current;
-    latestRequestSequenceRef.current.set(targetWorkspaceId, sequence);
-    return sequence;
+    latestRequestSequenceRef.current = sequence;
+    return createNoteRequestIdentity(target, sequence);
   }, []);
 
-  const applySnapshot = useCallback((snapshot: NoteSnapshot, sequence: number): boolean => {
-    const lastApplied = appliedSequenceRef.current.get(snapshot.workspaceId) ?? -1;
-    if (!isNoteSequenceCurrent(sequence, lastApplied)) return false;
-    appliedSequenceRef.current.set(snapshot.workspaceId, sequence);
-    if (!isNoteWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return false;
-    snapshotRef.current = snapshot;
-    setStoredSnapshot(snapshot);
-    setStatus('ready');
-    setLoadError(null);
-    return true;
-  }, []);
+  const requestIsCurrent = useCallback(
+    (request: NoteRequestIdentity): boolean =>
+      isNoteRequestCurrent(activeActivationRef.current, request),
+    [],
+  );
+
+  const applySnapshot = useCallback(
+    (snapshot: NoteSnapshot, request: NoteRequestIdentity): boolean => {
+      if (
+        !shouldApplyNoteSnapshot(
+          activeActivationRef.current,
+          appliedSequenceRef.current,
+          request,
+          snapshot,
+        )
+      ) {
+        return false;
+      }
+      appliedSequenceRef.current = request.sequence;
+      setStoredSnapshot({ activation: request.workspace, snapshot });
+      setLoadState({
+        activation: request.workspace,
+        status: 'ready',
+        error: null,
+      });
+      return true;
+    },
+    [],
+  );
 
   const load = useCallback(
-    async (targetWorkspaceId: string): Promise<void> => {
-      const sequence = beginRequest(targetWorkspaceId);
-      if (activeWorkspaceRef.current === targetWorkspaceId) {
-        setStatus('loading');
-        setLoadError(null);
+    async (target: NoteWorkspaceIdentity): Promise<void> => {
+      const request = beginRequest(target);
+      if (!request) return;
+      if (requestIsCurrent(request)) {
+        setLoadState({
+          activation: request.workspace,
+          status: 'loading',
+          error: null,
+        });
       }
       try {
         applySnapshot(
-          await window.workbench.note.getSnapshot({ workspaceId: targetWorkspaceId }),
-          sequence,
+          await window.workbench.note.getSnapshot({ workspaceId: request.workspaceId }),
+          request,
         );
       } catch (error) {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
         if (
-          isNoteRequestLatest(sequence, latestRequested) &&
-          activeWorkspaceRef.current === targetWorkspaceId
+          requestIsCurrent(request) &&
+          isNoteRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
-          snapshotRef.current = null;
           setStoredSnapshot(null);
-          setStatus('error');
-          setLoadError(toMessage(error, '笔记暂时无法读取。'));
+          setLoadState({
+            activation: request.workspace,
+            status: 'error',
+            error: toMessage(error, '笔记暂时无法读取。'),
+          });
         }
+        throw error;
       }
     },
-    [applySnapshot, beginRequest],
+    [applySnapshot, beginRequest, requestIsCurrent],
   );
 
   const prepareSnapshotRefresh = useCallback(async () => {
-    const targetWorkspaceId = activeWorkspaceRef.current;
-    if (!targetWorkspaceId) throw new Error('当前工作区不可用，无法读取笔记。');
-    const sequence = beginRequest(targetWorkspaceId);
+    const target = activeActivationRef.current;
+    const request = beginRequest(target);
+    if (!request) throw new Error('当前工作区不可用，无法读取笔记。');
     const snapshot = await window.workbench.note.getSnapshot({
-      workspaceId: targetWorkspaceId,
+      workspaceId: request.workspaceId,
     });
     return {
       snapshot,
-      commit: () => {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
-        return isNoteRequestLatest(sequence, latestRequested) && applySnapshot(snapshot, sequence);
-      },
+      commit: () =>
+        isNoteRequestLatest(request.sequence, latestRequestSequenceRef.current) &&
+        applySnapshot(snapshot, request),
     };
   }, [applySnapshot, beginRequest]);
 
+  useLayoutEffect(() => {
+    activeActivationRef.current = activation;
+    return () => {
+      if (activeActivationRef.current === activation) {
+        activeActivationRef.current = INACTIVE_ACTIVATION;
+      }
+    };
+  }, [activation]);
+
   useEffect(() => {
-    activeWorkspaceRef.current = workspaceId;
-    if (workspaceId) void load(workspaceId);
-  }, [load, workspaceId]);
+    if (activation.workspaceId !== null && activeActivationRef.current === activation) {
+      void load(activation).catch(() => undefined);
+    }
+  }, [activation, load]);
 
-  const beginPendingNote = useCallback((noteId: string): boolean => {
-    if (pendingNoteIdsRef.current.has(noteId)) return false;
-    pendingNoteIdsRef.current = new Set(pendingNoteIdsRef.current).add(noteId);
-    setPendingNoteIds(pendingNoteIdsRef.current);
+  const beginPendingNote = useCallback((target: NoteWorkspaceIdentity, noteId: string): boolean => {
+    if (pendingNoteOperationsRef.current.get(noteId) === target) return false;
+    pendingNoteOperationsRef.current = new Map(pendingNoteOperationsRef.current).set(
+      noteId,
+      target,
+    );
+    setPendingNoteOperations(pendingNoteOperationsRef.current);
     return true;
   }, []);
 
-  const endPendingNote = useCallback((noteId: string): void => {
-    const next = new Set(pendingNoteIdsRef.current);
+  const endPendingNote = useCallback((target: NoteWorkspaceIdentity, noteId: string): void => {
+    if (pendingNoteOperationsRef.current.get(noteId) !== target) return;
+    const next = new Map(pendingNoteOperationsRef.current);
     next.delete(noteId);
-    pendingNoteIdsRef.current = next;
-    setPendingNoteIds(next);
+    pendingNoteOperationsRef.current = next;
+    setPendingNoteOperations(next);
   }, []);
 
-  const beginPendingCreate = useCallback((targetWorkspaceId: string): boolean => {
-    if (pendingCreateWorkspacesRef.current.has(targetWorkspaceId)) return false;
-    pendingCreateWorkspacesRef.current = new Set(pendingCreateWorkspacesRef.current).add(
-      targetWorkspaceId,
-    );
-    setPendingCreateWorkspaces(pendingCreateWorkspacesRef.current);
+  const beginPendingCreate = useCallback((target: NoteWorkspaceIdentity): boolean => {
+    if (pendingCreateActivationsRef.current.has(target)) return false;
+    pendingCreateActivationsRef.current = new Set(pendingCreateActivationsRef.current).add(target);
+    setPendingCreateActivations(pendingCreateActivationsRef.current);
     return true;
   }, []);
 
-  const endPendingCreate = useCallback((targetWorkspaceId: string): void => {
-    const next = new Set(pendingCreateWorkspacesRef.current);
-    next.delete(targetWorkspaceId);
-    pendingCreateWorkspacesRef.current = next;
-    setPendingCreateWorkspaces(next);
+  const endPendingCreate = useCallback((target: NoteWorkspaceIdentity): void => {
+    const next = new Set(pendingCreateActivationsRef.current);
+    next.delete(target);
+    pendingCreateActivationsRef.current = next;
+    setPendingCreateActivations(next);
   }, []);
 
-  const beginPendingConversion = useCallback((entryId: string): boolean => {
-    if (pendingConversionEntryIdsRef.current.has(entryId)) return false;
-    pendingConversionEntryIdsRef.current = new Set(pendingConversionEntryIdsRef.current).add(
-      entryId,
-    );
-    setPendingConversionEntryIds(pendingConversionEntryIdsRef.current);
-    return true;
-  }, []);
+  const beginPendingConversion = useCallback(
+    (target: NoteWorkspaceIdentity, entryId: string): boolean => {
+      if (pendingConversionOperationsRef.current.get(entryId) === target) return false;
+      pendingConversionOperationsRef.current = new Map(pendingConversionOperationsRef.current).set(
+        entryId,
+        target,
+      );
+      setPendingConversionOperations(pendingConversionOperationsRef.current);
+      return true;
+    },
+    [],
+  );
 
-  const endPendingConversion = useCallback((entryId: string): void => {
-    const next = new Set(pendingConversionEntryIdsRef.current);
-    next.delete(entryId);
-    pendingConversionEntryIdsRef.current = next;
-    setPendingConversionEntryIds(next);
-  }, []);
+  const endPendingConversion = useCallback(
+    (target: NoteWorkspaceIdentity, entryId: string): void => {
+      if (pendingConversionOperationsRef.current.get(entryId) !== target) return;
+      const next = new Map(pendingConversionOperationsRef.current);
+      next.delete(entryId);
+      pendingConversionOperationsRef.current = next;
+      setPendingConversionOperations(next);
+    },
+    [],
+  );
 
   const operationFailure = useCallback(
-    (error: unknown, targetWorkspaceId: string, fallback: string): Error => {
+    (error: unknown, target: NoteWorkspaceIdentity, fallback: string): Error => {
       const message = toMessage(error, fallback);
-      setOperationErrorState({ workspaceId: targetWorkspaceId, message });
+      if (activeActivationRef.current === target) {
+        setOperationErrorState({ activation: target, message });
+      }
       return new Error(message, { cause: error });
     },
     [],
@@ -153,31 +225,30 @@ export function useNoteController(workspaceId: string | null) {
 
   const create = useCallback(
     async (title: string, body: string): Promise<Note> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingCreate(targetWorkspaceId)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingCreate(target)) {
         throw new Error('这个工作区正在创建另一篇笔记。');
       }
-      const previousIds = new Set(
-        snapshotRef.current?.workspaceId === targetWorkspaceId
-          ? snapshotRef.current.notes.map(({ id }) => id)
-          : [],
-      );
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingCreate(target);
+        throw new Error('当前工作区不可用，无法创建笔记。');
+      }
       setOperationErrorState(null);
       try {
-        const snapshot = await window.workbench.note.create({
-          workspaceId: targetWorkspaceId,
+        const result = await window.workbench.note.create({
+          workspaceId: request.workspaceId,
           title,
           body,
         });
-        applySnapshot(snapshot, sequence);
-        const created = snapshot.notes.find(({ id }) => !previousIds.has(id));
+        applySnapshot(result.noteSnapshot, request);
+        const created = createdNoteFromResult(request.workspaceId, result);
         if (!created) throw new Error('The created note was not returned.');
         return created;
       } catch (error) {
-        throw operationFailure(error, targetWorkspaceId, '笔记创建失败，请重试。');
+        throw operationFailure(error, request.workspace, '笔记创建失败，请重试。');
       } finally {
-        endPendingCreate(targetWorkspaceId);
+        endPendingCreate(request.workspace);
       }
     },
     [applySnapshot, beginPendingCreate, beginRequest, endPendingCreate, operationFailure],
@@ -185,28 +256,35 @@ export function useNoteController(workspaceId: string | null) {
 
   const update = useCallback(
     async (note: Note, title: string, body: string): Promise<Note> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingNote(note.id)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingNote(target, note.id)) {
         throw new Error('这篇笔记正在保存。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingNote(target, note.id);
+        throw new Error('当前工作区不可用，无法保存笔记。');
+      }
       setOperationErrorState(null);
       try {
         const snapshot = await window.workbench.note.update({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
           noteId: note.id,
           title,
           body,
           expectedRevision: note.revision,
         });
-        applySnapshot(snapshot, sequence);
-        const updated = snapshot.notes.find(({ id }) => id === note.id);
+        applySnapshot(snapshot, request);
+        const updated =
+          snapshot.workspaceId === request.workspaceId
+            ? snapshot.notes.find(({ id }) => id === note.id)
+            : undefined;
         if (!updated) throw new Error('The updated note was not returned.');
         return updated;
       } catch (error) {
-        throw operationFailure(error, targetWorkspaceId, '笔记保存失败，可能已在其他操作中更新。');
+        throw operationFailure(error, request.workspace, '笔记保存失败，可能已在其他操作中更新。');
       } finally {
-        endPendingNote(note.id);
+        endPendingNote(request.workspace, note.id);
       }
     },
     [applySnapshot, beginPendingNote, beginRequest, endPendingNote, operationFailure],
@@ -214,23 +292,27 @@ export function useNoteController(workspaceId: string | null) {
 
   const archive = useCallback(
     async (note: Note): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingNote(note.id)) return;
-      const sequence = beginRequest(targetWorkspaceId);
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingNote(target, note.id)) return;
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingNote(target, note.id);
+        return;
+      }
       setOperationErrorState(null);
       try {
         applySnapshot(
           await window.workbench.note.archive({
-            workspaceId: targetWorkspaceId,
+            workspaceId: request.workspaceId,
             noteId: note.id,
             expectedRevision: note.revision,
           }),
-          sequence,
+          request,
         );
       } catch (error) {
-        throw operationFailure(error, targetWorkspaceId, '笔记归档失败，请重试。');
+        throw operationFailure(error, request.workspace, '笔记归档失败，请重试。');
       } finally {
-        endPendingNote(note.id);
+        endPendingNote(request.workspace, note.id);
       }
     },
     [applySnapshot, beginPendingNote, beginRequest, endPendingNote, operationFailure],
@@ -238,54 +320,82 @@ export function useNoteController(workspaceId: string | null) {
 
   const convertInbox = useCallback(
     async (entryId: string): Promise<NoteConversionResult> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingConversion(entryId)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingConversion(target, entryId)) {
         throw new Error('这条记录正在转换。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingConversion(target, entryId);
+        throw new Error('当前工作区不可用，无法转换记录。');
+      }
       setOperationErrorState(null);
       try {
         const result = await window.workbench.note.convertInbox({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
           entryId,
         });
-        applySnapshot(result.noteSnapshot, sequence);
+        applySnapshot(result.noteSnapshot, request);
         return result;
       } catch (error) {
-        throw operationFailure(error, targetWorkspaceId, '无法转换为笔记，请重试。');
+        throw operationFailure(error, request.workspace, '无法转换为笔记，请重试。');
       } finally {
-        endPendingConversion(entryId);
+        endPendingConversion(request.workspace, entryId);
       }
     },
     [applySnapshot, beginPendingConversion, beginRequest, endPendingConversion, operationFailure],
   );
 
-  const snapshot =
-    storedSnapshot?.workspaceId === workspaceId && workspaceId !== null ? storedSnapshot : null;
+  const snapshot = noteSnapshotForActivation(activation, storedSnapshot);
+  const visibleLoadState =
+    loadState.activation === activation && !(loadState.status === 'ready' && snapshot === null)
+      ? loadState
+      : {
+          activation,
+          status: 'loading' as const,
+          error: null,
+        };
+  const pendingNoteIds = useMemo(
+    () =>
+      new Set(
+        [...pendingNoteOperations]
+          .filter(([, target]) => target === activation)
+          .map(([noteId]) => noteId),
+      ),
+    [activation, pendingNoteOperations],
+  );
+  const pendingConversionEntryIds = useMemo(
+    () =>
+      new Set(
+        [...pendingConversionOperations]
+          .filter(([, target]) => target === activation)
+          .map(([entryId]) => entryId),
+      ),
+    [activation, pendingConversionOperations],
+  );
+  const operationErrorMessage =
+    operationErrorState?.activation === activation ? operationErrorState.message : null;
 
   return {
     snapshot,
     notes: snapshot?.notes ?? EMPTY_NOTES,
-    status:
-      snapshot !== null
-        ? ('ready' as const)
-        : storedSnapshot !== null && storedSnapshot.workspaceId !== workspaceId
-          ? ('loading' as const)
-          : status,
-    loadError,
-    operationError:
-      operationErrorState?.workspaceId === workspaceId ? operationErrorState.message : null,
+    status: snapshot !== null ? ('ready' as const) : visibleLoadState.status,
+    loadError: visibleLoadState.error,
+    operationError: operationErrorMessage,
     pendingNoteIds,
-    pendingCreate: workspaceId ? pendingCreateWorkspaces.has(workspaceId) : false,
+    pendingCreate: pendingCreateActivations.has(activation),
     pendingConversionEntryIds,
     retry: () => {
-      if (workspaceId) void load(workspaceId);
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) void load(current).catch(() => undefined);
     },
     refresh: async () => {
-      if (workspaceId) await load(workspaceId);
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
-    clearOperationError: () => setOperationErrorState(null),
+    clearOperationError: () =>
+      setOperationErrorState((current) => (current?.activation === activation ? null : current)),
     create,
     update,
     archive,

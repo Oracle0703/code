@@ -1,16 +1,18 @@
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
   FileText,
   LoaderCircle,
   MessageSquareText,
+  NotebookPen,
   Save,
   Send,
   Settings2,
   Sparkles,
   Square,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type {
   AssistantContextReference,
   AssistantCredentialStatus,
@@ -19,6 +21,15 @@ import type {
   Note,
   Task,
 } from '../../shared/contracts';
+import {
+  AssistantSavedNoteOpenGate,
+  AssistantSavedNoteSaveGate,
+  AssistantSavedNoteSupersededError,
+  assistantResponseKey,
+  assistantSavedNoteMatchesResponse,
+  assistantSavedNoteTargetKey,
+  type AssistantSavedNoteTarget,
+} from '../assistant-saved-note-navigation';
 import { MarkdownPreview } from './MarkdownPreview';
 
 export type AssistantContextDraft = AssistantContextReference;
@@ -41,7 +52,18 @@ interface AssistantPageProps {
   readonly onOpenSettings: () => void;
   readonly onStart: (prompt: string, context: AssistantContextDraft) => Promise<void>;
   readonly onCancel: (runId: string) => Promise<void>;
-  readonly onSaveResponse: (response: string) => Promise<void>;
+  readonly savedNote: AssistantSavedNoteTarget | null;
+  readonly onSaveResponse: (
+    responseKey: string,
+    response: string,
+  ) => Promise<AssistantSavedNoteTarget>;
+  readonly onOpenSavedNote: (target: AssistantSavedNoteTarget) => Promise<void>;
+}
+
+interface AssistantResponseFeedback {
+  readonly responseKey: string;
+  readonly tone: 'success' | 'error';
+  readonly message: string;
 }
 
 export function AssistantPage({
@@ -62,25 +84,45 @@ export function AssistantPage({
   onOpenSettings,
   onStart,
   onCancel,
+  savedNote,
   onSaveResponse,
+  onOpenSavedNote,
 }: AssistantPageProps) {
   const [prompt, setPrompt] = useState('');
   const [context, setContext] = useState<AssistantContextDraft>(initialContext);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
-  const [savedResponseKey, setSavedResponseKey] = useState<string | null>(null);
+  const [savingResponseKey, setSavingResponseKey] = useState<string | null>(null);
+  const [openingTargetKey, setOpeningTargetKey] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [responseFeedback, setResponseFeedback] = useState<AssistantResponseFeedback | null>(null);
+  const [saveGate] = useState(() => new AssistantSavedNoteSaveGate());
+  const [openGate] = useState(() => new AssistantSavedNoteOpenGate());
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const saveButtonRef = useRef<HTMLButtonElement>(null);
+  const openSavedNoteButtonRef = useRef<HTMLButtonElement>(null);
+  const startPendingRef = useRef(false);
+  const openPendingRef = useRef(false);
   const contextGenerationRef = useRef(contextGeneration);
   const previousPhaseRef = useRef<AssistantPhase | null>(runtime?.phase ?? null);
   const promptLength = Array.from(prompt.trim()).length;
   const promptTooLong = promptLength > promptMaxLength;
   const running = runtime?.phase === 'running';
-  const responseKey = runtime
-    ? `${runtime.workspaceId}:${runtime.runId ?? `sequence-${runtime.sequence}`}`
-    : null;
-  const responseSaved = responseKey !== null && savedResponseKey === responseKey;
+  const responseKey = assistantResponseKey(runtime);
+  const responseKeyRef = useRef(responseKey);
+  const currentSavedNote =
+    responseKey !== null && assistantSavedNoteMatchesResponse(savedNote, responseKey)
+      ? savedNote
+      : null;
+  const currentSavedNoteRef = useRef(currentSavedNote);
+  const responseSaved = currentSavedNote !== null;
+  const saving = responseKey !== null && savingResponseKey === responseKey;
+  const opening = openingTargetKey !== null;
+  const visibleResponseFeedback =
+    responseFeedback?.responseKey === responseKey &&
+    !(currentSavedNote !== null && responseFeedback.tone === 'error')
+      ? responseFeedback
+      : null;
   const configured =
     credentialStatus === 'ready' &&
     credential?.availability === 'available' &&
@@ -136,10 +178,15 @@ export function AssistantPage({
       if (contextGenerationRef.current !== contextGeneration) return;
       setContext(initialContext);
       setSubmitError(null);
-      setSaveFeedback(null);
+      setResponseFeedback(null);
     });
     window.requestAnimationFrame(() => headingRef.current?.focus());
   }, [contextGeneration, initialContext]);
+
+  useLayoutEffect(() => {
+    responseKeyRef.current = responseKey;
+    currentSavedNoteRef.current = currentSavedNote;
+  }, [currentSavedNote, responseKey]);
 
   useEffect(() => {
     const previousPhase = previousPhaseRef.current;
@@ -157,20 +204,27 @@ export function AssistantPage({
     runtimeStatus === 'ready' &&
     !running &&
     operation === null &&
+    !starting &&
+    !opening &&
     promptLength > 0 &&
     !promptTooLong;
 
   const submit = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
-    if (!canSubmit) return;
+    if (!canSubmit || startPendingRef.current || openPendingRef.current) return;
+    startPendingRef.current = true;
+    setStarting(true);
     setSubmitError(null);
-    setSaveFeedback(null);
+    setResponseFeedback(null);
     try {
       await onStart(prompt.trim(), effectiveContext);
       setPrompt('');
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : '问题未能发送，请重试。');
       window.requestAnimationFrame(() => promptRef.current?.focus());
+    } finally {
+      startPendingRef.current = false;
+      setStarting(false);
     }
   };
 
@@ -192,20 +246,89 @@ export function AssistantPage({
       !runtime.response.trim() ||
       saving ||
       responseSaved ||
-      !responseKey
+      startPendingRef.current ||
+      openPendingRef.current ||
+      operation !== null ||
+      !responseKey ||
+      !saveGate.begin(responseKey)
     ) {
       return;
     }
-    setSaving(true);
-    setSaveFeedback(null);
+    setSavingResponseKey(responseKey);
+    setResponseFeedback(null);
     try {
-      await onSaveResponse(runtime.response);
-      setSavedResponseKey(responseKey);
-      setSaveFeedback('回答已保存为当前工作区的新笔记。');
+      const target = await onSaveResponse(responseKey, runtime.response);
+      if (responseKeyRef.current !== responseKey) return;
+      setResponseFeedback({
+        responseKey,
+        tone: 'success',
+        message: `回答已保存为笔记“${target.noteTitle}”。`,
+      });
+      window.requestAnimationFrame(() => {
+        if (responseKeyRef.current === responseKey) openSavedNoteButtonRef.current?.focus();
+      });
     } catch (error) {
-      setSaveFeedback(error instanceof Error ? error.message : '回答未能保存，请重试。');
+      if (responseKeyRef.current !== responseKey) return;
+      setResponseFeedback({
+        responseKey,
+        tone: 'error',
+        message: error instanceof Error ? error.message : '回答未能保存，请重试。',
+      });
+      window.requestAnimationFrame(() => {
+        if (responseKeyRef.current === responseKey) saveButtonRef.current?.focus();
+      });
     } finally {
-      setSaving(false);
+      saveGate.end(responseKey);
+      setSavingResponseKey((current) => (current === responseKey ? null : current));
+    }
+  };
+
+  const openSavedNote = async () => {
+    const target = currentSavedNoteRef.current;
+    if (
+      !target ||
+      responseKeyRef.current !== target.responseKey ||
+      startPendingRef.current ||
+      openPendingRef.current ||
+      operation !== null
+    ) {
+      return;
+    }
+    const targetKey = assistantSavedNoteTargetKey(target);
+    if (!openGate.begin(target)) return;
+    openPendingRef.current = true;
+    setOpeningTargetKey(targetKey);
+    setResponseFeedback(null);
+    try {
+      await onOpenSavedNote(target);
+    } catch (error) {
+      if (error instanceof AssistantSavedNoteSupersededError) return;
+      if (
+        responseKeyRef.current !== target.responseKey ||
+        currentSavedNoteRef.current?.noteId !== target.noteId
+      ) {
+        return;
+      }
+      setResponseFeedback({
+        responseKey: target.responseKey,
+        tone: 'error',
+        message:
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : '无法打开已保存的笔记，请重试。',
+      });
+      window.requestAnimationFrame(() => {
+        if (
+          responseKeyRef.current === target.responseKey &&
+          currentSavedNoteRef.current?.noteId === target.noteId
+        ) {
+          openSavedNoteButtonRef.current?.focus();
+        }
+      });
+    } finally {
+      openGate.end(target);
+      openPendingRef.current = false;
+      setOpeningTargetKey((current) => (current === targetKey ? null : current));
     }
   };
 
@@ -287,7 +410,7 @@ export function AssistantPage({
               <select
                 id="assistant-context"
                 value={selectedContext}
-                disabled={running || operation !== null}
+                disabled={running || operation !== null || starting || opening}
                 onChange={(event) =>
                   setContext(
                     decodeContext(event.target.value, notes, effectiveContext, taskContextOption),
@@ -313,7 +436,7 @@ export function AssistantPage({
                 ref={promptRef}
                 value={prompt}
                 rows={5}
-                disabled={running || operation !== null}
+                disabled={running || operation !== null || starting || opening}
                 aria-invalid={promptTooLong}
                 aria-describedby="assistant-prompt-help assistant-prompt-count"
                 placeholder={`询问 ${workspaceName} 中需要梳理的问题…`}
@@ -355,19 +478,19 @@ export function AssistantPage({
                   </button>
                 ) : (
                   <button type="submit" className="primary-button" disabled={!canSubmit}>
-                    {operation === 'start' ? (
+                    {starting || operation === 'start' ? (
                       <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
                     ) : (
                       <Send size={14} aria-hidden="true" />
                     )}
-                    {operation === 'start' ? '发送中…' : '发送'}
+                    {starting || operation === 'start' ? '发送中…' : '发送'}
                   </button>
                 )}
               </div>
             </form>
           </section>
 
-          <section className="assistant-response" role="log" aria-label="AI 回答记录">
+          <section className="assistant-response" aria-label="AI 回答">
             <header>
               <div>
                 <span className={`assistant-response__state is-${runtime?.phase ?? 'idle'}`}>
@@ -394,9 +517,11 @@ export function AssistantPage({
               </div>
               {runtime?.phase === 'completed' && runtime.response.trim() ? (
                 <button
+                  ref={saveButtonRef}
                   type="button"
                   className="secondary-button"
-                  disabled={saving || responseSaved}
+                  disabled={saving || responseSaved || starting || opening || operation !== null}
+                  aria-busy={saving}
                   onClick={() => void saveResponse()}
                 >
                   {responseSaved ? (
@@ -411,23 +536,56 @@ export function AssistantPage({
               ) : null}
             </header>
 
-            {runtime?.prompt ? (
-              <div className="assistant-response__prompt">
-                <small>你的问题</small>
-                <p>{runtime.prompt}</p>
+            <div className="assistant-response__log" role="log" aria-label="AI 回答记录">
+              {runtime?.prompt ? (
+                <div className="assistant-response__prompt">
+                  <small>你的问题</small>
+                  <p>{runtime.prompt}</p>
+                </div>
+              ) : null}
+
+              {runtime?.response ? (
+                <div className="assistant-response__markdown">
+                  <MarkdownPreview source={runtime.response} />
+                </div>
+              ) : (
+                <div className="assistant-response__empty">
+                  <MessageSquareText size={24} aria-hidden="true" />
+                  <p>{running ? '正在等待第一段回答…' : '发送问题后，回答会显示在这里。'}</p>
+                </div>
+              )}
+            </div>
+
+            {currentSavedNote ? (
+              <div
+                className="assistant-response__saved-note"
+                data-assistant-saved-note-id={currentSavedNote.noteId}
+              >
+                <span>
+                  <NotebookPen size={16} aria-hidden="true" />
+                </span>
+                <div>
+                  <strong>回答已保存为笔记</strong>
+                  <small>{currentSavedNote.noteTitle}</small>
+                </div>
+                <button
+                  ref={openSavedNoteButtonRef}
+                  type="button"
+                  className="secondary-button"
+                  disabled={opening || starting || operation !== null}
+                  aria-busy={opening}
+                  aria-label={`打开已保存的笔记：${currentSavedNote.noteTitle}`}
+                  onClick={() => void openSavedNote()}
+                >
+                  {opening ? (
+                    <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+                  ) : (
+                    <ArrowRight size={14} aria-hidden="true" />
+                  )}
+                  {opening ? '打开中…' : '打开笔记'}
+                </button>
               </div>
             ) : null}
-
-            {runtime?.response ? (
-              <div className="assistant-response__markdown">
-                <MarkdownPreview source={runtime.response} />
-              </div>
-            ) : (
-              <div className="assistant-response__empty">
-                <MessageSquareText size={24} aria-hidden="true" />
-                <p>{running ? '正在等待第一段回答…' : '发送问题后，回答会显示在这里。'}</p>
-              </div>
-            )}
 
             {runtime?.phase === 'failed' && runtime.error ? (
               <p className="assistant-response__error" role="alert">
@@ -445,12 +603,16 @@ export function AssistantPage({
                 回答已停止。{runtime.response ? '已生成的部分回答仍保留在上方。' : ''}
               </p>
             ) : null}
-            {saveFeedback ? (
+            {visibleResponseFeedback ? (
               <p
-                className="assistant-response__notice"
-                role={saveFeedback.includes('未能') ? 'alert' : 'status'}
+                className={
+                  visibleResponseFeedback.tone === 'success'
+                    ? 'sr-only'
+                    : 'assistant-response__notice is-error'
+                }
+                role={visibleResponseFeedback.tone === 'error' ? 'alert' : 'status'}
               >
-                {saveFeedback}
+                {visibleResponseFeedback.message}
               </p>
             ) : null}
           </section>

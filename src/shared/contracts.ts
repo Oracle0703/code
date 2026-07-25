@@ -646,6 +646,11 @@ export interface NoteCreateInput {
   readonly body: string;
 }
 
+export interface NoteCreateResult {
+  readonly noteSnapshot: NoteSnapshot;
+  readonly createdNoteId: string;
+}
+
 export interface NoteTargetInput {
   readonly workspaceId: string;
   readonly noteId: string;
@@ -1129,7 +1134,7 @@ export interface WorkbenchApi {
   };
   note: {
     getSnapshot(input: WorkspaceTargetInput): Promise<NoteSnapshot>;
-    create(input: NoteCreateInput): Promise<NoteSnapshot>;
+    create(input: NoteCreateInput): Promise<NoteCreateResult>;
     update(input: NoteUpdateInput): Promise<NoteSnapshot>;
     archive(input: NoteArchiveInput): Promise<NoteSnapshot>;
     convertInbox(input: NoteConvertInboxInput): Promise<NoteConversionResult>;

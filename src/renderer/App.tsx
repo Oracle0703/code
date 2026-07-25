@@ -90,6 +90,17 @@ import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
 import {
+  AssistantSavedNoteNavigationCoordinator,
+  AssistantSavedNoteSaveGate,
+  AssistantSavedNoteSupersededError,
+  assistantResponseKey,
+  assistantSavedNoteNavigationError,
+  createAssistantWorkspaceIdentity,
+  resolveAssistantSavedNoteNavigationTarget,
+  type AssistantSavedNoteTarget,
+  type AssistantWorkspaceIdentity,
+} from './assistant-saved-note-navigation';
+import {
   AutomationOutputNavigationCoordinator,
   automationOutputNavigationError,
   resolveAutomationOutputNavigationTarget,
@@ -144,6 +155,7 @@ const viewLabels: Record<AppSurfaceId, string> = {
   assistant: 'AI 助手',
   settings: '设置',
 };
+const ASSISTANT_SAVED_NOTE_TARGET_LIMIT = 24;
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum);
@@ -205,6 +217,9 @@ export function App() {
     readonly context: AssistantContextReference;
     readonly generation: number;
   }>({ workspaceId: null, context: EMPTY_ASSISTANT_CONTEXT, generation: 0 });
+  const [assistantSavedNotes, setAssistantSavedNotes] = useState<
+    ReadonlyMap<string, AssistantSavedNoteTarget>
+  >(() => new Map());
   const [requestedNoteId, setRequestedNoteId] = useState<string | null>(null);
   const [notePageGeneration, setNotePageGeneration] = useState(0);
   const [inboxReveal, setInboxReveal] = useState<{
@@ -215,6 +230,10 @@ export function App() {
   } | null>(null);
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
+  const [assistantSavedNoteNavigation] = useState(
+    () => new AssistantSavedNoteNavigationCoordinator(),
+  );
+  const [assistantSavedNoteSaveGate] = useState(() => new AssistantSavedNoteSaveGate());
   const [focusTaskCompletionCoordinator] = useState(() => new FocusTaskCompletionCoordinator());
   const [focusTaskCompletionGate] = useState(() => new FocusTaskCompletionGate());
   const [maximized, setMaximized] = useState(false);
@@ -224,6 +243,12 @@ export function App() {
   const focusDialogSequenceRef = useRef(0);
   const currentWorkspaceIdRef = useRef<string | null>(null);
   const currentSurfaceRef = useRef<AppSurfaceId>('today');
+  const assistantSavedNotesRef = useRef<ReadonlyMap<string, AssistantSavedNoteTarget>>(new Map());
+  const assistantSavedNoteActivationRef = useRef<AssistantWorkspaceIdentity>(
+    createAssistantWorkspaceIdentity(null),
+  );
+  const assistantResponseKeyRef = useRef<string | null>(null);
+  const assistantSavedNoteTargetRef = useRef<AssistantSavedNoteTarget | null>(null);
   const automationOutputActivationRef = useRef<AutomationWorkspaceIdentity>(
     createAutomationWorkspaceIdentity(null),
   );
@@ -246,6 +271,10 @@ export function App() {
     () => createAutomationWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
+  const assistantSavedNoteActivation = useMemo(
+    () => createAssistantWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -264,6 +293,8 @@ export function App() {
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
+  const createNote = noteController.create;
+  const prepareNoteSnapshotRefresh = noteController.prepareSnapshotRefresh;
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
   const focusController = useFocusController(snapshot?.currentWorkspaceId ?? null);
   const focusTaskCompletion = useMemo(
@@ -286,6 +317,12 @@ export function App() {
     },
   });
   const assistantController = useAssistantController(snapshot?.currentWorkspaceId ?? null);
+  const startAssistant = assistantController.start;
+  const currentAssistantResponseKey = assistantResponseKey(assistantController.snapshot);
+  const currentAssistantSavedNote =
+    currentAssistantResponseKey === null
+      ? null
+      : (assistantSavedNotes.get(currentAssistantResponseKey) ?? null);
   const searchController = useGlobalSearchController({
     open: paletteOpen,
     workspaceId: snapshot?.currentWorkspaceId ?? null,
@@ -368,7 +405,9 @@ export function App() {
                   ? 'data'
                   : null;
   const statusbarErrorIsMirrored =
-    statusbarErrorSource === 'task' && (activeSurface === 'today' || activeSurface === 'tasks');
+    (statusbarErrorSource === 'task' && (activeSurface === 'today' || activeSurface === 'tasks')) ||
+    (statusbarErrorSource === 'note' &&
+      (activeSurface === 'notes' || activeSurface === 'assistant'));
   const focusDialogOpen =
     focusDialog !== null &&
     isFocusDialogActivationCurrent(
@@ -396,6 +435,23 @@ export function App() {
     automationOutputActivation,
     automationOutputNavigation,
     automationController.runFeedback,
+    overlayOpen,
+  ]);
+  useLayoutEffect(() => {
+    assistantSavedNotesRef.current = assistantSavedNotes;
+  }, [assistantSavedNotes]);
+  useLayoutEffect(() => {
+    assistantSavedNoteActivationRef.current = assistantSavedNoteActivation;
+    assistantResponseKeyRef.current = currentAssistantResponseKey;
+    assistantSavedNoteTargetRef.current = currentAssistantSavedNote;
+    currentSurfaceRef.current = activeSurface;
+    assistantSavedNoteNavigation.invalidate();
+  }, [
+    activeSurface,
+    assistantSavedNoteActivation,
+    assistantSavedNoteNavigation,
+    currentAssistantResponseKey,
+    currentAssistantSavedNote,
     overlayOpen,
   ]);
   useLayoutEffect(() => {
@@ -474,6 +530,7 @@ export function App() {
     (view: AppSurfaceId) => {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
       automationOutputNavigation.invalidate();
+      assistantSavedNoteNavigation.invalidate();
       if (view === 'assistant') {
         setAssistantSurfaceOpen(true);
       } else {
@@ -486,6 +543,7 @@ export function App() {
     [
       activeSurface,
       activeView,
+      assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
       updatePreferences,
@@ -516,9 +574,16 @@ export function App() {
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
+      assistantSavedNoteNavigation.invalidate();
       void workspaceController.activate(workspaceId).catch(() => undefined);
     },
-    [automationOutputNavigation, confirmLeaveNoteDraft, searchNavigation, workspaceController],
+    [
+      assistantSavedNoteNavigation,
+      automationOutputNavigation,
+      confirmLeaveNoteDraft,
+      searchNavigation,
+      workspaceController,
+    ],
   );
   const openQuickCapture = useCallback(() => {
     if (
@@ -828,6 +893,95 @@ export function App() {
       });
     },
     [focusTaskCompletionCoordinator],
+  );
+
+  const rememberAssistantSavedNote = useCallback((target: AssistantSavedNoteTarget): void => {
+    const next = new Map(assistantSavedNotesRef.current);
+    next.delete(target.responseKey);
+    next.set(target.responseKey, target);
+    while (next.size > ASSISTANT_SAVED_NOTE_TARGET_LIMIT) {
+      const oldestKey = next.keys().next().value;
+      if (oldestKey === undefined) break;
+      next.delete(oldestKey);
+    }
+    assistantSavedNotesRef.current = next;
+    setAssistantSavedNotes(next);
+  }, []);
+
+  const startAssistantRequest = useCallback(
+    async (prompt: string, context: AssistantContextReference): Promise<void> => {
+      assistantSavedNoteNavigation.invalidate();
+      await startAssistant(prompt, context);
+    },
+    [assistantSavedNoteNavigation, startAssistant],
+  );
+
+  const saveAssistantResponse = useCallback(
+    async (responseKey: string, response: string): Promise<AssistantSavedNoteTarget> => {
+      const existing = assistantSavedNotesRef.current.get(responseKey);
+      if (existing) return existing;
+      const activation = assistantSavedNoteActivationRef.current;
+      if (
+        activation.workspaceId === null ||
+        assistantResponseKeyRef.current !== responseKey ||
+        currentSurfaceRef.current !== 'assistant'
+      ) {
+        throw new AssistantSavedNoteSupersededError();
+      }
+      if (!assistantSavedNoteSaveGate.begin(responseKey)) {
+        throw new Error('这个回答正在保存，请稍候。');
+      }
+      try {
+        const note = await createNote(
+          `AI 助手回复 · ${new Intl.DateTimeFormat('zh-CN').format(new Date())}`,
+          response,
+        );
+        const target: AssistantSavedNoteTarget = {
+          responseKey,
+          workspaceId: activation.workspaceId,
+          noteId: note.id,
+          noteTitle: note.title,
+        };
+        rememberAssistantSavedNote(target);
+        return target;
+      } finally {
+        assistantSavedNoteSaveGate.end(responseKey);
+      }
+    },
+    [assistantSavedNoteSaveGate, createNote, rememberAssistantSavedNote],
+  );
+
+  const openAssistantSavedNote = useCallback(
+    async (target: AssistantSavedNoteTarget): Promise<void> => {
+      try {
+        const intent = assistantSavedNoteNavigation.begin(
+          assistantSavedNoteActivationRef.current,
+          target,
+        );
+        const assertCurrent = () =>
+          assistantSavedNoteNavigation.assertCurrent(
+            intent,
+            assistantSavedNoteActivationRef.current,
+            currentSurfaceRef.current,
+            assistantResponseKeyRef.current,
+            assistantSavedNoteTargetRef.current,
+          );
+        const resolved = await resolveAssistantSavedNoteNavigationTarget(
+          intent,
+          prepareNoteSnapshotRefresh,
+          assertCurrent,
+        );
+        assertCurrent();
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setInboxReveal(null);
+        updatePreferences({ activeView: 'notes' }, true, resolved.workspaceId);
+        setRequestedNoteId(resolved.note.id);
+      } catch (error) {
+        throw assistantSavedNoteNavigationError(error);
+      }
+    },
+    [assistantSavedNoteNavigation, prepareNoteSnapshotRefresh, updatePreferences],
   );
 
   const openAutomationRunOutput = useCallback(
@@ -1912,14 +2066,11 @@ export function App() {
                     promptMaxLength={ASSISTANT_PROMPT_MAX_LENGTH}
                     onRetry={assistantController.retry}
                     onOpenSettings={openAssistantSettings}
-                    onStart={assistantController.start}
+                    onStart={startAssistantRequest}
                     onCancel={assistantController.cancel}
-                    onSaveResponse={async (response) => {
-                      await noteController.create(
-                        `AI 助手回复 · ${new Intl.DateTimeFormat('zh-CN').format(new Date())}`,
-                        response,
-                      );
-                    }}
+                    savedNote={currentAssistantSavedNote}
+                    onSaveResponse={saveAssistantResponse}
+                    onOpenSavedNote={openAssistantSavedNote}
                   />
                 ) : activeSurface === 'settings' ? (
                   <SettingsPage

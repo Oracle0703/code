@@ -6958,6 +6958,8 @@ textarea:focus-visible,
 .assistant-page {
   display: flex;
   flex-direction: column;
+  container-name: assistant-page;
+  container-type: inline-size;
 }
 
 .assistant-page__header {
@@ -7190,6 +7192,13 @@ textarea:focus-visible,
   color: var(--danger);
 }
 
+.assistant-response__log {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
 .assistant-response__prompt {
   padding: 10px 13px;
   border-bottom: 1px solid var(--border-subtle);
@@ -7233,6 +7242,71 @@ textarea:focus-visible,
   font-size: 9px;
 }
 
+.assistant-response__saved-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  margin: 10px 12px 0;
+  padding: 9px;
+  gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--success) 28%, var(--border-subtle));
+  border-radius: 8px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--success) 7%, var(--bg-input));
+}
+
+.assistant-response__saved-note > span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+}
+
+.assistant-response__saved-note > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assistant-response__saved-note strong,
+.assistant-response__saved-note small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-response__saved-note strong {
+  color: var(--text-primary);
+  font-size: 9px;
+}
+
+.assistant-response__saved-note small {
+  color: var(--text-tertiary);
+  font-size: 8px;
+}
+
+.assistant-response__saved-note button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+@container assistant-page (max-width: 420px) {
+  .assistant-response__saved-note {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .assistant-response__saved-note > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
 .assistant-response__error,
 .assistant-response__notice,
 .assistant-page__operation-error {
@@ -7246,8 +7320,13 @@ textarea:focus-visible,
 }
 
 .assistant-response__error,
+.assistant-response__notice.is-error,
 .assistant-page__operation-error {
   color: var(--danger);
+}
+
+.assistant-response__notice.is-success {
+  color: var(--success);
 }
 
 .assistant-page__operation-error {

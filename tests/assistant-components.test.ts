@@ -23,6 +23,10 @@ import {
   shouldApplyAssistantSnapshot,
   visibleAssistantRuntime,
 } from '../src/renderer/assistant-state';
+import {
+  assistantResponseKey,
+  type AssistantSavedNoteTarget,
+} from '../src/renderer/assistant-saved-note-navigation';
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
 const TASK_ID = '22222222-2222-4222-8222-222222222222';
@@ -105,7 +109,9 @@ describe('assistant renderer surfaces', () => {
         onOpenSettings: () => undefined,
         onStart: async () => undefined,
         onCancel: async () => undefined,
-        onSaveResponse: async () => undefined,
+        savedNote: null,
+        onSaveResponse: async () => savedNoteTarget(),
+        onOpenSavedNote: async () => undefined,
       }),
     );
 
@@ -140,7 +146,9 @@ describe('assistant renderer surfaces', () => {
         onOpenSettings: () => undefined,
         onStart: async () => undefined,
         onCancel: async () => undefined,
-        onSaveResponse: async () => undefined,
+        savedNote: null,
+        onSaveResponse: async () => savedNoteTarget(),
+        onOpenSavedNote: async () => undefined,
       }),
     );
     const running = renderToStaticMarkup(
@@ -162,12 +170,119 @@ describe('assistant renderer surfaces', () => {
         onOpenSettings: () => undefined,
         onStart: async () => undefined,
         onCancel: async () => undefined,
-        onSaveResponse: async () => undefined,
+        savedNote: null,
+        onSaveResponse: async () => savedNoteTarget(),
+        onOpenSavedNote: async () => undefined,
       }),
     );
 
     expect(completed).toContain('保存为笔记');
     expect(running).not.toContain('保存为笔记');
+  });
+
+  it('keeps a saved answer on the assistant page and offers only explicit exact-note navigation', () => {
+    const runtime = runtimeSnapshot({ phase: 'completed', response: '# 已保存回答' });
+    const target = savedNoteTarget(runtime);
+    const openSavedNote = vi.fn(async () => undefined);
+    const markup = renderToStaticMarkup(
+      createElement(AssistantPage, {
+        workspaceName: '产品',
+        credential: credential(),
+        credentialStatus: 'ready',
+        credentialError: null,
+        runtimeStatus: 'ready',
+        runtimeError: null,
+        runtime,
+        operation: null,
+        notes: [],
+        tasks: [],
+        initialContext: { kind: 'none' },
+        contextGeneration: 0,
+        promptMaxLength: 4_000,
+        onRetry: () => undefined,
+        onOpenSettings: () => undefined,
+        onStart: async () => undefined,
+        onCancel: async () => undefined,
+        savedNote: target,
+        onSaveResponse: async () => target,
+        onOpenSavedNote: openSavedNote,
+      }),
+    );
+
+    expect(markup).toContain(`data-assistant-saved-note-id="${target.noteId}"`);
+    expect(markup).toContain('回答已保存为笔记');
+    expect(markup).toContain('已保存</button>');
+    expect(markup).toContain('打开笔记</button>');
+    expect(markup).toContain(`aria-label="打开已保存的笔记：${target.noteTitle}"`);
+    expect(markup).toContain('<section class="assistant-response" aria-label="AI 回答">');
+    expect(markup).toMatch(
+      /<div class="assistant-response__log" role="log" aria-label="AI 回答记录">[\s\S]*?<\/div><div class="assistant-response__saved-note"/u,
+    );
+    expect(openSavedNote).not.toHaveBeenCalled();
+  });
+
+  it('uses structured feedback, stable focus, one error surface, and synchronous intent gates', () => {
+    const pageSource = readFileSync(
+      new URL('../src/renderer/components/AssistantPage.tsx', import.meta.url),
+      'utf8',
+    );
+    const appSource = readFileSync(new URL('../src/renderer/App.tsx', import.meta.url), 'utf8');
+
+    expect(pageSource).toContain("tone: 'success'");
+    expect(pageSource).toContain("tone: 'error'");
+    expect(pageSource).not.toContain("includes('未能')");
+    expect(pageSource).toContain('openSavedNoteButtonRef.current?.focus()');
+    expect(pageSource).toContain('saveButtonRef.current?.focus()');
+    expect(pageSource).toContain('startPendingRef.current');
+    expect(pageSource).toContain('openPendingRef.current');
+    expect(pageSource).toContain('!starting &&');
+    expect(pageSource).toContain('!opening &&');
+    expect(appSource).toContain("statusbarErrorSource === 'note'");
+    expect(appSource).toContain("activeSurface === 'notes' || activeSurface === 'assistant'");
+    expect(appSource).toMatch(
+      /const startAssistantRequest = useCallback\([\s\S]*?assistantSavedNoteNavigation\.invalidate\(\);[\s\S]*?await startAssistant/u,
+    );
+    expect(appSource).toMatch(
+      /const requestActiveView = useCallback\([\s\S]*?automationOutputNavigation\.invalidate\(\);\s+assistantSavedNoteNavigation\.invalidate\(\);/u,
+    );
+    expect(appSource).toMatch(
+      /const requestWorkspaceActivation = useCallback\([\s\S]*?automationOutputNavigation\.invalidate\(\);\s+assistantSavedNoteNavigation\.invalidate\(\);/u,
+    );
+  });
+
+  it('disables exact-note navigation while a new assistant request is starting', () => {
+    const runtime = runtimeSnapshot({ phase: 'completed', response: '# 已保存回答' });
+    const target = savedNoteTarget(runtime);
+    const markup = renderToStaticMarkup(
+      createElement(AssistantPage, {
+        workspaceName: '产品',
+        credential: credential(),
+        credentialStatus: 'ready',
+        credentialError: null,
+        runtimeStatus: 'ready',
+        runtimeError: null,
+        runtime,
+        operation: 'start',
+        notes: [],
+        tasks: [],
+        initialContext: { kind: 'none' },
+        contextGeneration: 0,
+        promptMaxLength: 4_000,
+        onRetry: () => undefined,
+        onOpenSettings: () => undefined,
+        onStart: async () => undefined,
+        onCancel: async () => undefined,
+        savedNote: target,
+        onSaveResponse: async () => target,
+        onOpenSavedNote: async () => undefined,
+      }),
+    );
+
+    const openButton =
+      markup.match(
+        new RegExp(`<button[^>]+aria-label="打开已保存的笔记：${target.noteTitle}"[^>]*>`, 'u'),
+      )?.[0] ?? '';
+    expect(openButton).toContain('disabled=""');
   });
 
   it('states separate API billing and renders the bounded transient credential form', () => {
@@ -469,4 +584,18 @@ function runtimeSnapshot(overrides: Partial<AssistantSnapshot>): AssistantSnapsh
     error: null,
   };
   return Object.assign(snapshot, overrides);
+}
+
+function savedNoteTarget(
+  runtime: AssistantSnapshot = runtimeSnapshot({
+    phase: 'completed',
+    response: '# 可保存回答',
+  }),
+): AssistantSavedNoteTarget {
+  return {
+    responseKey: assistantResponseKey(runtime),
+    workspaceId: runtime.workspaceId,
+    noteId: '44444444-4444-4444-8444-444444444444',
+    noteTitle: 'AI 助手回复',
+  };
 }

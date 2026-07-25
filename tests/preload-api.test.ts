@@ -287,6 +287,38 @@ describe('preload note API', () => {
       ['note:convert-inbox', { workspaceId, entryId }],
     ]);
   });
+
+  it('returns the Main-issued note creation identity unchanged', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const createdNoteId = '523e4567-e89b-42d3-a456-426614174000';
+    const result = {
+      createdNoteId,
+      noteSnapshot: {
+        workspaceId,
+        notes: [
+          {
+            id: createdNoteId,
+            title: '权威身份',
+            body: '# Markdown',
+            revision: 1,
+            sourceInboxEntryId: null,
+            createdAt: '2026-07-25T12:00:00.000Z',
+            updatedAt: '2026-07-25T12:00:00.000Z',
+          },
+        ],
+      },
+    };
+    electron.invoke.mockResolvedValueOnce(result as never);
+
+    await expect(
+      api.note.create({ workspaceId, title: '权威身份', body: '# Markdown' }),
+    ).resolves.toBe(result);
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith('note:create', {
+      workspaceId,
+      title: '权威身份',
+      body: '# Markdown',
+    });
+  });
 });
 
 describe('preload schedule API', () => {

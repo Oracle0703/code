@@ -380,11 +380,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
 
     let notes = await service.getNoteSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.deepEqual(notes.notes, []);
-    notes = await service.createNote({
+    const firstNoteCreation = await service.createNote({
       workspaceId: DEFAULT_WORKSPACE_ID,
       title: '  打包后的 Markdown 笔记 👩‍💻  ',
       body: '# 产物验证\r\n\r\n- e\u0301\r\n- 👩‍💻',
     });
+    assert.equal(firstNoteCreation.createdNoteId, FIRST_NOTE_ID);
+    notes = firstNoteCreation.noteSnapshot;
     let note = notes.notes.find(({ id }) => id === FIRST_NOTE_ID);
     assert.ok(note);
     assert.equal(note.title, '打包后的 Markdown 笔记 👩‍💻');
@@ -563,11 +565,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       status: 'in_progress',
     });
     assert.equal(tasks.tasks[0]?.status, 'in_progress');
-    notes = await service.createNote({
+    const secondWorkspaceNoteCreation = await service.createNote({
       workspaceId: SECOND_WORKSPACE_ID,
       title: '第二工作区笔记',
       body: '只属于研发工作区。',
     });
+    assert.equal(secondWorkspaceNoteCreation.createdNoteId, SECOND_NOTE_ID);
+    notes = secondWorkspaceNoteCreation.noteSnapshot;
     assert.equal(notes.notes[0]?.id, SECOND_NOTE_ID);
     schedule = await service.createScheduleItem({
       workspaceId: SECOND_WORKSPACE_ID,
