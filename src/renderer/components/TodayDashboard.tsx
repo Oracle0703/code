@@ -30,6 +30,10 @@ import type {
   TaskStatus,
 } from '../../shared/contracts';
 import { INBOX_CONTENT_MAX_LENGTH } from '../../shared/inbox-domain';
+import type {
+  FocusTaskCompletionActionState,
+  FocusTaskCompletionNotice,
+} from '../focus-task-completion';
 import { describeFocusTimer, FOCUS_DURATION_SECONDS, formatFocusTimer } from '../focus-state';
 import { formatScheduleInputMinute } from '../schedule-state';
 import { toLocalDateKey } from '../task-state';
@@ -59,6 +63,8 @@ export interface TodayDashboardProps {
   focusOperation: 'start' | 'pause' | 'resume' | 'cancel' | null;
   focusRemainingSeconds: number;
   focusSuccessSequence: number;
+  focusTaskCompletion: FocusTaskCompletionNotice | null;
+  focusTaskCompletionAction: FocusTaskCompletionActionState | null;
   taskFocusStartUnavailableReason: string | null;
   onCapture: (content: string) => Promise<void>;
   onOpenInbox: () => void;
@@ -78,6 +84,8 @@ export interface TodayDashboardProps {
   onResumeFocus: () => Promise<void>;
   onCancelFocus: () => Promise<void>;
   onSwitchFocusWorkspace: (workspaceId: string) => void;
+  onCompleteFocusTask: (notice: FocusTaskCompletionNotice) => Promise<void>;
+  onDismissFocusTaskCompletion: (notice: FocusTaskCompletionNotice) => void;
 }
 
 export function TodayDashboard({
@@ -104,6 +112,8 @@ export function TodayDashboard({
   focusOperation,
   focusRemainingSeconds,
   focusSuccessSequence,
+  focusTaskCompletion,
+  focusTaskCompletionAction,
   taskFocusStartUnavailableReason,
   onCapture,
   onOpenInbox,
@@ -123,6 +133,8 @@ export function TodayDashboard({
   onResumeFocus,
   onCancelFocus,
   onSwitchFocusWorkspace,
+  onCompleteFocusTask,
+  onDismissFocusTaskCompletion,
 }: TodayDashboardProps) {
   const [capture, setCapture] = useState('');
   const [recentCapture, setRecentCapture] = useState<string | null>(null);
@@ -163,6 +175,33 @@ export function TodayDashboard({
   const focusBusy = focusOperation !== null;
   const displayedFocusSeconds = focusReady ? focusRemainingSeconds : FOCUS_DURATION_SECONDS;
   const focusAnnouncement = focusStatusMessage(focusSnapshot, focusStatus, focusRemainingSeconds);
+  const completionTaskSnapshot =
+    focusTaskCompletion &&
+    taskSnapshot?.workspaceId === focusTaskCompletion.workspaceId &&
+    taskSnapshot.todayDate === focusTaskCompletion.todayDate
+      ? taskSnapshot
+      : null;
+  const completionTask =
+    completionTaskSnapshot?.tasks.find(({ id }) => id === focusTaskCompletion?.taskId) ?? null;
+  const completionTaskTitle = completionTask?.title ?? focusTaskCompletion?.taskTitle ?? '';
+  const visibleCompletionAction =
+    focusTaskCompletionAction?.completionKey === focusTaskCompletion?.key
+      ? focusTaskCompletionAction
+      : null;
+  const completionPending =
+    visibleCompletionAction?.pending === true ||
+    (focusTaskCompletion !== null && pendingTaskIds.has(focusTaskCompletion.taskId));
+  const completionTaskLoading =
+    focusTaskCompletion !== null &&
+    taskStatus !== 'error' &&
+    (taskStatus === 'loading' ||
+      taskSnapshot === null ||
+      taskSnapshot.workspaceId !== focusTaskCompletion.workspaceId ||
+      taskSnapshot.todayDate !== focusTaskCompletion.todayDate);
+  const completionTaskUnavailable =
+    focusTaskCompletion !== null &&
+    !completionTaskLoading &&
+    (taskStatus === 'error' || completionTask === null);
 
   useEffect(() => {
     if (focusSuccessSequence === 0) return;
@@ -183,6 +222,28 @@ export function TodayDashboard({
       setCapture('');
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : '快速记录失败，请重试。');
+    }
+  };
+
+  const restoreFocusCard = () => {
+    window.requestAnimationFrame(() => {
+      focusCardRef.current?.focus({ preventScroll: true });
+    });
+  };
+
+  const dismissFocusTaskCompletion = () => {
+    if (!focusTaskCompletion || completionPending) return;
+    onDismissFocusTaskCompletion(focusTaskCompletion);
+    restoreFocusCard();
+  };
+
+  const completeFocusTask = async () => {
+    if (!focusTaskCompletion || completionPending) return;
+    try {
+      await onCompleteFocusTask(focusTaskCompletion);
+      restoreFocusCard();
+    } catch {
+      // The parent keeps the exact completion visible and renders its actionable error.
     }
   };
 
@@ -574,6 +635,85 @@ export function TodayDashboard({
                   </button>
                 </div>
               </>
+            ) : focusTaskCompletion ? (
+              <div className="focus-task-completion">
+                <p className="focus-task-completion__eyebrow">
+                  <CheckCircle2 size={14} aria-hidden="true" />
+                  本轮专注已完成
+                </p>
+                <p
+                  className="focus-task-completion__summary"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  已完成 {FOCUS_DURATION_SECONDS / 60} 分钟：
+                  <strong>{completionTaskTitle}</strong>
+                </p>
+
+                {completionTaskLoading ? (
+                  <p className="focus-task-completion__state">
+                    <LoaderCircle className="is-spinning" size={13} aria-hidden="true" />
+                    正在复核关联任务…
+                  </p>
+                ) : completionTaskUnavailable ? (
+                  <p className="focus-task-completion__error" role="alert">
+                    {taskStatus === 'error'
+                      ? (taskLoadError ?? '关联任务暂时无法读取，请重试。')
+                      : '这轮专注关联的任务已不可用；不会改动其他任务。'}
+                  </p>
+                ) : completionTask?.status === 'completed' ? (
+                  <p className="focus-task-completion__success">
+                    <Check size={13} aria-hidden="true" />
+                    关联任务已经完成。
+                  </p>
+                ) : (
+                  <p className="focus-task-completion__state">
+                    任务仍未完成。确认完成后，才会更新这一个精确任务。
+                  </p>
+                )}
+
+                {visibleCompletionAction?.error ? (
+                  <p className="focus-task-completion__error" role="alert">
+                    {visibleCompletionAction.error}
+                  </p>
+                ) : null}
+
+                <div className="focus-card__actions focus-task-completion__actions">
+                  {completionTaskUnavailable ? (
+                    <button type="button" onClick={onRetryTasks} disabled={completionPending}>
+                      重新读取任务
+                    </button>
+                  ) : completionTask?.status === 'completed' ? null : (
+                    <button
+                      type="button"
+                      aria-label={`标记任务完成：${completionTaskTitle}`}
+                      aria-busy={completionPending}
+                      disabled={completionPending || completionTaskLoading}
+                      onClick={() => void completeFocusTask()}
+                    >
+                      {completionPending ? (
+                        <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+                      ) : (
+                        <CheckCircle2 size={14} aria-hidden="true" />
+                      )}
+                      {completionPending
+                        ? '正在完成…'
+                        : completionTaskLoading
+                          ? '正在同步任务'
+                          : '标记任务完成'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="focus-card__cancel"
+                    disabled={completionPending}
+                    onClick={dismissFocusTaskCompletion}
+                  >
+                    {completionTask?.status === 'completed' ? '知道了' : '暂不处理'}
+                  </button>
+                </div>
+              </div>
             ) : (
               <>
                 <p>
@@ -599,9 +739,11 @@ export function TodayDashboard({
                 {focusError}
               </p>
             ) : null}
-            <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-              {focusAnnouncement}
-            </p>
+            {focusTaskCompletion ? null : (
+              <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+                {focusAnnouncement}
+              </p>
+            )}
             <div className="focus-card__glow" aria-hidden="true" />
           </section>
 

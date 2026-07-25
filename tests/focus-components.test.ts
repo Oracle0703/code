@@ -15,6 +15,7 @@ import {
   submitFocusDialogSelection,
   type FocusDialogSubmissionGate,
 } from '../src/renderer/focus-dialog-submission';
+import { createFocusWorkspaceIdentity } from '../src/renderer/focus-state';
 import { TaskPage } from '../src/renderer/components/TaskPage';
 
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
@@ -132,6 +133,121 @@ describe('focus renderer components', () => {
     expect(markup).toContain('切换到该工作区');
     expect(markup).not.toContain('<strong>研发</strong> 正在专注');
     expect(markup).not.toContain('取消本轮');
+  });
+
+  it('offers an explicit accessible completion action for the exact linked task', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          focusSnapshot: snapshot({
+            latestTerminal: {
+              sessionId: SESSION_ID,
+              workspaceId: WORKSPACE_A,
+              taskId: TASK_ID,
+              taskTitle: '撰写发布说明',
+              status: 'completed',
+              endedAt: OBSERVED_AT,
+            },
+            todayCompletedCount: 1,
+          }),
+          focusTaskCompletion: completionNotice(),
+        }),
+      ),
+    );
+
+    expect(markup).toContain('本轮专注已完成');
+    expect(markup).toContain('已完成 25 分钟');
+    expect(markup).toContain('aria-live="polite"');
+    expect(markup).toContain('aria-atomic="true"');
+    expect(markup).toContain('aria-label="标记任务完成：撰写发布说明"');
+    expect(markup).toContain('>标记任务完成</button>');
+    expect(markup).toContain('>暂不处理</button>');
+    expect(markup).not.toContain('>开始专注</button>');
+    expect(markup.match(/role="status"/gu)).toHaveLength(1);
+  });
+
+  it('keeps a completion actionable after failure and exposes one busy submission', () => {
+    const failedMarkup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          focusTaskCompletion: completionNotice(),
+          focusTaskCompletionAction: {
+            completionKey: completionNotice().key,
+            pending: false,
+            error: '任务更新失败，请重试。',
+          },
+        }),
+      ),
+    );
+    expect(failedMarkup).toContain('role="alert"');
+    expect(failedMarkup).toContain('任务更新失败，请重试。');
+    expect(failedMarkup).toContain('>标记任务完成</button>');
+
+    const pendingMarkup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          focusTaskCompletion: completionNotice(),
+          focusTaskCompletionAction: {
+            completionKey: completionNotice().key,
+            pending: true,
+            error: null,
+          },
+        }),
+      ),
+    );
+    expect(pendingMarkup).toContain('aria-busy="true"');
+    expect(pendingMarkup).toContain('>正在完成…</button>');
+    expect(pendingMarkup).toMatch(/>暂不处理<\/button>/u);
+    expect(pendingMarkup).toMatch(/class="focus-card__cancel" disabled=""/u);
+  });
+
+  it('distinguishes an unavailable task snapshot from a loading completion', () => {
+    const markup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          taskSnapshot: null,
+          taskStatus: 'error',
+          taskLoadError: '任务读取失败。',
+          focusTaskCompletion: completionNotice(),
+        }),
+      ),
+    );
+
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain('任务读取失败。');
+    expect(markup).toContain('>重新读取任务</button>');
+    expect(markup).not.toContain('正在复核关联任务');
+    expect(markup).not.toContain('aria-label="标记任务完成');
+  });
+
+  it('does not offer another mutation when the linked task is already complete', () => {
+    const completedTask = {
+      ...task(),
+      status: 'completed' as const,
+      completedAt: OBSERVED_AT,
+    };
+    const markup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          taskSnapshot: {
+            workspaceId: WORKSPACE_A,
+            todayDate: TODAY,
+            planningDays: PLANNING_DAYS,
+            tasks: [completedTask],
+          },
+          focusTaskCompletion: completionNotice(),
+        }),
+      ),
+    );
+
+    expect(markup).toContain('关联任务已经完成');
+    expect(markup).toContain('>知道了</button>');
+    expect(markup).not.toContain('aria-label="标记任务完成');
   });
 
   it('renders a labelled optional-task dialog and restores focus to its connected invoker', () => {
@@ -508,6 +624,8 @@ function dashboardProps(overrides: Partial<TodayDashboardProps> = {}): TodayDash
     focusOperation: null,
     focusRemainingSeconds: 1_500,
     focusSuccessSequence: 0,
+    focusTaskCompletion: null,
+    focusTaskCompletionAction: null,
     taskFocusStartUnavailableReason: null,
     onCapture: async () => undefined,
     onOpenInbox: () => undefined,
@@ -527,6 +645,8 @@ function dashboardProps(overrides: Partial<TodayDashboardProps> = {}): TodayDash
     onResumeFocus: async () => undefined,
     onCancelFocus: async () => undefined,
     onSwitchFocusWorkspace: () => undefined,
+    onCompleteFocusTask: async () => undefined,
+    onDismissFocusTaskCompletion: () => undefined,
     ...overrides,
   };
 }
@@ -537,6 +657,7 @@ function snapshot(overrides: Partial<FocusSnapshot> = {}): FocusSnapshot {
     todayDate: TODAY,
     observedAt: OBSERVED_AT,
     session: null,
+    latestTerminal: null,
     todayCompletedCount: 0,
     ...overrides,
   };
@@ -556,6 +677,20 @@ function session(overrides: Partial<FocusSession> = {}): FocusSession {
     createdAt: OBSERVED_AT,
     updatedAt: OBSERVED_AT,
     ...overrides,
+  };
+}
+
+function completionNotice() {
+  const workspace = createFocusWorkspaceIdentity(WORKSPACE_A);
+  return {
+    key: 'focus-task-completion',
+    workspace,
+    workspaceId: WORKSPACE_A,
+    todayDate: TODAY,
+    sessionId: SESSION_ID,
+    taskId: TASK_ID,
+    taskTitle: '撰写发布说明',
+    endedAt: OBSERVED_AT,
   };
 }
 

@@ -106,6 +106,7 @@ async function createHarness() {
     todayDate: '2026-07-23',
     observedAt: '2026-07-23T12:00:00.000Z',
     session: null,
+    latestTerminal: null,
     todayCompletedCount: 0,
   };
   const focus = {

@@ -705,6 +705,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(focus.session?.status, 'running');
     assert.equal(focus.session?.remainingSeconds, 1_500);
     assert.equal(focus.session?.revision, 1);
+    assert.equal(focus.latestTerminal, null);
     assert.equal(focus.todayCompletedCount, 0);
     focus = await focusController.pauseSession({
       workspaceId: DEFAULT_WORKSPACE_ID,
@@ -1161,6 +1162,14 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       workspaceId: DEFAULT_WORKSPACE_ID,
     });
     assert.equal(completedFocus.session, null);
+    assert.deepEqual(completedFocus.latestTerminal, {
+      sessionId: FOCUS_SESSION_ID,
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      taskId: CONVERTED_TASK_ID,
+      taskTitle: '打包后的 ＡPI / e\u0301 / 👩‍💻',
+      status: 'completed',
+      endedAt: serviceNow.toISOString(),
+    });
     assert.equal(completedFocus.todayCompletedCount, 1);
     await reopenedFocusController.stop();
     const reopenedAutomationController = createManualAutomationController(

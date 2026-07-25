@@ -108,6 +108,19 @@ export class FocusRepository {
     return row ? mapFocusRow(row, true) : undefined;
   }
 
+  findLatestTerminal(workspaceId: string, localDate: string): StoredFocusSession | undefined {
+    const row = this.#database.get<FocusRow>(
+      `${FOCUS_SELECT}
+       WHERE focus.workspace_id = ?
+         AND focus.local_date = ?
+         AND focus.state IN ('completed', 'cancelled')
+       ORDER BY focus.rowid DESC
+       LIMIT 1`,
+      [workspaceId, localDate],
+    );
+    return row ? mapFocusRow(row, true) : undefined;
+  }
+
   countCompleted(workspaceId: string, localDate: string): number {
     return readCount(
       this.#database.get<CountRow>(

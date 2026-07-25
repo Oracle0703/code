@@ -107,6 +107,8 @@ v7 追加外部内容 FTS5 索引和应用级备份策略/运行状态；v8 追�
 - 状态机只允许 `running ↔ paused`、`running → completed/cancelled` 和 `paused → cancelled`；内部 checkpoint 只能在 deadline 逐字不变时严格减少 running 的剩余值。终态不可改写也不可永久删除。归档所属工作区会在同一数据库事务中取消未结束会话。
 - Today 与任务页只为当前 Main 任务快照中计划到今天且未完成的任务提供专注入口；入口只打开同一个固定 25 分钟确认窗口并预选 opaque 任务 ID，不直接写入数据库。预选任务在确认前完成、改期、消失或跨午夜失效时，Renderer 保留原选择身份并阻止提交，不能静默降级为自由专注；用户必须显式改选仍有效的今日任务或自由专注。
 - 可选任务必须属于同一活动工作区、计划到 Main 当前本地日期且未完成；Main 在事务中重新读取任务并拒绝旧窗口或竞态，会话一旦创建，工作区、任务和 `local_date` 都不可改写。Today 的完成轮次按持久 `local_date` 计算。
+- Focus 快照在同一读事务中返回目标工作区/当天按 SQLite 持久插入顺序选出的最近一条终态摘要。会话只追加、终态不可改且全局最多一个未结束会话，所以该顺序不受跨会话墙上时钟回拨影响；摘要同时覆盖 `completed` 与 `cancelled`，较新的取消会话会压住更早的完成提示。前台完成、睡眠恢复、切换工作区后返回和重启对账都读取同一持久身份，不依赖 Renderer 曾见过 `running → null`。
+- 最近终态只有在 `completed` 且含精确 task ID 时才生成 Today 收尾卡。它绝不自动修改任务；用户点击后先重新读取任务快照，复核工作区、Main 日期、完整 completion identity 与 opaque task ID，再调用既有任务状态 mutation。已完成视为幂等成功，缺失时明确失败，不按标题或列表位置回退。工作区 A→B→A、跨午夜、新终态、重复点击或迟到响应都由 activation identity、generation 与 single-flight gate 淘汰。
 - `.dwbx` v3 保留已完成历史；导出时，尚未到期的 running 会话按绝对截止时间降为 paused，已经到期但尚未持久对账的会话只在包中投影为 completed，源库读取保持无副作用。导入只接受 paused/completed，取消记录不进入逻辑包。完整 SQLite 备份则保留所有状态。
 
 ## 工作区 AI 助手

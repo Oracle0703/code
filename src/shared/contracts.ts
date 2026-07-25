@@ -735,11 +735,21 @@ export interface FocusSession {
   readonly updatedAt: string;
 }
 
+export interface FocusTerminalSession {
+  readonly sessionId: string;
+  readonly workspaceId: string;
+  readonly taskId: string | null;
+  readonly taskTitle: string | null;
+  readonly status: 'completed' | 'cancelled';
+  readonly endedAt: string;
+}
+
 export interface FocusSnapshot {
   readonly workspaceId: string;
   readonly todayDate: string;
   readonly observedAt: string;
   readonly session: FocusSession | null;
+  readonly latestTerminal: FocusTerminalSession | null;
   readonly todayCompletedCount: number;
 }
 

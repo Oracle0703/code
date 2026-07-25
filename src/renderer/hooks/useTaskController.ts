@@ -341,6 +341,7 @@ export function useTaskController(workspaceId: string | null) {
     pendingTaskIds,
     pendingConversionEntryIds,
     pendingCreate: workspaceId ? pendingCreateWorkspaces.has(workspaceId) : false,
+    isPending: (taskId: string) => pendingTaskIdsRef.current.has(taskId),
     refresh: async () => {
       if (workspaceId) await load(workspaceId);
     },
