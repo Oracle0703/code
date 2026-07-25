@@ -2237,6 +2237,63 @@ textarea:focus-visible,
   background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 
+.focus-task-completion {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  margin-top: 6px;
+  padding: 9px;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--success) 24%, var(--border-subtle));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success) 7%, var(--bg-card));
+}
+
+.focus-card .focus-task-completion p {
+  width: 100%;
+  margin: 0;
+}
+
+.focus-task-completion__eyebrow,
+.focus-task-completion__state,
+.focus-task-completion__success {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.focus-card .focus-task-completion__eyebrow,
+.focus-card .focus-task-completion__success {
+  color: var(--success);
+  font-weight: 620;
+}
+
+.focus-card .focus-task-completion__summary {
+  color: var(--text-primary);
+  font-size: 9.5px;
+}
+
+.focus-card .focus-task-completion__summary strong {
+  overflow-wrap: anywhere;
+}
+
+.focus-card .focus-task-completion__error {
+  padding: 5px 6px;
+  border-radius: 5px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.focus-task-completion__actions {
+  margin-top: 2px;
+}
+
+.focus-task-completion__actions .focus-card__cancel:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
 .focus-card__operation-error {
   position: relative;
   z-index: 2;

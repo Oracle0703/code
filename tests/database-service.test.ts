@@ -858,6 +858,14 @@ describe('DatabaseService', () => {
     });
     await expect(service.getFocusSnapshot({ workspaceId })).resolves.toMatchObject({
       session: null,
+      latestTerminal: {
+        sessionId: '31313131-3131-4131-8131-313131313131',
+        workspaceId,
+        taskId: null,
+        taskTitle: null,
+        status: 'completed',
+        endedAt: now.toISOString(),
+      },
       todayCompletedCount: 1,
     });
     await service.close();

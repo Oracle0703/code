@@ -323,6 +323,7 @@ function snapshot(focusSession: FocusSession | null, workspaceId = WORKSPACE_A):
     todayDate: '2026-07-23',
     observedAt: T0,
     session: focusSession,
+    latestTerminal: null,
     todayCompletedCount: 0,
   };
 }

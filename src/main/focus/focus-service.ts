@@ -306,6 +306,7 @@ export class FocusService {
       todayDate,
       observedAt: observedAt.toISOString(),
       session: toOpenSession(repository.findOpen()),
+      latestTerminal: toTerminalSession(repository.findLatestTerminal(workspaceId, todayDate)),
       todayCompletedCount: repository.countCompleted(workspaceId, todayDate),
     };
   }
@@ -521,5 +522,26 @@ function toOpenSession(session: StoredFocusSession | undefined): FocusSnapshot['
     revision: session.revision,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+  };
+}
+
+function toTerminalSession(
+  session: StoredFocusSession | undefined,
+): FocusSnapshot['latestTerminal'] {
+  if (!session) return null;
+  if (session.status !== 'completed' && session.status !== 'cancelled') {
+    throw new DatabaseIntegrityError('An open focus session appeared as the latest terminal.');
+  }
+  const endedAt = session.status === 'completed' ? session.completedAt : session.cancelledAt;
+  if (endedAt === null) {
+    throw new DatabaseIntegrityError('A terminal focus session is missing its end time.');
+  }
+  return {
+    sessionId: session.id,
+    workspaceId: session.workspaceId,
+    taskId: session.taskId,
+    taskTitle: session.taskTitle,
+    status: session.status,
+    endedAt,
   };
 }

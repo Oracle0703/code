@@ -117,6 +117,19 @@ import {
   type FocusWorkspaceIdentity,
 } from './focus-state';
 import {
+  FocusTaskCompletionCoordinator,
+  FocusTaskCompletionGate,
+  FocusTaskCompletionSupersededError,
+  focusTaskCompletionError,
+  focusTaskCompletionFailed,
+  focusTaskCompletionFinished,
+  focusTaskCompletionStarted,
+  resolveFocusTaskCompletionTarget,
+  selectFocusTaskCompletionNotice,
+  type FocusTaskCompletionActionState,
+  type FocusTaskCompletionNotice,
+} from './focus-task-completion';
+import {
   evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
   synchronizeDirtyDraft,
@@ -179,6 +192,11 @@ export function App() {
   const [automationDialog, setAutomationDialog] = useState<AutomationDialogState | null>(null);
   const [focusDialog, setFocusDialog] = useState<FocusDialogState | null>(null);
   const [focusSuccessSequence, setFocusSuccessSequence] = useState(0);
+  const [dismissedFocusTaskCompletions, setDismissedFocusTaskCompletions] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [focusTaskCompletionAction, setFocusTaskCompletionAction] =
+    useState<FocusTaskCompletionActionState | null>(null);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [assistantSurfaceOpen, setAssistantSurfaceOpen] = useState(false);
@@ -197,6 +215,8 @@ export function App() {
   } | null>(null);
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
+  const [focusTaskCompletionCoordinator] = useState(() => new FocusTaskCompletionCoordinator());
+  const [focusTaskCompletionGate] = useState(() => new FocusTaskCompletionGate());
   const [maximized, setMaximized] = useState(false);
   const [appVersion, setAppVersion] = useState('0.1.0');
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
@@ -208,6 +228,11 @@ export function App() {
     createAutomationWorkspaceIdentity(null),
   );
   const automationRunFeedbackRef = useRef<AutomationRunFeedback | null>(null);
+  const focusTaskCompletionActivationRef = useRef<FocusWorkspaceIdentity>(
+    createFocusWorkspaceIdentity(null),
+  );
+  const focusTaskCompletionNoticeRef = useRef<FocusTaskCompletionNotice | null>(null);
+  const focusTaskCompletionSurfaceRef = useRef<AppSurfaceId>('today');
   const noteDraftDirtyRef = useRef(false);
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
@@ -241,6 +266,15 @@ export function App() {
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
   const focusController = useFocusController(snapshot?.currentWorkspaceId ?? null);
+  const focusTaskCompletion = useMemo(
+    () =>
+      selectFocusTaskCompletionNotice(
+        focusActivation,
+        focusController.snapshot,
+        dismissedFocusTaskCompletions,
+      ),
+    [dismissedFocusTaskCompletions, focusActivation, focusController.snapshot],
+  );
   const automationController = useAutomationController(snapshot?.currentWorkspaceId ?? null, {
     onRunOutput: ({ workspaceId, outputKind }) => {
       if (currentWorkspaceIdRef.current !== workspaceId) return;
@@ -345,6 +379,21 @@ export function App() {
     automationController.runFeedback,
     overlayOpen,
   ]);
+  useLayoutEffect(() => {
+    const previousActivation = focusTaskCompletionActivationRef.current;
+    const previousKey = focusTaskCompletionNoticeRef.current?.key ?? null;
+    const previousSurface = focusTaskCompletionSurfaceRef.current;
+    focusTaskCompletionActivationRef.current = focusActivation;
+    focusTaskCompletionNoticeRef.current = focusTaskCompletion;
+    focusTaskCompletionSurfaceRef.current = activeSurface;
+    if (
+      previousActivation !== focusActivation ||
+      previousKey !== (focusTaskCompletion?.key ?? null) ||
+      previousSurface !== activeSurface
+    ) {
+      focusTaskCompletionCoordinator.invalidate();
+    }
+  }, [activeSurface, focusActivation, focusTaskCompletion, focusTaskCompletionCoordinator]);
   const terminalMaximum = Math.min(2160, Math.max(180, viewportHeight - 180));
   const effectiveTerminalHeight = clamp(terminalHeight, 180, terminalMaximum);
 
@@ -696,6 +745,70 @@ export function App() {
       workspaceController.pendingOperation,
       workspaceDialog,
     ],
+  );
+
+  const completeFocusTask = useCallback(
+    async (notice: FocusTaskCompletionNotice): Promise<void> => {
+      if (!focusTaskCompletionGate.begin(notice.key)) {
+        throw new FocusTaskCompletionSupersededError();
+      }
+      setFocusTaskCompletionAction(focusTaskCompletionStarted(notice.key));
+      try {
+        const intent = focusTaskCompletionCoordinator.begin(
+          focusTaskCompletionActivationRef.current,
+          notice,
+        );
+        const assertCurrent = () =>
+          focusTaskCompletionCoordinator.assertCurrent(
+            intent,
+            focusTaskCompletionActivationRef.current,
+            focusTaskCompletionSurfaceRef.current,
+            focusTaskCompletionNoticeRef.current,
+          );
+        const target = await resolveFocusTaskCompletionTarget(
+          intent,
+          taskController.prepareSnapshotRefresh,
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!target.alreadyCompleted) {
+          if (taskController.isPending(target.task.id)) {
+            throw new Error('这项任务正在进行另一项更新，请稍候再试。');
+          }
+          await taskController.updateStatus(target.task.id, 'completed');
+          assertCurrent();
+        }
+        setFocusTaskCompletionAction((current) => focusTaskCompletionFinished(current, notice.key));
+      } catch (error) {
+        const failure = focusTaskCompletionError(error);
+        setFocusTaskCompletionAction((current) =>
+          failure instanceof FocusTaskCompletionSupersededError
+            ? focusTaskCompletionFinished(current, notice.key)
+            : focusTaskCompletionFailed(current, notice.key, failure.message),
+        );
+        throw failure;
+      } finally {
+        focusTaskCompletionGate.end(notice.key);
+      }
+    },
+    [focusTaskCompletionCoordinator, focusTaskCompletionGate, taskController],
+  );
+
+  const dismissFocusTaskCompletion = useCallback(
+    (notice: FocusTaskCompletionNotice): void => {
+      if (focusTaskCompletionNoticeRef.current?.key !== notice.key) return;
+      focusTaskCompletionCoordinator.invalidate();
+      setFocusTaskCompletionAction((current) =>
+        current?.completionKey === notice.key ? null : current,
+      );
+      setDismissedFocusTaskCompletions((current) => {
+        if (current.has(notice.key)) return current;
+        const next = new Set(current);
+        next.add(notice.key);
+        return next;
+      });
+    },
+    [focusTaskCompletionCoordinator],
   );
 
   const openAutomationRunOutput = useCallback(
@@ -1613,6 +1726,8 @@ export function App() {
                     focusOperation={focusController.operation}
                     focusRemainingSeconds={focusController.remainingSeconds}
                     focusSuccessSequence={focusSuccessSequence}
+                    focusTaskCompletion={focusTaskCompletion}
+                    focusTaskCompletionAction={focusTaskCompletionAction}
                     taskFocusStartUnavailableReason={taskFocusStartBlockReason}
                     onOpenInbox={() => requestActiveView('inbox')}
                     onOpenTasks={() => requestActiveView('tasks')}
@@ -1645,6 +1760,8 @@ export function App() {
                     onResumeFocus={focusController.resume}
                     onCancelFocus={focusController.cancel}
                     onSwitchFocusWorkspace={requestWorkspaceActivation}
+                    onCompleteFocusTask={completeFocusTask}
+                    onDismissFocusTaskCompletion={dismissFocusTaskCompletion}
                     onOpenAssistant={() => openAssistant({ kind: 'today' })}
                   />
                 ) : activeSurface === 'inbox' ? (

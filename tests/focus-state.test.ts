@@ -225,6 +225,7 @@ function snapshot(overrides: Partial<FocusSnapshot> = {}): FocusSnapshot {
     todayDate: TODAY,
     observedAt: OBSERVED_AT,
     session: null,
+    latestTerminal: null,
     todayCompletedCount: 0,
     ...overrides,
   };

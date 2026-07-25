@@ -25,6 +25,7 @@ const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
 const TASK_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const SESSION_A = '33333333-3333-4333-8333-333333333333';
 const SESSION_B = '44444444-4444-4444-8444-444444444444';
+const SESSION_C = '55555555-5555-4555-8555-555555555555';
 const TODAY = '2026-07-23';
 const T0 = '2026-07-23T08:00:00.000Z';
 const temporaryDirectories: string[] = [];
@@ -75,6 +76,7 @@ describe('focus service', () => {
         createdAt: T0,
         updatedAt: T0,
       },
+      latestTerminal: null,
       todayCompletedCount: 0,
     });
     await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_B })).resolves.toMatchObject({
@@ -122,6 +124,14 @@ describe('focus service', () => {
     context.setNow('2026-07-23T08:25:00.000Z');
     await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
       session: null,
+      latestTerminal: {
+        sessionId: SESSION_A,
+        workspaceId: WORKSPACE_A,
+        taskId: TASK_A,
+        taskTitle: '完成今日重点',
+        status: 'completed',
+        endedAt: '2026-07-23T08:25:00.000Z',
+      },
       todayCompletedCount: 1,
       observedAt: '2026-07-23T08:25:00.000Z',
     });
@@ -132,6 +142,118 @@ describe('focus service', () => {
       deadline_at: null,
       revision: 4,
       completed_at: '2026-07-23T08:25:00.000Z',
+    });
+  });
+
+  it('returns the latest terminal only for the requested workspace and Main date', async () => {
+    const context = await createService();
+    const { service } = context;
+    await service.createTask({
+      workspaceId: WORKSPACE_A,
+      title: '完成今日重点',
+      planning: 'day-0',
+    });
+    await service.createWorkspace({ name: '空间 B', color: WORKSPACE_COLORS[1] });
+
+    await service.startFocusSession({ workspaceId: WORKSPACE_A, taskId: TASK_A });
+    context.setNow('2026-07-23T08:25:00.000Z');
+    await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
+      session: null,
+      latestTerminal: {
+        sessionId: SESSION_A,
+        workspaceId: WORKSPACE_A,
+        taskId: TASK_A,
+        taskTitle: '完成今日重点',
+        status: 'completed',
+        endedAt: '2026-07-23T08:25:00.000Z',
+      },
+    });
+    await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_B })).resolves.toMatchObject({
+      latestTerminal: null,
+      todayCompletedCount: 0,
+    });
+
+    context.setNow('2026-07-23T08:26:00.000Z');
+    await service.startFocusSession({ workspaceId: WORKSPACE_A });
+    context.setNow('2026-07-23T08:51:00.000Z');
+    await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
+      latestTerminal: {
+        sessionId: SESSION_B,
+        taskId: null,
+        taskTitle: null,
+        status: 'completed',
+        endedAt: '2026-07-23T08:51:00.000Z',
+      },
+      todayCompletedCount: 2,
+    });
+
+    context.setNow('2026-07-23T08:52:00.000Z');
+    await service.startFocusSession({ workspaceId: WORKSPACE_A });
+    context.setNow('2026-07-23T08:53:00.000Z');
+    await expect(
+      service.cancelFocusSession({
+        workspaceId: WORKSPACE_A,
+        sessionId: SESSION_C,
+        expectedRevision: 1,
+      }),
+    ).resolves.toMatchObject({
+      session: null,
+      latestTerminal: {
+        sessionId: SESSION_C,
+        workspaceId: WORKSPACE_A,
+        taskId: null,
+        taskTitle: null,
+        status: 'cancelled',
+        endedAt: '2026-07-23T08:53:00.000Z',
+      },
+      todayCompletedCount: 2,
+    });
+
+    context.setToday('2026-07-24');
+    await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
+      todayDate: '2026-07-24',
+      latestTerminal: null,
+      todayCompletedCount: 0,
+    });
+  });
+
+  it('uses persisted session order when the wall clock rewinds between terminal sessions', async () => {
+    const context = await createService();
+    const { service } = context;
+    await service.createTask({
+      workspaceId: WORKSPACE_A,
+      title: '完成今日重点',
+      planning: 'day-0',
+    });
+
+    await service.startFocusSession({ workspaceId: WORKSPACE_A, taskId: TASK_A });
+    context.setNow('2026-07-23T08:25:00.000Z');
+    await expect(service.getFocusSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({
+      latestTerminal: {
+        sessionId: SESSION_A,
+        status: 'completed',
+      },
+    });
+
+    context.setNow('2026-07-23T07:00:00.000Z');
+    await service.startFocusSession({ workspaceId: WORKSPACE_A });
+    context.setNow('2026-07-23T07:01:00.000Z');
+    await expect(
+      service.cancelFocusSession({
+        workspaceId: WORKSPACE_A,
+        sessionId: SESSION_B,
+        expectedRevision: 1,
+      }),
+    ).resolves.toMatchObject({
+      latestTerminal: {
+        sessionId: SESSION_B,
+        workspaceId: WORKSPACE_A,
+        taskId: null,
+        taskTitle: null,
+        status: 'cancelled',
+        endedAt: T0,
+      },
+      todayCompletedCount: 1,
     });
   });
 
@@ -386,6 +508,7 @@ interface ServiceContext {
   readonly service: DatabaseService;
   readonly dataDirectory: string;
   setNow(value: string): void;
+  setToday(value: string): void;
 }
 
 async function createService(): Promise<ServiceContext> {
@@ -393,16 +516,17 @@ async function createService(): Promise<ServiceContext> {
   temporaryDirectories.push(root);
   const dataDirectory = join(root, 'data');
   let now = new Date(T0);
+  let today = TODAY;
   const workspaceIds = [WORKSPACE_A, WORKSPACE_B];
-  const sessionIds = [SESSION_A, SESSION_B];
+  const sessionIds = [SESSION_A, SESSION_B, SESSION_C];
   const service = new DatabaseService({
     dataDirectory,
     now: () => new Date(now),
     workspaceIdFactory: () => workspaceIds.shift() ?? WORKSPACE_B,
     taskIdFactory: () => TASK_A,
-    taskTodayFactory: () => TODAY,
+    taskTodayFactory: () => today,
     focusIdFactory: () => sessionIds.shift() ?? SESSION_B,
-    focusTodayFactory: () => TODAY,
+    focusTodayFactory: () => today,
   });
   openServices.push(service);
   await service.open();
@@ -411,6 +535,9 @@ async function createService(): Promise<ServiceContext> {
     dataDirectory,
     setNow(value) {
       now = new Date(value);
+    },
+    setToday(value) {
+      today = value;
     },
   };
 }

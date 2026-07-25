@@ -164,7 +164,11 @@ v10 的 `focus_sessions` 保存工作区、可选任务、创建时的 Main 本�
 
 Main 的应用级 Controller 以持久化 `deadline_at` 为权威，并用单调时钟维护不会回增的剩余上限，最长每 60 秒将更小的上限 checkpoint 到 SQLite；系统时间回拨不会延长原 deadline，系统恢复和启动时立即对账。审计时间戳继续保持逻辑单调，回拨后可以晚于独立的倒计时 deadline。到期会在单一数据库事务中写为 completed 和剩余 0。正常退出或数据替换先把 running 原子暂停再关闭数据库；异常退出无法依赖回调，下次启动会按原绝对截止时间决定完成或保留剩余时间。归档所属工作区会在同一归档事务中取消未结束会话。
 
-完整 SQLite 备份保留全部专注历史。`.dwbx` v3 省略 cancelled 记录；尚未到期的 running 在导出时按绝对截止时间计算剩余值并序列化为 paused，已经到期但尚未持久对账的 running 只在包中投影为 completed，不改写源库。导入只接受 paused/completed，且最多一条 paused。完成记录保留创建时的 `local_date`，Today 的完成轮次不会因之后切换时区而改写历史。
+每个 Focus 快照除全局未结束会话和当天完成轮次外，还在同一读事务中返回请求工作区、`todayDate` 内最近一条终态的最小摘要。Repository 同时查询 `completed`/`cancelled`，并按 SQLite `rowid` 的持久插入顺序取最后一条；会话只追加、终态不可改且全局最多一个未结束会话，因此新会话的顺序不依赖可能回拨的墙上时间。摘要只包含 session/workspace/task 身份、终态和对应的 `completed_at` 或 `cancelled_at`。因此较新的取消会话不会让较早的完成会话重新触发任务收尾，Renderer 也无需提交历史查询参数或猜测完成身份。
+
+该摘要只为显式 UI 收尾提供只读事实，不把 Focus 与任务状态绑成一个自动事务。用户点击后仍通过既有任务快照与 task ID 精确复核，再显式把该任务设为 completed；不点击时任务行、`updated_at` 与 `completed_at` 完全不变。schema v11、`.dwbx` v3 和 Focus 状态机均未因此扩展。
+
+完整 SQLite 备份保留全部专注历史及原表插入顺序。`.dwbx` v3 省略 cancelled 记录，并在导入时按可移植记录的规范顺序重建表，因此不承诺保留源库“最近终态”的因果身份；尚未到期的 running 在导出时按绝对截止时间计算剩余值并序列化为 paused，已经到期但尚未持久对账的 running 只在包中投影为 completed，不改写源库。导入只接受 paused/completed，且最多一条 paused。完成记录保留创建时的 `local_date`，Today 的完成轮次不会因之后切换时区而改写历史。
 
 ## 全局搜索
 
