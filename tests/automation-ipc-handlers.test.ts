@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IpcMainInvokeEvent } from 'electron';
-import type { AutomationSnapshot } from '../src/shared/contracts';
+import type { AutomationRunNowResult, AutomationSnapshot } from '../src/shared/contracts';
 
 const RENDERER_URL = 'file:///app/renderer/index.html';
 
@@ -57,12 +57,30 @@ describe('automation IPC handlers', () => {
       expectedRevision: 2,
       enabled: true,
     });
-    await harness.invoke('automation:archive', {
+    await harness.invoke('automation:run-now', {
       workspaceId,
       automationId,
       expectedRevision: 3,
     });
+    await harness.invoke('automation:archive', {
+      workspaceId,
+      automationId,
+      expectedRevision: 4,
+    });
 
+    expect(
+      electron.handle.mock.calls
+        .map(([channel]) => channel)
+        .filter((channel) => channel.startsWith('automation:'))
+        .sort(),
+    ).toEqual([
+      'automation:archive',
+      'automation:create',
+      'automation:get-snapshot',
+      'automation:run-now',
+      'automation:set-enabled',
+      'automation:update',
+    ]);
     expect(harness.automation.getSnapshot).toHaveBeenCalledExactlyOnceWith({ workspaceId });
     expect(harness.automation.create).toHaveBeenCalledExactlyOnceWith({
       workspaceId,
@@ -84,10 +102,15 @@ describe('automation IPC handlers', () => {
       expectedRevision: 2,
       enabled: true,
     });
-    expect(harness.automation.archive).toHaveBeenCalledExactlyOnceWith({
+    expect(harness.automation.runNow).toHaveBeenCalledExactlyOnceWith({
       workspaceId,
       automationId,
       expectedRevision: 3,
+    });
+    expect(harness.automation.archive).toHaveBeenCalledExactlyOnceWith({
+      workspaceId,
+      automationId,
+      expectedRevision: 4,
     });
     harness.unregister();
   });
@@ -103,6 +126,27 @@ describe('automation IPC handlers', () => {
       }),
     ).rejects.toBeInstanceOf(TypeError);
     expect(harness.automation.create).not.toHaveBeenCalled();
+    harness.unregister();
+  });
+
+  it('rejects surplus run-now fields and extra arguments before calling the controller', async () => {
+    const harness = await createHarness();
+    const target = {
+      workspaceId: '123e4567-e89b-42d3-a456-426614174000',
+      automationId: 'b23e4567-e89b-42d3-a456-426614174000',
+      expectedRevision: 3,
+    };
+
+    await expect(
+      harness.invoke('automation:run-now', {
+        ...target,
+        occurrenceBucket: 'manual:2026-07-24T08:30:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    await expect(
+      harness.invoke('automation:run-now', target, { requestedAt: Date.now() }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(harness.automation.runNow).not.toHaveBeenCalled();
     harness.unregister();
   });
 
@@ -135,11 +179,18 @@ async function createHarness() {
     workspaceId: '123e4567-e89b-42d3-a456-426614174000',
     items: [],
   };
+  const runNowResult: AutomationRunNowResult = {
+    workspaceId: '123e4567-e89b-42d3-a456-426614174000',
+    automationId: 'b23e4567-e89b-42d3-a456-426614174000',
+    outputKind: 'task',
+    outputId: 'c23e4567-e89b-42d3-a456-426614174000',
+  };
   const automation = {
     getSnapshot: vi.fn(async () => snapshot),
     create: vi.fn(async () => snapshot),
     update: vi.fn(async () => snapshot),
     setEnabled: vi.fn(async () => snapshot),
+    runNow: vi.fn(async () => runNowResult),
     archive: vi.fn(async () => snapshot),
   };
   const dependencies = {

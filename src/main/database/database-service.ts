@@ -4,6 +4,7 @@ import { chmod, lstat, open, rename, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import type {
   AutomationCreateInput,
+  AutomationRunNowResult,
   AutomationSetEnabledInput,
   AutomationSnapshot,
   AutomationTargetInput,
@@ -802,6 +803,10 @@ export class DatabaseService implements TerminalPreferenceStore {
 
   archiveAutomation(input: AutomationTargetInput): Promise<AutomationSnapshot> {
     return this.#automationService.archive(input);
+  }
+
+  runAutomationNow(input: AutomationTargetInput): Promise<AutomationRunNowResult> {
+    return this.#automationService.runNow(input);
   }
 
   readAutomationSchedulerEntries(): Promise<readonly StoredAutomation[]> {

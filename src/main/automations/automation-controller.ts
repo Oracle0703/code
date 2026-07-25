@@ -1,6 +1,7 @@
 import type {
   AutomationChangedEvent,
   AutomationCreateInput,
+  AutomationRunNowResult,
   AutomationSetEnabledInput,
   AutomationSnapshot,
   AutomationTargetInput,
@@ -17,6 +18,7 @@ export interface AutomationControllerDatabase {
   updateAutomation(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
   setAutomationEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
   archiveAutomation(input: AutomationTargetInput): Promise<AutomationSnapshot>;
+  runAutomationNow(input: AutomationTargetInput): Promise<AutomationRunNowResult>;
   readAutomationSchedulerEntries(): Promise<readonly StoredAutomation[]>;
   runAutomationOccurrence(input: AutomationRunInput): Promise<AutomationRunResult>;
 }
@@ -90,6 +92,16 @@ export class AutomationController {
     this.#emit({ workspaceId: input.workspaceId, reason: 'definition', outputKind: null });
     void this.evaluate().catch((error) => this.#safeError(error));
     return snapshot;
+  }
+
+  async runNow(input: AutomationTargetInput): Promise<AutomationRunNowResult> {
+    const result = await this.#database.runAutomationNow(input);
+    this.#emit({
+      workspaceId: result.workspaceId,
+      reason: 'run',
+      outputKind: result.outputKind,
+    });
+    return result;
   }
 
   start(): Promise<void> {

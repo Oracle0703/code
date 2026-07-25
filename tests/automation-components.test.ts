@@ -13,16 +13,27 @@ describe('automation renderer components', () => {
   it('renders runtime-only semantics and an accessible enable switch', () => {
     const markup = renderToStaticMarkup(
       createElement(AutomationPage, {
-        items: [automationItem()],
+        items: [
+          automationItem(),
+          {
+            ...automationItem(),
+            id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            name: '停用的巡检',
+            enabled: false,
+          },
+        ],
         status: 'ready',
         loadError: null,
         operationError: null,
+        runFeedback: null,
         pendingItemIds: new Set<string>(),
+        runningItemIds: new Set<string>(),
         pendingCreate: false,
         onRetry: () => undefined,
         onOpenCreate: () => undefined,
         onOpenEdit: () => undefined,
         onSetEnabled: () => undefined,
+        onRunNow: () => undefined,
       }),
     );
 
@@ -31,8 +42,52 @@ describe('automation renderer components', () => {
     expect(markup).toContain('role="switch"');
     expect(markup).toContain('aria-checked="true"');
     expect(markup).toContain('aria-label="停用自动化“服务器巡检”"');
+    expect(markup).toContain('aria-label="启用自动化“停用的巡检”"');
+    expect(markup).toContain('aria-label="立即运行自动化“服务器巡检”"');
+    expect(markup).toContain('aria-label="立即运行自动化“停用的巡检”"');
     expect(markup).toContain('每周五 17:30');
     expect(markup).toContain('创建今日任务：检查备份');
+    expect(markup).toContain('尚无计划运行记录');
+  });
+
+  it('disables run, edit, and enable controls while an item is running and announces success', () => {
+    const item = automationItem();
+    const markup = renderToStaticMarkup(
+      createElement(AutomationPage, {
+        items: [item],
+        status: 'ready',
+        loadError: null,
+        operationError: null,
+        runFeedback: {
+          workspaceId: WORKSPACE_ID,
+          automationId: item.id,
+          outputKind: 'task',
+          outputId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          message: '已立即创建今日任务：检查备份',
+        },
+        pendingItemIds: new Set([item.id]),
+        runningItemIds: new Set([item.id]),
+        pendingCreate: false,
+        onRetry: () => undefined,
+        onOpenCreate: () => undefined,
+        onOpenEdit: () => undefined,
+        onSetEnabled: () => undefined,
+        onRunNow: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain('aria-label="正在立即运行自动化“服务器巡检”"');
+    const runningButton = findButton(markup, '正在立即运行自动化“服务器巡检”');
+    const enableSwitch = findButton(markup, '停用自动化“服务器巡检”');
+    const editButton = findButton(markup, '编辑自动化“服务器巡检”');
+    expect(runningButton).toContain('disabled=""');
+    expect(enableSwitch).toContain('disabled=""');
+    expect(editButton).toContain('disabled=""');
+    expect(markup).toContain('运行中…');
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain('已立即创建今日任务：检查备份');
+    expect(markup).toContain('正在立即运行自动化');
   });
 
   it('makes the create default-disabled behavior explicit and groups schedule and action fields', () => {
@@ -96,4 +151,11 @@ function automationItem(): AutomationItem {
     createdAt: '2026-07-22T00:00:00.000Z',
     updatedAt: '2026-07-23T00:00:00.000Z',
   };
+}
+
+function findButton(markup: string, ariaLabel: string): string {
+  const buttons = markup.match(/<button\b[^>]*>/gu) ?? [];
+  const button = buttons.find((candidate) => candidate.includes(`aria-label="${ariaLabel}"`));
+  expect(button).toBeDefined();
+  return button ?? '';
 }

@@ -1593,12 +1593,15 @@ export function App() {
                     status={automationController.status}
                     loadError={automationController.loadError}
                     operationError={automationController.operationError}
+                    runFeedback={automationController.runFeedback}
                     pendingItemIds={automationController.pendingItemIds}
+                    runningItemIds={automationController.runningItemIds}
                     pendingCreate={automationController.pendingCreate}
                     onRetry={automationController.retry}
                     onOpenCreate={openAutomationCreate}
                     onOpenEdit={openAutomationEdit}
                     onSetEnabled={automationController.setEnabled}
+                    onRunNow={automationController.runNow}
                   />
                 )}
               </div>

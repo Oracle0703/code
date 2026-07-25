@@ -478,6 +478,14 @@ describe('IPC validation', () => {
       }),
     ).toThrow(TypeError);
     expect(() =>
+      parseAutomationTargetInput({
+        workspaceId: WORKSPACE_ID,
+        automationId: AUTOMATION_ID,
+        expectedRevision: 1,
+        requestedAt: '2026-07-23T08:30:00.000Z',
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
       parseAutomationUpdateInput({
         workspaceId: WORKSPACE_ID,
         automationId: AUTOMATION_ID,

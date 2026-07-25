@@ -76,6 +76,7 @@ export const IPC_CHANNELS = {
     create: 'automation:create',
     update: 'automation:update',
     setEnabled: 'automation:set-enabled',
+    runNow: 'automation:run-now',
     archive: 'automation:archive',
     changed: 'automation:changed',
   },
@@ -835,6 +836,13 @@ export interface AutomationTargetInput {
   readonly expectedRevision: number;
 }
 
+export interface AutomationRunNowResult {
+  readonly workspaceId: string;
+  readonly automationId: string;
+  readonly outputKind: 'task' | 'note';
+  readonly outputId: string;
+}
+
 export interface AutomationUpdateInput extends AutomationTargetInput {
   readonly name: string;
   readonly schedule: AutomationSchedule;
@@ -1135,6 +1143,7 @@ export interface WorkbenchApi {
     create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
     update(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
     setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
+    runNow(input: AutomationTargetInput): Promise<AutomationRunNowResult>;
     archive(input: AutomationTargetInput): Promise<AutomationSnapshot>;
     onChanged(listener: (event: AutomationChangedEvent) => void): Unsubscribe;
   };

@@ -311,6 +311,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'automation:create',
     'automation:update',
     'automation:set-enabled',
+    'automation:run-now',
     'automation:archive',
     'automation:changed',
     'focus:get-snapshot',
@@ -539,6 +540,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     'automation:create',
     'automation:update',
     'automation:set-enabled',
+    'automation:run-now',
     'automation:archive',
     'automation:changed',
     'focus:get-snapshot',
@@ -631,11 +633,7 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
     false,
     'Packaged preload bundle still contains the removed browser:get-state IPC channel.',
   );
-  for (const forbiddenAutomationChannel of [
-    'automation:run-now',
-    'automation:set-cron',
-    'automation:execute-command',
-  ]) {
+  for (const forbiddenAutomationChannel of ['automation:set-cron', 'automation:execute-command']) {
     assert.equal(
       mainBundle.includes(forbiddenAutomationChannel) ||
         preloadBundle.includes(forbiddenAutomationChannel),
@@ -749,10 +747,13 @@ async function assertDatabaseFoundationIsPackaged(asarPath) {
   for (const requiredAutomationRendererToken of [
     'automation-hero',
     'automation-switch',
+    'automation-row__run',
     'automation-dialog',
     '按本地时间自动创建今日任务或 Markdown 笔记。',
     '仅在 Daily Workbench 运行时执行',
     '每条规则最多补执行最近一次错过的计划。',
+    '这次手动运行不会改变启用状态、重复计划或计划运行记录。',
+    '尚无计划运行记录',
     '动作类型创建后不可更改',
   ]) {
     assert.ok(

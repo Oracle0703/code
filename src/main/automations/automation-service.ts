@@ -3,6 +3,7 @@ import type {
   AutomationAction,
   AutomationCreateInput,
   AutomationRunErrorCode,
+  AutomationRunNowResult,
   AutomationSetEnabledInput,
   AutomationSnapshot,
   AutomationTargetInput,
@@ -254,6 +255,34 @@ export class AutomationService {
           throw new AutomationConflictError();
         }
         return this.#readSnapshot(repository, workspaceId, this.#validNow());
+      }),
+    );
+  }
+
+  runNow(input: AutomationTargetInput): Promise<AutomationRunNowResult> {
+    const workspaceId = this.#workspaceId(input?.workspaceId);
+    const automationId = this.#inputAutomationId(input?.automationId);
+    const expectedRevision = this.#revision(input?.expectedRevision);
+    return this.#execute((database) =>
+      this.#transaction(database, 'run an automation now', () => {
+        const workspace = this.#requireActiveWorkspace(database, workspaceId);
+        const repository = new AutomationRepository(database);
+        const automation = this.#requireAutomation(repository, workspaceId, automationId);
+        this.#requireRevision(automation, expectedRevision);
+        const timestamp = this.#timestampAtLeast(
+          workspace.createdAt,
+          workspace.updatedAt,
+          automation.createdAt,
+          automation.updatedAt,
+          automation.runState.updatedAt,
+        );
+        const output = this.#createOutput(database, automation, timestamp);
+        return {
+          workspaceId,
+          automationId,
+          outputKind: output.kind,
+          outputId: output.id,
+        };
       }),
     );
   }

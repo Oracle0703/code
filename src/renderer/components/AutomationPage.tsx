@@ -1,9 +1,12 @@
 import {
   Bot,
   CalendarClock,
+  CheckCircle2,
   CheckSquare2,
   FileText,
+  LoaderCircle,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   Zap,
@@ -14,6 +17,8 @@ import {
   describeAutomationLastRun,
   formatAutomationDateTime,
   formatAutomationSchedule,
+  requestAutomationRunNow,
+  type AutomationRunFeedback,
 } from '../automation-state';
 import { IconButton } from './IconButton';
 
@@ -22,12 +27,15 @@ interface AutomationPageProps {
   readonly status: 'loading' | 'ready' | 'error';
   readonly loadError: string | null;
   readonly operationError: string | null;
+  readonly runFeedback: AutomationRunFeedback | null;
   readonly pendingItemIds: ReadonlySet<string>;
+  readonly runningItemIds: ReadonlySet<string>;
   readonly pendingCreate: boolean;
   readonly onRetry: () => void;
   readonly onOpenCreate: () => void;
   readonly onOpenEdit: (item: AutomationItem) => void;
   readonly onSetEnabled: (item: AutomationItem, enabled: boolean) => void | Promise<void>;
+  readonly onRunNow: (item: AutomationItem) => void | Promise<void>;
 }
 
 export function AutomationPage({
@@ -35,12 +43,15 @@ export function AutomationPage({
   status,
   loadError,
   operationError,
+  runFeedback,
   pendingItemIds,
+  runningItemIds,
   pendingCreate,
   onRetry,
   onOpenCreate,
   onOpenEdit,
   onSetEnabled,
+  onRunNow,
 }: AutomationPageProps) {
   return (
     <div className="section-page automation-page">
@@ -80,6 +91,12 @@ export function AutomationPage({
           {operationError}
         </p>
       ) : null}
+      {runFeedback ? (
+        <p className="automation-feedback is-success">
+          <CheckCircle2 size={14} aria-hidden="true" />
+          {runFeedback.message}
+        </p>
+      ) : null}
 
       {status === 'loading' && items.length === 0 ? (
         <div className="automation-state" role="status">
@@ -109,6 +126,7 @@ export function AutomationPage({
         <ul className="automation-list" aria-label="自动化规则">
           {items.map((item) => {
             const pending = pendingItemIds.has(item.id);
+            const running = runningItemIds.has(item.id);
             const ActionIcon = item.action.kind === 'create-today-task' ? CheckSquare2 : FileText;
             return (
               <li
@@ -142,6 +160,24 @@ export function AutomationPage({
                 </div>
                 <button
                   type="button"
+                  className="automation-row__run"
+                  aria-label={
+                    running ? `正在立即运行自动化“${item.name}”` : `立即运行自动化“${item.name}”`
+                  }
+                  disabled={pending}
+                  onClick={() => {
+                    void requestAutomationRunNow(item, onRunNow).catch(() => undefined);
+                  }}
+                >
+                  {running ? (
+                    <LoaderCircle className="is-spinning" size={13} aria-hidden="true" />
+                  ) : (
+                    <Play size={13} fill="currentColor" aria-hidden="true" />
+                  )}
+                  {running ? '运行中…' : '立即运行'}
+                </button>
+                <button
+                  type="button"
                   className={`automation-switch ${item.enabled ? 'is-on' : ''}`}
                   role="switch"
                   aria-checked={item.enabled}
@@ -169,9 +205,11 @@ export function AutomationPage({
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {pendingCreate
           ? '正在创建自动化'
-          : pendingItemIds.size > 0
-            ? '正在保存自动化更改'
-            : (operationError ?? '')}
+          : runningItemIds.size > 0
+            ? '正在立即运行自动化'
+            : pendingItemIds.size > 0
+              ? '正在保存自动化更改'
+              : (runFeedback?.message ?? '')}
       </p>
     </div>
   );
