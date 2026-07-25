@@ -36,6 +36,7 @@ import {
   type NoteConversionResult,
   type NoteConvertInboxInput,
   type NoteCreateInput,
+  type NoteCreateResult,
   type NoteSnapshot,
   type NoteUpdateInput,
   type ScheduleCreateInput,
@@ -182,7 +183,7 @@ interface IpcDependencies {
   };
   note: {
     getNoteSnapshot(input: WorkspaceTargetInput): Promise<NoteSnapshot>;
-    createNote(input: NoteCreateInput): Promise<NoteSnapshot>;
+    createNote(input: NoteCreateInput): Promise<NoteCreateResult>;
     updateNote(input: NoteUpdateInput): Promise<NoteSnapshot>;
     archiveNote(input: NoteArchiveInput): Promise<NoteSnapshot>;
     convertInboxToNote(input: NoteConvertInboxInput): Promise<NoteConversionResult>;

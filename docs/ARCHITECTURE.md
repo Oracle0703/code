@@ -122,7 +122,7 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 - 应用同一时间最多一个 active request；请求和 SSE 事件都有大小、类型、顺序与超时上限。只接受文本/拒答增量和最终完成事件，未知输出项、工具调用、畸形 JSON、非 SSE、HTTP 错误、断流和超限都以有界错误结束，不能把 provider 原始响应或 key 回传 Renderer。
 - 用户取消、工作区切换、工作区归档提交、数据替换和应用退出会先中止相关 fetch 并使 generation 身份失效。取消后的迟到 chunk 不能进入新工作区或覆盖后续请求；关闭数据库不需要等待远端自然完成。
 - 模型输出始终按不可信 Markdown 处理，复用既有受控预览，不执行原始 HTML，也不会自动打开模型生成的链接。
-- 提示、回答和会话只存在于本次运行，不进入 SQLite 或逻辑数据包。只有完整成功后由用户显式触发的“保存为笔记”才调用既有 Note Service 新建普通笔记；模型输出本身没有数据库、终端、浏览器、自动化或其他工具权限。
+- 提示、回答和会话只存在于本次运行，不进入 SQLite 或逻辑数据包。只有完整成功后由用户显式触发的“保存为笔记”才调用既有 Note Service 新建普通笔记；既有 `note:create` 响应同时返回完整快照和 Main 在事务中实际插入的 `createdNoteId`，Renderer 不再通过快照差集猜测创建结果。保存成功仍停留在 AI 页；只有用户再点击“打开笔记”，Renderer 才 fresh-read 当前工作区快照、按该 opaque ID 精确复核并在快照真正提交后导航，目标缺失时不会按标题、时间或列表位置回退。模型输出本身没有数据库、终端、浏览器、自动化或其他工具权限。
 
 `store: false` 关闭 Responses 对象存储，但不代表请求没有离开设备，也不替代组织级保留策略。界面必须在发送前披露具体上下文；传输和服务端处理仍适用 [OpenAI API 数据控制](https://developers.openai.com/api/docs/guides/your-data)。API 使用通过用户自己的 OpenAI Platform 项目独立计费，不属于 ChatGPT 订阅。
 
@@ -193,6 +193,7 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 笔记与既有业务模块共用数据库单例和 FIFO 操作队列。列表快照显式携带 `workspaceId`，所有创建、编辑、归档和收件箱转换都绑定请求发起时的目标工作区。
 
 - 笔记 ID、时间戳、revision 和收件箱来源只由 Main 生成或推进。
+- 创建响应携带 Main 实际插入的 `createdNoteId` 与同一事务后的完整笔记快照；Renderer 只按该 ID 取得新建对象，不能根据标题、正文、时间或调用前后的 ID 差集猜测。Renderer 的笔记快照、加载、错误和 pending 操作同时绑定每次工作区 activation 对象，A→B→A 后旧 A 的迟到成功、失败或 cleanup 不能进入新的 A 页面。
 - 标题最多 200 个 Unicode code point；Markdown 正文最多 100,000 个 code point。Main 会把 CRLF/CR 统一为 LF，保留 Markdown、代码和普通换行，同时拒绝 NUL、畸形 Unicode 和不支持的控制字符。
 - 编辑与归档必须提交 `expectedRevision`。数据库中的 revision 已变化时拒绝旧写入，Renderer 需要基于最新快照重新处理，不能让迟到自动保存覆盖新内容。
 - 归档是软归档。归档工作区中的笔记继续进入备份，但 Service 与 Trigger 都拒绝修改或删除。

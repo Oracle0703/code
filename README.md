@@ -26,7 +26,7 @@
 - 由 Main 探测并启动固定 Shell Profile：Windows PowerShell 7、Windows PowerShell、CMD、受控 WSL，以及 macOS/Linux 默认 shell、Bash、Zsh 或 PowerShell 7
 - 按工作区保存本机终端 Profile、由原生目录选择器授权的启动目录，以及能力快照绑定的 WSL 发行版；新设置只影响之后创建的会话
 - 按工作区保存默认停用的每日/每周自动化，只能创建今日任务或静态 Markdown 笔记；应用重启后最多补执行最近一次错过的计划，也可在展示已保存动作并获得显式确认后立即运行一次，再从成功反馈显式打开精确输出
-- 只在用户显式发起时读取 Today、选中的未完成任务或一篇已保存笔记，经固定的 OpenAI Responses API 生成流式回答；不提供模型工具、终端、浏览器或自动化能力
+- 只在用户显式发起时读取 Today、选中的未完成任务或一篇已保存笔记，经固定的 OpenAI Responses API 生成流式回答；完整回答保存为笔记后仍停留在 AI 页，并只在用户显式确认后打开 Main 返回的精确笔记
 - 严格的 preload 白名单 API、IPC 参数校验、远程网页隔离与权限默认拒绝
 - TypeScript、ESLint、Prettier、Vitest 和 GitHub Actions 基础质量链路
 - Electron Forge Windows x64 Squirrel 制品，以及同一 make 作业未打包负载的 ConPTY 与业务数据冒烟测试
@@ -64,7 +64,7 @@ API key 只通过窄的一次性配置调用从设置界面交给 Electron Main�
 
 每次请求前，界面会显示将要发送的上下文。用户可以只发送提示词，也可以显式选择当前工作区的 Today、若干未完成任务或一篇已保存笔记；其中 Today 只包含当天未完成任务和当天日程，不会把未来 6 天的计划隐式发送。Main 会重新读取并限制内容，不能从 Renderer 接收任意文件、路径、URL、终端输出或环境变量。请求固定使用 `gpt-5.6`、`store: false` 和空工具列表；`store: false` 会关闭 Responses 对象存储，但传输与服务端处理仍受 [OpenAI API 数据控制](https://developers.openai.com/api/docs/guides/your-data)约束。
 
-回答和会话只存在于本次运行，不进入备份或导出。只有用户在完整回答结束后显式选择“保存为笔记”，才会通过既有 Note Service 新建一篇普通笔记；模型不能自行写库、执行命令或触发自动化。
+回答和会话只存在于本次运行，不进入备份或导出。只有用户在完整回答结束后显式选择“保存为笔记”，才会通过既有 Note Service 新建一篇普通笔记；保存成功不会自动跳页，用户可以再显式打开 Main 返回的精确 opaque 笔记 ID。打开前 Renderer 会重新读取当前工作区快照并复核该 ID，目标已归档或数据变化时不会按标题、时间或列表位置回退。模型不能自行写库、执行命令或触发自动化。
 
 常用质量命令：
 

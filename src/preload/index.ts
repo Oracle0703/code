@@ -49,6 +49,7 @@ import {
   type NoteConversionResult,
   type NoteConvertInboxInput,
   type NoteCreateInput,
+  type NoteCreateResult,
   type NoteSnapshot,
   type NoteUpdateInput,
   type ScheduleCreateInput,
@@ -247,7 +248,7 @@ const workbenchApi: WorkbenchApi = Object.freeze({
   note: Object.freeze({
     getSnapshot: (input: WorkspaceTargetInput) =>
       invoke<NoteSnapshot>(IPC_CHANNELS.note.getSnapshot, input),
-    create: (input: NoteCreateInput) => invoke<NoteSnapshot>(IPC_CHANNELS.note.create, input),
+    create: (input: NoteCreateInput) => invoke<NoteCreateResult>(IPC_CHANNELS.note.create, input),
     update: (input: NoteUpdateInput) => invoke<NoteSnapshot>(IPC_CHANNELS.note.update, input),
     archive: (input: NoteArchiveInput) => invoke<NoteSnapshot>(IPC_CHANNELS.note.archive, input),
     convertInbox: (input: NoteConvertInboxInput) =>

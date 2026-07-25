@@ -4,6 +4,7 @@ import type {
   NoteConversionResult,
   NoteConvertInboxInput,
   NoteCreateInput,
+  NoteCreateResult,
   NoteSnapshot,
   NoteUpdateInput,
   WorkspaceTargetInput,
@@ -71,7 +72,7 @@ export class NoteService {
     });
   }
 
-  create(input: NoteCreateInput): Promise<NoteSnapshot> {
+  create(input: NoteCreateInput): Promise<NoteCreateResult> {
     const workspaceId = this.#workspaceId(input?.workspaceId);
     const title = this.#title(input?.title);
     const body = this.#body(input?.body);
@@ -88,7 +89,10 @@ export class NoteService {
           sourceInboxEntryId: null,
           timestamp,
         });
-        return notes.readSnapshot(workspaceId);
+        return {
+          noteSnapshot: notes.readSnapshot(workspaceId),
+          createdNoteId: noteId,
+        };
       }),
     );
   }

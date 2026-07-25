@@ -47,11 +47,13 @@ describe('note service', () => {
     const opened = await service.open();
     expect(opened.migration).toMatchObject({ fromVersion: 0, toVersion: 11 });
 
-    let snapshot = await service.createNote({
+    const created = await service.createNote({
       workspaceId: WORKSPACE_A,
       title: '  Markdown 笔记 👩‍💻  ',
       body: '# 标题\r\n\r\n- 内容\tA',
     });
+    expect(created.createdNoteId).toBe(NOTE_A);
+    let snapshot = created.noteSnapshot;
     expect(snapshot.notes).toEqual([
       expect.objectContaining({
         id: NOTE_A,
