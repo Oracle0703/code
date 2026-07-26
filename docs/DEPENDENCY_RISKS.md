@@ -9,6 +9,15 @@ CI 分开检查两类风险：
 
 例外按 GHSA 管理，而不是按 npm 展开的受影响包数量管理。已修复的 advisory 可以自然消失；新增 advisory、根包变化、例外到期或任一相关节点不再标记为 `dev` 都会使检查失败。CI 会把完整报告作为 30 天制品保存，并把摘要写入 Job Summary。
 
+两个门禁都通过固定 npm 11.9.0 的独立审计子进程运行。该子进程只为 npm 官方
+`POST /-/npm/v1/security/advisories/bulk` 安装严格限域的响应兼容：仅当最终响应仍为
+官方 HTTPS URL、状态为 200 且真正缺失 `Content-Encoding` 时，才从无损 clone 检查前三个
+wire bytes；普通 JSON 仍交回 npm 原生解析。只有完整 gzip 魔数命中后，兼容层才在固定
+输入/输出/时间上限内验证单一 gzip member、CRC32、ISIZE、UTF-8、JSON 和请求包名子集。
+任何其他 host、method、path、query 或编码完全沿用 npm 行为；版本漂移、模块挂接失败、
+损坏或超限数据仍会关闭门禁。兼容层不重试、不生成 advisory、不修改 npm 的 0/1 退出语义，
+也不改变下述 allowlist。
+
 ## 当前受控风险
 
 最早复查期限：2026-08-31。每项风险的独立期限如下；任一到期都会由完整依赖审计阻止构建。
