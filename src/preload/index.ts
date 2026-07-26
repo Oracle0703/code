@@ -42,6 +42,7 @@ import {
   type InboxArchiveResult,
   type InboxCategorizeInput,
   type InboxCreateInput,
+  type InboxCreateResult,
   type InboxSnapshot,
   type InboxTargetInput,
   type InboxUndoInput,
@@ -223,7 +224,8 @@ const workbenchApi: WorkbenchApi = Object.freeze({
   inbox: Object.freeze({
     getSnapshot: (input: WorkspaceTargetInput) =>
       invoke<InboxSnapshot>(IPC_CHANNELS.inbox.getSnapshot, input),
-    create: (input: InboxCreateInput) => invoke<InboxSnapshot>(IPC_CHANNELS.inbox.create, input),
+    create: (input: InboxCreateInput) =>
+      invoke<InboxCreateResult>(IPC_CHANNELS.inbox.create, input),
     categorize: (input: InboxCategorizeInput) =>
       invoke<InboxSnapshot>(IPC_CHANNELS.inbox.categorize, input),
     archive: (input: InboxTargetInput) =>

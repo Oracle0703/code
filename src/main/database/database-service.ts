@@ -21,6 +21,7 @@ import type {
   InboxArchiveResult,
   InboxCategorizeInput,
   InboxCreateInput,
+  InboxCreateResult,
   InboxSnapshot,
   InboxTargetInput,
   InboxUndoInput,
@@ -682,7 +683,7 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#inboxService.getSnapshot(input);
   }
 
-  createInboxEntry(input: InboxCreateInput): Promise<InboxSnapshot> {
+  createInboxEntry(input: InboxCreateInput): Promise<InboxCreateResult> {
     return this.#inboxService.create(input);
   }
 

@@ -62,11 +62,13 @@ describe('inbox service', () => {
     });
 
     const original = '  ＡPI / e\u0301 / 👩‍💻 / https://example.com/?q=Ａ  ';
-    let snapshot = await service.createInboxEntry({
+    const created = await service.createInboxEntry({
       workspaceId: WORKSPACE_A,
       content: original,
       category: 'uncategorized',
     });
+    expect(created.createdEntryId).toBe(ENTRY_A);
+    let snapshot = created.inboxSnapshot;
     expect(snapshot.entries).toMatchObject([
       {
         id: ENTRY_A,
@@ -91,6 +93,36 @@ describe('inbox service', () => {
       entries: [{ id: ENTRY_A, content: original.trim(), category: 'task' }],
     });
     await reopened.close();
+  });
+
+  it('returns the exact inserted id when another entry has identical content', async () => {
+    const dataDirectory = await createDataDirectory();
+    const service = createService(dataDirectory, {
+      workspaceIds: [WORKSPACE_A],
+      inboxIds: [ENTRY_A, ENTRY_B],
+    });
+    await service.open();
+
+    const first = await service.createInboxEntry({
+      workspaceId: WORKSPACE_A,
+      content: '相同的快速记录',
+      category: 'uncategorized',
+    });
+    const second = await service.createInboxEntry({
+      workspaceId: WORKSPACE_A,
+      content: '相同的快速记录',
+      category: 'uncategorized',
+    });
+
+    expect(first.createdEntryId).toBe(ENTRY_A);
+    expect(second.createdEntryId).toBe(ENTRY_B);
+    expect(second.inboxSnapshot.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: ENTRY_A, content: '相同的快速记录' }),
+        expect.objectContaining({ id: ENTRY_B, content: '相同的快速记录' }),
+      ]),
+    );
+    await service.close();
   });
 
   it('isolates entries by workspace and rejects cross-workspace targets', async () => {

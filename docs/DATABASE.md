@@ -41,7 +41,7 @@ userData/
 - 创建、重命名、切换或归档受控工作区；
 - 以严格字段 patch 更新指定活动工作区的界面偏好。
 - 获取指定活动工作区的收件箱快照；
-- 创建、分类和软归档收件箱条目；
+- 创建、分类和软归档收件箱条目；创建响应同时返回事务后快照与 Main 实际插入的 opaque ID；
 - 使用 Main 签发、由单调时钟判定有效期的一次性短期令牌撤销刚完成的归档。
 - 获取指定活动工作区的完整任务快照、Main 计算的本地 `todayDate` 及固定 7 日计划映射；
 - 创建或重命名任务，更新固定状态，并通过 `day-0` 至 `day-6`/`none` 意图在当前 7 日窗口内安排、移动或移出计划；
@@ -117,6 +117,8 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 从原型版本首次进入 v2 时，Renderer 会严格读取旧 `localStorage` 中合法的页面、主题和布局值，并只在数据库仍为单一默认工作区时导入；只有 SQLite 写入成功后才清理旧键。旧版硬编码工作区选择不会被当作真实身份导入，写入失败时会保留可重试的 dirty patch 和旧键。
 
 收件箱 v3 不导入界面中的演示条目，也不会把原型 `localStorage` 任务当作真实收件箱数据。条目允许重复正文，分类只接受 `uncategorized`、`task`、`note`、`link`；其中 `task` 只是处理意图。归档工作区中的条目原样保留，但触发器和 Service 都拒绝继续修改。
+
+`inbox:create` 沿用既有输入与通道，成功响应新增同一事务后的 `inboxSnapshot` 和 Main 实际插入的 `createdEntryId`；这不新增 schema、migration 或 IPC 通道。Today 与全局快速记录保存成功后仍留在原页，并共用统一回执；只有用户显式打开时，Renderer 才 fresh-read 当前工作区收件箱并只按该 opaque ID 精确复核。目标缺失、已归档或状态变化时不会按正文、时间或列表位置模糊回退。
 
 任务 v4 也不会导入 `daily.today.tasks` 中的演示任务，或自动转换既有 `task` 分类收件箱条目。任务状态固定为 `todo`、`in_progress`、`completed`；`planned_for` 只保存 Main 计算的本地民用 `YYYY-MM-DD` 或 `NULL`，完成状态与 `completed_at` 必须一致。Renderer 只能提交 Main 快照签发语义下的 `day-0` 至 `day-6` 或 `none` 固定计划意图；Service 在数据库 FIFO 操作真正执行时把 token 映射到民用日期，不能由页面伪造日期、ID、时间戳或来源关系。这个扩展不改变 v4 表结构或当前 schema 版本。
 

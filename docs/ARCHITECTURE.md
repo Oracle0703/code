@@ -168,6 +168,8 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 收件箱与工作区共用同一个 SQLite 连接和 FIFO 操作队列。Renderer 取得包含 `workspaceId` 的完整活动条目快照，并按请求序号丢弃旧工作区或旧请求的迟到响应。
 
 - 条目 ID、时间和撤销令牌只由 Main 生成；Renderer 只能提交目标工作区、正文和固定分类。
+- 既有 `inbox:create` 响应携带同一事务后的完整收件箱快照，以及 Main 实际插入的 opaque `createdEntryId`；这只扩展返回契约，不新增 IPC 通道、schema 或 migration。
+- Today 与全局快速记录成功后都留在原页并发布统一回执。用户显式打开时才 fresh-read 当前工作区快照、只按 `createdEntryId` 精确匹配并在快照 commit 后导航；目标缺失、已归档或状态变化时不会按正文、时间或列表位置回退。
 - 正文只去除首尾空白并验证良构 Unicode、控制字符和长度，不做 NFKC 改写，避免破坏 URL、代码和技术文本。
 - 分类固定为未分类、任务线索、笔记和链接。“任务线索”不代表已经创建任务。
 - 归档只写入 `archived_at`。成功提交后，Main 在内存中保存 15 秒有效的一次性 opaque 撤销令牌；后端有效期使用不受系统时钟回拨影响的单调时钟，令牌不能跨工作区、重复或过期使用，也不会在重启后恢复。

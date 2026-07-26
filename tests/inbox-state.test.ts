@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   countInboxEntries,
+  createdInboxEntryFromResult,
   createInboxRequestIdentity,
   createInboxWorkspaceIdentity,
   filterInboxEntries,
@@ -11,7 +12,7 @@ import {
   isInboxWorkspaceCurrent,
   shouldApplyInboxSnapshot,
 } from '../src/renderer/inbox-state';
-import type { InboxSnapshot } from '../src/shared/contracts';
+import type { InboxCreateResult, InboxEntry, InboxSnapshot } from '../src/shared/contracts';
 
 const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
@@ -89,6 +90,37 @@ describe('inbox renderer state', () => {
     expect(inboxSnapshotForActivation(secondWorkspaceA, state)).toBeNull();
     expect(inboxSnapshotForActivation(createInboxWorkspaceIdentity(WORKSPACE_B), state)).toBeNull();
     expect(inboxSnapshotForActivation(firstWorkspaceA, null)).toBeNull();
+  });
+
+  it('resolves a created entry only by the Main-returned exact id and workspace', () => {
+    const sameContent = '重复内容';
+    const other: InboxEntry = {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      content: sameContent,
+      category: 'uncategorized',
+      createdAt: '2026-07-25T12:00:00.000Z',
+      updatedAt: '2026-07-25T12:00:00.000Z',
+    };
+    const created: InboxEntry = {
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      content: sameContent,
+      category: 'uncategorized',
+      createdAt: '2026-07-25T12:00:00.000Z',
+      updatedAt: '2026-07-25T12:00:00.000Z',
+    };
+    const result: InboxCreateResult = {
+      inboxSnapshot: { workspaceId: WORKSPACE_A, entries: [other, created] },
+      createdEntryId: created.id,
+    };
+
+    expect(createdInboxEntryFromResult(WORKSPACE_A, result)).toBe(created);
+    expect(
+      createdInboxEntryFromResult(WORKSPACE_A, {
+        ...result,
+        createdEntryId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      }),
+    ).toBeNull();
+    expect(createdInboxEntryFromResult(WORKSPACE_B, result)).toBeNull();
   });
 
   it('derives every badge from the real active-entry snapshot', () => {

@@ -201,6 +201,36 @@ describe('preload inbox API', () => {
     ]);
   });
 
+  it('returns the Main-issued inbox creation identity unchanged', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const createdEntryId = '223e4567-e89b-42d3-a456-426614174000';
+    const result = {
+      createdEntryId,
+      inboxSnapshot: {
+        workspaceId,
+        entries: [
+          {
+            id: createdEntryId,
+            content: '权威身份',
+            category: 'uncategorized' as const,
+            createdAt: '2026-07-25T12:00:00.000Z',
+            updatedAt: '2026-07-25T12:00:00.000Z',
+          },
+        ],
+      },
+    };
+    electron.invoke.mockResolvedValueOnce(result as never);
+
+    await expect(
+      api.inbox.create({ workspaceId, content: '权威身份', category: 'uncategorized' }),
+    ).resolves.toBe(result);
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith('inbox:create', {
+      workspaceId,
+      content: '权威身份',
+      category: 'uncategorized',
+    });
+  });
+
   it('subscribes and removes the Main-triggered quick-capture listener', () => {
     const listener = vi.fn();
     const unsubscribe = api.inbox.onCaptureRequest(listener);

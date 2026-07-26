@@ -4,6 +4,7 @@ import type {
   InboxArchiveResult,
   InboxCategorizeInput,
   InboxCreateInput,
+  InboxCreateResult,
   InboxSnapshot,
   InboxTargetInput,
   InboxUndoInput,
@@ -90,7 +91,7 @@ export class InboxService {
     });
   }
 
-  create(input: InboxCreateInput): Promise<InboxSnapshot> {
+  create(input: InboxCreateInput): Promise<InboxCreateResult> {
     const workspaceId = this.#workspaceId(input?.workspaceId);
     const content = this.#content(input?.content);
     const category = this.#category(input?.category);
@@ -100,7 +101,10 @@ export class InboxService {
         const workspace = this.#requireActiveWorkspace(database, workspaceId);
         const timestamp = this.#timestampAtLeast(workspace.createdAt, workspace.updatedAt);
         repository.insert({ id: entryId, workspaceId, content, category, timestamp });
-        return repository.readSnapshot(workspaceId);
+        return {
+          inboxSnapshot: repository.readSnapshot(workspaceId),
+          createdEntryId: entryId,
+        };
       }),
     );
   }
