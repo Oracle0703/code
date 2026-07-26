@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Note, NoteConversionResult, NoteSnapshot } from '../../shared/contracts';
 import {
+  convertedNoteFromResult,
   createdNoteFromResult,
   createNoteRequestIdentity,
   createNoteWorkspaceIdentity,
@@ -28,6 +29,12 @@ interface NoteOperationError {
 
 const EMPTY_NOTES: readonly Note[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createNoteWorkspaceIdentity(null));
+
+export interface NoteInboxConversionCommit {
+  readonly result: NoteConversionResult;
+  readonly createdNote: Note;
+  readonly committed: boolean;
+}
 
 export function useNoteController(workspaceId: string | null) {
   const activation = useMemo(() => createNoteWorkspaceIdentity(workspaceId), [workspaceId]);
@@ -213,9 +220,14 @@ export function useNoteController(workspaceId: string | null) {
   );
 
   const operationFailure = useCallback(
-    (error: unknown, target: NoteWorkspaceIdentity, fallback: string): Error => {
+    (
+      error: unknown,
+      target: NoteWorkspaceIdentity,
+      fallback: string,
+      shouldPublish: () => boolean = () => true,
+    ): Error => {
       const message = toMessage(error, fallback);
-      if (activeActivationRef.current === target) {
+      if (activeActivationRef.current === target && shouldPublish()) {
         setOperationErrorState({ activation: target, message });
       }
       return new Error(message, { cause: error });
@@ -319,7 +331,10 @@ export function useNoteController(workspaceId: string | null) {
   );
 
   const convertInbox = useCallback(
-    async (entryId: string): Promise<NoteConversionResult> => {
+    async (
+      entryId: string,
+      shouldPublishFailure: () => boolean,
+    ): Promise<NoteInboxConversionCommit> => {
       const target = activeActivationRef.current;
       if (target.workspaceId === null || !beginPendingConversion(target, entryId)) {
         throw new Error('这条记录正在转换。');
@@ -335,10 +350,17 @@ export function useNoteController(workspaceId: string | null) {
           workspaceId: request.workspaceId,
           entryId,
         });
-        applySnapshot(result.noteSnapshot, request);
-        return result;
+        const committed = applySnapshot(result.noteSnapshot, request);
+        const createdNote = convertedNoteFromResult(request.workspaceId, entryId, result);
+        if (!createdNote) throw new Error('转换结果与创建的笔记不匹配，请重试。');
+        return { result, createdNote, committed };
       } catch (error) {
-        throw operationFailure(error, request.workspace, '无法转换为笔记，请重试。');
+        throw operationFailure(
+          error,
+          request.workspace,
+          '无法转换为笔记，请重试。',
+          shouldPublishFailure,
+        );
       } finally {
         endPendingConversion(request.workspace, entryId);
       }

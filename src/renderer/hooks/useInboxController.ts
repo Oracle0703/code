@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { InboxCategory, InboxEntry, InboxSnapshot } from '../../shared/contracts';
 import { INBOX_UNDO_WINDOW_MS } from '../../shared/inbox-domain';
 import {
   countInboxEntries,
+  createInboxRequestIdentity,
+  createInboxWorkspaceIdentity,
+  inboxSnapshotForActivation,
+  isInboxRequestCurrent,
   isInboxRequestLatest,
-  isInboxSequenceCurrent,
-  isInboxWorkspaceCurrent,
+  shouldApplyInboxSnapshot,
+  type InboxRequestIdentity,
+  type InboxSnapshotState,
+  type InboxWorkspaceIdentity,
 } from '../inbox-state';
 
 export interface InboxUndoNotice {
@@ -16,121 +22,196 @@ export interface InboxUndoNotice {
 }
 
 type InboxStatus = 'loading' | 'ready' | 'error';
+
+interface InboxLoadState {
+  readonly activation: InboxWorkspaceIdentity;
+  readonly status: InboxStatus;
+  readonly error: string | null;
+}
+
+interface InboxOperationError {
+  readonly activation: InboxWorkspaceIdentity;
+  readonly message: string;
+}
+
 const EMPTY_ENTRIES: readonly InboxEntry[] = Object.freeze([]);
+const INACTIVE_ACTIVATION = Object.freeze(createInboxWorkspaceIdentity(null));
 
 export function useInboxController(workspaceId: string | null) {
-  const [storedSnapshot, setStoredSnapshot] = useState<InboxSnapshot | null>(null);
-  const [status, setStatus] = useState<InboxStatus>('loading');
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [operationErrorState, setOperationErrorState] = useState<{
-    readonly workspaceId: string;
-    readonly message: string;
-  } | null>(null);
-  const [pendingEntryIds, setPendingEntryIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [pendingCaptureWorkspaces, setPendingCaptureWorkspaces] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  const [pendingUndoTokens, setPendingUndoTokens] = useState<ReadonlySet<string>>(() => new Set());
+  const activation = useMemo(() => createInboxWorkspaceIdentity(workspaceId), [workspaceId]);
+  const activeActivationRef = useRef<InboxWorkspaceIdentity>(activation);
+  const [storedSnapshot, setStoredSnapshot] = useState<InboxSnapshotState | null>(null);
+  const [loadState, setLoadState] = useState<InboxLoadState>({
+    activation,
+    status: 'loading',
+    error: null,
+  });
+  const [operationErrorState, setOperationErrorState] = useState<InboxOperationError | null>(null);
+  const [pendingEntryOperations, setPendingEntryOperations] = useState<
+    ReadonlyMap<string, InboxWorkspaceIdentity>
+  >(() => new Map());
+  const [pendingCaptureActivations, setPendingCaptureActivations] = useState<
+    ReadonlySet<InboxWorkspaceIdentity>
+  >(() => new Set());
+  const [pendingUndoOperations, setPendingUndoOperations] = useState<
+    ReadonlyMap<string, InboxWorkspaceIdentity>
+  >(() => new Map());
   const [undoNotices, setUndoNotices] = useState<readonly InboxUndoNotice[]>([]);
-  const activeWorkspaceRef = useRef(workspaceId);
   const requestSequenceRef = useRef(0);
-  const latestRequestSequenceRef = useRef(new Map<string, number>());
-  const appliedSequenceRef = useRef(new Map<string, number>());
-  const pendingCaptureWorkspacesRef = useRef(new Set<string>());
-  const pendingEntryIdsRef = useRef(new Set<string>());
-  const pendingUndoTokensRef = useRef(new Set<string>());
+  const latestRequestSequenceRef = useRef(-1);
+  const appliedSequenceRef = useRef(-1);
+  const pendingEntryOperationsRef = useRef(new Map<string, InboxWorkspaceIdentity>());
+  const pendingCaptureActivationsRef = useRef(new Set<InboxWorkspaceIdentity>());
+  const pendingUndoOperationsRef = useRef(new Map<string, InboxWorkspaceIdentity>());
 
-  const beginPendingEntry = useCallback((entryId: string): boolean => {
-    if (pendingEntryIdsRef.current.has(entryId)) return false;
-    pendingEntryIdsRef.current = new Set(pendingEntryIdsRef.current).add(entryId);
-    setPendingEntryIds(pendingEntryIdsRef.current);
-    return true;
-  }, []);
+  const beginPendingEntry = useCallback(
+    (target: InboxWorkspaceIdentity, entryId: string): boolean => {
+      if (pendingEntryOperationsRef.current.get(entryId) === target) return false;
+      pendingEntryOperationsRef.current = new Map(pendingEntryOperationsRef.current).set(
+        entryId,
+        target,
+      );
+      setPendingEntryOperations(pendingEntryOperationsRef.current);
+      return true;
+    },
+    [],
+  );
 
-  const beginPendingCapture = useCallback((targetWorkspaceId: string): boolean => {
-    if (pendingCaptureWorkspacesRef.current.has(targetWorkspaceId)) return false;
-    pendingCaptureWorkspacesRef.current = new Set(pendingCaptureWorkspacesRef.current).add(
-      targetWorkspaceId,
-    );
-    setPendingCaptureWorkspaces(pendingCaptureWorkspacesRef.current);
-    return true;
-  }, []);
-
-  const endPendingCapture = useCallback((targetWorkspaceId: string): void => {
-    const next = new Set(pendingCaptureWorkspacesRef.current);
-    next.delete(targetWorkspaceId);
-    pendingCaptureWorkspacesRef.current = next;
-    setPendingCaptureWorkspaces(next);
-  }, []);
-
-  const endPendingEntry = useCallback((entryId: string): void => {
-    const next = new Set(pendingEntryIdsRef.current);
+  const endPendingEntry = useCallback((target: InboxWorkspaceIdentity, entryId: string): void => {
+    if (pendingEntryOperationsRef.current.get(entryId) !== target) return;
+    const next = new Map(pendingEntryOperationsRef.current);
     next.delete(entryId);
-    pendingEntryIdsRef.current = next;
-    setPendingEntryIds(next);
+    pendingEntryOperationsRef.current = next;
+    setPendingEntryOperations(next);
   }, []);
 
-  const beginPendingUndo = useCallback((undoToken: string): boolean => {
-    if (pendingUndoTokensRef.current.has(undoToken)) return false;
-    pendingUndoTokensRef.current = new Set(pendingUndoTokensRef.current).add(undoToken);
-    setPendingUndoTokens(pendingUndoTokensRef.current);
+  const beginPendingCapture = useCallback((target: InboxWorkspaceIdentity): boolean => {
+    if (pendingCaptureActivationsRef.current.has(target)) return false;
+    pendingCaptureActivationsRef.current = new Set(pendingCaptureActivationsRef.current).add(
+      target,
+    );
+    setPendingCaptureActivations(pendingCaptureActivationsRef.current);
     return true;
   }, []);
 
-  const endPendingUndo = useCallback((undoToken: string): void => {
-    const next = new Set(pendingUndoTokensRef.current);
+  const endPendingCapture = useCallback((target: InboxWorkspaceIdentity): void => {
+    const next = new Set(pendingCaptureActivationsRef.current);
+    next.delete(target);
+    pendingCaptureActivationsRef.current = next;
+    setPendingCaptureActivations(next);
+  }, []);
+
+  const beginPendingUndo = useCallback(
+    (target: InboxWorkspaceIdentity, undoToken: string): boolean => {
+      if (pendingUndoOperationsRef.current.get(undoToken) === target) return false;
+      pendingUndoOperationsRef.current = new Map(pendingUndoOperationsRef.current).set(
+        undoToken,
+        target,
+      );
+      setPendingUndoOperations(pendingUndoOperationsRef.current);
+      return true;
+    },
+    [],
+  );
+
+  const endPendingUndo = useCallback((target: InboxWorkspaceIdentity, undoToken: string): void => {
+    if (pendingUndoOperationsRef.current.get(undoToken) !== target) return;
+    const next = new Map(pendingUndoOperationsRef.current);
     next.delete(undoToken);
-    pendingUndoTokensRef.current = next;
-    setPendingUndoTokens(next);
+    pendingUndoOperationsRef.current = next;
+    setPendingUndoOperations(next);
   }, []);
 
-  const beginRequest = useCallback((targetWorkspaceId: string): number => {
-    const sequence = ++requestSequenceRef.current;
-    latestRequestSequenceRef.current.set(targetWorkspaceId, sequence);
-    return sequence;
-  }, []);
+  const beginRequest = useCallback(
+    (target: InboxWorkspaceIdentity): InboxRequestIdentity | null => {
+      if (target.workspaceId === null) return null;
+      const sequence = ++requestSequenceRef.current;
+      latestRequestSequenceRef.current = sequence;
+      return createInboxRequestIdentity(target, sequence);
+    },
+    [],
+  );
 
-  const applySnapshot = useCallback((snapshot: InboxSnapshot, sequence: number) => {
-    const lastApplied = appliedSequenceRef.current.get(snapshot.workspaceId) ?? -1;
-    if (!isInboxSequenceCurrent(sequence, lastApplied)) return;
-    appliedSequenceRef.current.set(snapshot.workspaceId, sequence);
-    if (!isInboxWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return;
-    setStoredSnapshot(snapshot);
-    setStatus('ready');
-    setLoadError(null);
-  }, []);
+  const requestIsCurrent = useCallback(
+    (request: InboxRequestIdentity): boolean =>
+      isInboxRequestCurrent(activeActivationRef.current, request),
+    [],
+  );
+
+  const applySnapshot = useCallback(
+    (snapshot: InboxSnapshot, request: InboxRequestIdentity): boolean => {
+      if (
+        !shouldApplyInboxSnapshot(
+          activeActivationRef.current,
+          appliedSequenceRef.current,
+          request,
+          snapshot,
+        )
+      ) {
+        return false;
+      }
+      appliedSequenceRef.current = request.sequence;
+      setStoredSnapshot({ activation: request.workspace, snapshot });
+      setLoadState({
+        activation: request.workspace,
+        status: 'ready',
+        error: null,
+      });
+      return true;
+    },
+    [],
+  );
 
   const load = useCallback(
-    async (targetWorkspaceId: string) => {
-      const sequence = beginRequest(targetWorkspaceId);
-      if (activeWorkspaceRef.current === targetWorkspaceId) {
-        setStatus('loading');
-        setLoadError(null);
+    async (target: InboxWorkspaceIdentity): Promise<void> => {
+      const request = beginRequest(target);
+      if (!request) return;
+      if (requestIsCurrent(request)) {
+        setLoadState({
+          activation: request.workspace,
+          status: 'loading',
+          error: null,
+        });
       }
       try {
-        const snapshot = await window.workbench.inbox.getSnapshot({
-          workspaceId: targetWorkspaceId,
-        });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(
+          await window.workbench.inbox.getSnapshot({
+            workspaceId: request.workspaceId,
+          }),
+          request,
+        );
       } catch (error) {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
         if (
-          isInboxRequestLatest(sequence, latestRequested) &&
-          activeWorkspaceRef.current === targetWorkspaceId
+          requestIsCurrent(request) &&
+          isInboxRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
           setStoredSnapshot(null);
-          setStatus('error');
-          setLoadError(toMessage(error, '收件箱暂时无法读取。'));
+          setLoadState({
+            activation: request.workspace,
+            status: 'error',
+            error: toMessage(error, '收件箱暂时无法读取。'),
+          });
         }
+        throw error;
       }
     },
-    [applySnapshot, beginRequest],
+    [applySnapshot, beginRequest, requestIsCurrent],
   );
 
+  useLayoutEffect(() => {
+    activeActivationRef.current = activation;
+    return () => {
+      if (activeActivationRef.current === activation) {
+        activeActivationRef.current = INACTIVE_ACTIVATION;
+      }
+    };
+  }, [activation]);
+
   useEffect(() => {
-    activeWorkspaceRef.current = workspaceId;
-    if (workspaceId) void load(workspaceId);
-  }, [workspaceId, load]);
+    if (activation.workspaceId !== null && activeActivationRef.current === activation) {
+      void load(activation).catch(() => undefined);
+    }
+  }, [activation, load]);
 
   useEffect(() => {
     if (undoNotices.length === 0) return;
@@ -149,140 +230,242 @@ export function useInboxController(workspaceId: string | null) {
     return () => window.clearTimeout(timeout);
   }, [undoNotices]);
 
+  const clearOperationErrorFor = useCallback((target: InboxWorkspaceIdentity): void => {
+    setOperationErrorState((current) => (current?.activation === target ? null : current));
+  }, []);
+
+  const operationFailure = useCallback(
+    (error: unknown, target: InboxWorkspaceIdentity, fallback: string): Error => {
+      const message = toMessage(error, fallback);
+      if (activeActivationRef.current === target) {
+        setOperationErrorState({ activation: target, message });
+      }
+      return new Error(message, { cause: error });
+    },
+    [],
+  );
+
   const create = useCallback(
     async (targetWorkspaceId: string, content: string, category: InboxCategory) => {
-      if (!beginPendingCapture(targetWorkspaceId)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || target.workspaceId !== targetWorkspaceId) {
+        throw new Error('工作区已经切换，请重新打开快速记录。');
+      }
+      if (!beginPendingCapture(target)) {
         throw new Error('这个工作区正在保存另一条快速记录。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
-      setOperationErrorState(null);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingCapture(target);
+        throw new Error('当前工作区不可用，无法保存快速记录。');
+      }
+      clearOperationErrorFor(target);
       try {
-        const snapshot = await window.workbench.inbox.create({
-          workspaceId: targetWorkspaceId,
-          content,
-          category,
-        });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(
+          await window.workbench.inbox.create({
+            workspaceId: request.workspaceId,
+            content,
+            category,
+          }),
+          request,
+        );
       } catch (error) {
-        const message = toMessage(error, '快速记录失败，请重试。');
-        setOperationErrorState({ workspaceId: targetWorkspaceId, message });
-        throw new Error(message, { cause: error });
+        throw operationFailure(error, request.workspace, '快速记录失败，请重试。');
       } finally {
-        endPendingCapture(targetWorkspaceId);
+        endPendingCapture(request.workspace);
       }
     },
-    [applySnapshot, beginPendingCapture, beginRequest, endPendingCapture],
+    [
+      applySnapshot,
+      beginPendingCapture,
+      beginRequest,
+      clearOperationErrorFor,
+      endPendingCapture,
+      operationFailure,
+    ],
   );
 
   const categorize = useCallback(
     async (entryId: string, category: InboxCategory) => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingEntry(entryId)) return;
-      const sequence = beginRequest(targetWorkspaceId);
-      setOperationErrorState(null);
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingEntry(target, entryId)) return;
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingEntry(target, entryId);
+        return;
+      }
+      clearOperationErrorFor(target);
       try {
-        const snapshot = await window.workbench.inbox.categorize({
-          workspaceId: targetWorkspaceId,
-          entryId,
-          category,
-        });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(
+          await window.workbench.inbox.categorize({
+            workspaceId: request.workspaceId,
+            entryId,
+            category,
+          }),
+          request,
+        );
       } catch (error) {
-        const message = toMessage(error, '分类更新失败，请重试。');
-        setOperationErrorState({ workspaceId: targetWorkspaceId, message });
-        throw new Error(message, { cause: error });
+        throw operationFailure(error, request.workspace, '分类更新失败，请重试。');
       } finally {
-        endPendingEntry(entryId);
+        endPendingEntry(request.workspace, entryId);
       }
     },
-    [applySnapshot, beginPendingEntry, beginRequest, endPendingEntry],
+    [
+      applySnapshot,
+      beginPendingEntry,
+      beginRequest,
+      clearOperationErrorFor,
+      endPendingEntry,
+      operationFailure,
+    ],
   );
 
   const archive = useCallback(
     async (entry: InboxEntry) => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingEntry(entry.id)) return;
-      const sequence = beginRequest(targetWorkspaceId);
-      setOperationErrorState(null);
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingEntry(target, entry.id)) return;
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingEntry(target, entry.id);
+        return;
+      }
+      clearOperationErrorFor(target);
       try {
         const result = await window.workbench.inbox.archive({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
           entryId: entry.id,
         });
-        applySnapshot(result.snapshot, sequence);
+        applySnapshot(result.snapshot, request);
         setUndoNotices((current) => [
           ...current.filter(({ undoToken }) => undoToken !== result.undoToken),
           {
             undoToken: result.undoToken,
-            workspaceId: targetWorkspaceId,
+            workspaceId: request.workspaceId,
             content: entry.content,
             expiresAtMonotonicMs: window.performance.now() + INBOX_UNDO_WINDOW_MS,
           },
         ]);
       } catch (error) {
-        const message = toMessage(error, '归档失败，请重试。');
-        setOperationErrorState({ workspaceId: targetWorkspaceId, message });
-        throw new Error(message, { cause: error });
+        throw operationFailure(error, request.workspace, '归档失败，请重试。');
       } finally {
-        endPendingEntry(entry.id);
+        endPendingEntry(request.workspace, entry.id);
       }
     },
-    [applySnapshot, beginPendingEntry, beginRequest, endPendingEntry],
+    [
+      applySnapshot,
+      beginPendingEntry,
+      beginRequest,
+      clearOperationErrorFor,
+      endPendingEntry,
+      operationFailure,
+    ],
   );
 
   const undoArchive = useCallback(
     async (notice: InboxUndoNotice) => {
-      if (!beginPendingUndo(notice.undoToken)) return;
-      const sequence = beginRequest(notice.workspaceId);
-      setOperationErrorState(null);
+      const target = activeActivationRef.current;
+      if (
+        target.workspaceId === null ||
+        target.workspaceId !== notice.workspaceId ||
+        !beginPendingUndo(target, notice.undoToken)
+      ) {
+        return;
+      }
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingUndo(target, notice.undoToken);
+        return;
+      }
+      clearOperationErrorFor(target);
       try {
-        const snapshot = await window.workbench.inbox.undoArchive({
-          workspaceId: notice.workspaceId,
-          undoToken: notice.undoToken,
-        });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(
+          await window.workbench.inbox.undoArchive({
+            workspaceId: request.workspaceId,
+            undoToken: notice.undoToken,
+          }),
+          request,
+        );
         setUndoNotices((current) =>
           current.filter(({ undoToken }) => undoToken !== notice.undoToken),
         );
       } catch (error) {
-        const message = toMessage(error, '撤销失败或已过期。');
-        setOperationErrorState({ workspaceId: notice.workspaceId, message });
-        throw new Error(message, { cause: error });
+        throw operationFailure(error, request.workspace, '撤销失败或已过期。');
       } finally {
-        endPendingUndo(notice.undoToken);
+        endPendingUndo(request.workspace, notice.undoToken);
       }
     },
-    [applySnapshot, beginPendingUndo, beginRequest, endPendingUndo],
+    [
+      applySnapshot,
+      beginPendingUndo,
+      beginRequest,
+      clearOperationErrorFor,
+      endPendingUndo,
+      operationFailure,
+    ],
   );
 
-  const snapshot =
-    storedSnapshot?.workspaceId === workspaceId && workspaceId !== null ? storedSnapshot : null;
+  const snapshot = inboxSnapshotForActivation(activation, storedSnapshot);
+  const visibleLoadState =
+    loadState.activation === activation && !(loadState.status === 'ready' && snapshot === null)
+      ? loadState
+      : {
+          activation,
+          status: 'loading' as const,
+          error: null,
+        };
   const entries = snapshot?.entries ?? EMPTY_ENTRIES;
   const counts = useMemo(() => countInboxEntries(entries), [entries]);
   const operationError =
-    operationErrorState?.workspaceId === workspaceId ? operationErrorState.message : null;
+    operationErrorState?.activation === activation ? operationErrorState.message : null;
+  const pendingEntryIds = useMemo(
+    () =>
+      new Set(
+        [...pendingEntryOperations]
+          .filter(([, target]) => target === activation)
+          .map(([entryId]) => entryId),
+      ),
+    [activation, pendingEntryOperations],
+  );
+  const pendingUndoTokens = useMemo(
+    () =>
+      new Set(
+        [...pendingUndoOperations]
+          .filter(([, target]) => target === activation)
+          .map(([undoToken]) => undoToken),
+      ),
+    [activation, pendingUndoOperations],
+  );
 
   return {
+    activation,
     snapshot,
     entries,
     counts,
-    status: snapshot ? ('ready' as const) : status,
-    loadError,
+    status: snapshot !== null ? ('ready' as const) : visibleLoadState.status,
+    loadError: visibleLoadState.error,
     operationError,
     pendingEntryIds,
-    pendingCapture: workspaceId ? pendingCaptureWorkspaces.has(workspaceId) : false,
+    pendingCapture: pendingCaptureActivations.has(activation),
     pendingUndoTokens,
     undoNotices,
     refresh: async () => {
-      if (workspaceId) await load(workspaceId);
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) await load(current);
     },
     retry: () => {
-      if (workspaceId) void load(workspaceId);
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) void load(current).catch(() => undefined);
     },
-    reserveSnapshotRequest: (targetWorkspaceId: string) => beginRequest(targetWorkspaceId),
-    applyReservedSnapshot: (nextSnapshot: InboxSnapshot, sequence: number) =>
-      applySnapshot(nextSnapshot, sequence),
-    clearOperationError: () => setOperationErrorState(null),
+    reserveSnapshotRequest: (targetWorkspaceId: string) => {
+      const current = activeActivationRef.current;
+      return current.workspaceId === targetWorkspaceId ? beginRequest(current) : null;
+    },
+    applyReservedSnapshot: (
+      nextSnapshot: InboxSnapshot,
+      request: InboxRequestIdentity | null,
+    ): boolean => request !== null && applySnapshot(nextSnapshot, request),
+    clearOperationError: () =>
+      setOperationErrorState((current) => (current?.activation === activation ? null : current)),
     create,
     categorize,
     archive,

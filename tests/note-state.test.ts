@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  convertedNoteFromResult,
   createdNoteFromResult,
   createNoteRequestIdentity,
   createNoteWorkspaceIdentity,
@@ -24,6 +25,30 @@ const notes: readonly Note[] = [
 ];
 
 describe('note renderer state', () => {
+  it('resolves only the exact note identity returned by an inbox conversion', () => {
+    const converted = {
+      ...note('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '转换笔记', '正文'),
+      sourceInboxEntryId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    };
+    const other = note('ffffffff-ffff-4fff-8fff-ffffffffffff', '其他笔记', '正文');
+    const result = {
+      noteSnapshot: { workspaceId: WORKSPACE_A, notes: [other, converted] },
+      inboxSnapshot: { workspaceId: WORKSPACE_A, entries: [] },
+      createdNoteId: converted.id,
+    };
+
+    expect(convertedNoteFromResult(WORKSPACE_A, converted.sourceInboxEntryId!, result)).toBe(
+      converted,
+    );
+    expect(
+      convertedNoteFromResult(WORKSPACE_A, converted.sourceInboxEntryId!, {
+        ...result,
+        createdNoteId: other.id,
+      }),
+    ).toBeNull();
+    expect(convertedNoteFromResult(WORKSPACE_B, converted.sourceInboxEntryId!, result)).toBeNull();
+  });
+
   it('uses activation identity to reject an old A request after A to B to A', () => {
     const firstA = createNoteWorkspaceIdentity(WORKSPACE_A);
     const oldRequest = createNoteRequestIdentity(firstA, 1);

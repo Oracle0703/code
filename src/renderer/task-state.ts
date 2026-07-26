@@ -1,4 +1,4 @@
-import type { Task, TaskSnapshot } from '../shared/contracts';
+import type { Task, TaskConversionResult, TaskSnapshot } from '../shared/contracts';
 
 export type TaskFilter = 'open' | 'today' | 'completed' | 'all';
 
@@ -103,6 +103,16 @@ export function taskSnapshotForActivation(
     isTaskSnapshotDateCurrent(state.snapshot, value)
     ? state.snapshot
     : null;
+}
+
+export function convertedTaskFromResult(
+  expectedWorkspaceId: string,
+  expectedSourceEntryId: string,
+  result: TaskConversionResult,
+): Task | null {
+  if (result.taskSnapshot.workspaceId !== expectedWorkspaceId) return null;
+  const task = result.taskSnapshot.tasks.find(({ id }) => id === result.createdTaskId);
+  return task?.sourceInboxEntryId === expectedSourceEntryId ? task : null;
 }
 
 export function countTasks(tasks: readonly Task[], todayDate: string) {

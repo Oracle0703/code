@@ -170,6 +170,7 @@ export class NoteService {
         return {
           noteSnapshot: notes.readSnapshot(workspaceId),
           inboxSnapshot: inbox.readSnapshot(workspaceId),
+          createdNoteId: noteId,
         };
       }),
     );

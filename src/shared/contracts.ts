@@ -623,6 +623,7 @@ export interface TaskConvertInboxInput {
 export interface TaskConversionResult {
   readonly taskSnapshot: TaskSnapshot;
   readonly inboxSnapshot: InboxSnapshot;
+  readonly createdTaskId: string;
 }
 
 export interface Note {
@@ -674,6 +675,7 @@ export interface NoteConvertInboxInput {
 export interface NoteConversionResult {
   readonly noteSnapshot: NoteSnapshot;
   readonly inboxSnapshot: InboxSnapshot;
+  readonly createdNoteId: string;
 }
 
 export const SCHEDULE_KINDS = ['focus', 'meeting', 'review', 'personal'] as const;

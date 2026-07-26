@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { Task, TaskPlanning, TaskSnapshot, TaskStatus } from '../../shared/contracts';
+import type {
+  Task,
+  TaskConversionResult,
+  TaskPlanning,
+  TaskSnapshot,
+  TaskStatus,
+} from '../../shared/contracts';
 import {
+  convertedTaskFromResult,
   countTasks,
   createTaskRequestIdentity,
   createTaskWorkspaceIdentity,
@@ -30,6 +37,12 @@ interface TaskOperationError {
 
 const EMPTY_TASKS: readonly Task[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createTaskWorkspaceIdentity(null));
+
+export interface TaskInboxConversionCommit {
+  readonly result: TaskConversionResult;
+  readonly createdTask: Task;
+  readonly committed: boolean;
+}
 
 export function useTaskController(workspaceId: string | null) {
   const activation = useMemo(() => createTaskWorkspaceIdentity(workspaceId), [workspaceId]);
@@ -279,9 +292,14 @@ export function useTaskController(workspaceId: string | null) {
   );
 
   const createOperationError = useCallback(
-    (error: unknown, target: TaskWorkspaceIdentity, fallback: string): Error => {
+    (
+      error: unknown,
+      target: TaskWorkspaceIdentity,
+      fallback: string,
+      shouldPublish: () => boolean = () => true,
+    ): Error => {
       const message = toMessage(error, fallback);
-      if (activeActivationRef.current === target) {
+      if (activeActivationRef.current === target && shouldPublish()) {
         setOperationErrorState({ activation: target, message });
       }
       return new Error(message, { cause: error });
@@ -375,7 +393,11 @@ export function useTaskController(workspaceId: string | null) {
   );
 
   const convertInbox = useCallback(
-    async (entryId: string, planning: TaskPlanning) => {
+    async (
+      entryId: string,
+      planning: TaskPlanning,
+      shouldPublishFailure: () => boolean,
+    ): Promise<TaskInboxConversionCommit> => {
       const target = activeActivationRef.current;
       if (target.workspaceId === null || !beginPendingConversion(target, entryId)) {
         throw new Error('这条记录正在转换。');
@@ -392,10 +414,17 @@ export function useTaskController(workspaceId: string | null) {
           entryId,
           planning,
         });
-        applySnapshot(result.taskSnapshot, request);
-        return result;
+        const committed = applySnapshot(result.taskSnapshot, request);
+        const createdTask = convertedTaskFromResult(request.workspaceId, entryId, result);
+        if (!createdTask) throw new Error('转换结果与创建的任务不匹配，请重试。');
+        return { result, createdTask, committed };
       } catch (error) {
-        throw createOperationError(error, request.workspace, '无法转换为任务，请重试。');
+        throw createOperationError(
+          error,
+          request.workspace,
+          '无法转换为任务，请重试。',
+          shouldPublishFailure,
+        );
       } finally {
         endPendingConversion(request.workspace, entryId);
       }

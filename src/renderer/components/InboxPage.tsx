@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
+  ArrowRight,
+  CheckCircle2,
   CheckSquare2,
   FileText,
   Filter,
@@ -10,8 +12,18 @@ import {
   Plus,
   Search,
   Sparkles,
+  X,
 } from 'lucide-react';
 import type { InboxCategory, InboxEntry } from '../../shared/contracts';
+import {
+  inboxConversionFeedbackKey,
+  inboxConversionOpenFailed,
+  inboxConversionOpenFinished,
+  inboxConversionOpenStarted,
+  InboxConversionOpenGate,
+  type InboxConversionFeedback,
+  type InboxConversionOpenState,
+} from '../inbox-conversion-navigation';
 import { filterInboxEntries, type InboxFilter } from '../inbox-state';
 
 interface InboxPageProps {
@@ -19,6 +31,9 @@ interface InboxPageProps {
   status: 'loading' | 'ready' | 'error';
   loadError: string | null;
   operationError: string | null;
+  conversionFeedback: InboxConversionFeedback | null;
+  conversionFeedbackFocusBlocked: boolean;
+  focusedConversionFeedbackKey: string | null;
   pendingEntryIds: ReadonlySet<string>;
   pendingConversionEntryIds: ReadonlySet<string>;
   pendingNoteConversionEntryIds: ReadonlySet<string>;
@@ -28,6 +43,9 @@ interface InboxPageProps {
   onOpenCapture: () => void;
   onCategorize: (entryId: string, category: InboxCategory) => Promise<void>;
   onArchive: (entry: InboxEntry) => Promise<void>;
+  onDismissConversionFeedback: (feedback: InboxConversionFeedback) => void;
+  onOpenConversionOutput: (feedback: InboxConversionFeedback) => Promise<void>;
+  onConversionFeedbackFocused: (feedbackKey: string) => void;
   onOpenConvert: (entry: InboxEntry) => void;
   onConvertNote: (entry: InboxEntry) => Promise<void>;
 }
@@ -52,6 +70,9 @@ export function InboxPage({
   status,
   loadError,
   operationError,
+  conversionFeedback,
+  conversionFeedbackFocusBlocked,
+  focusedConversionFeedbackKey,
   pendingEntryIds,
   pendingConversionEntryIds,
   pendingNoteConversionEntryIds,
@@ -61,16 +82,93 @@ export function InboxPage({
   onOpenCapture,
   onCategorize,
   onArchive,
+  onDismissConversionFeedback,
+  onOpenConversionOutput,
+  onConversionFeedbackFocused,
   onOpenConvert,
   onConvertNote,
 }: InboxPageProps) {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<InboxFilter>('all');
+  const [conversionOpenGate] = useState(() => new InboxConversionOpenGate());
+  const [conversionOpenState, setConversionOpenState] = useState<InboxConversionOpenState | null>(
+    null,
+  );
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const conversionActionRef = useRef<HTMLButtonElement>(null);
+  const conversionErrorRef = useRef<HTMLParagraphElement>(null);
+  const conversionFeedbackRef = useRef(conversionFeedback);
+  const conversionErrorFocusSequenceRef = useRef(0);
+  const focusedConversionErrorKeyRef = useRef<string | null>(null);
   const entryRefs = useRef(new Map<string, HTMLLIElement>());
+  const noteConversionButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const conversionFeedbackKey =
+    conversionFeedback === null ? null : inboxConversionFeedbackKey(conversionFeedback);
+  const openingConversionOutput =
+    conversionFeedback !== null &&
+    conversionOpenState?.feedbackKey === conversionFeedbackKey &&
+    conversionOpenState.opening;
+  const conversionNavigationError =
+    conversionFeedback !== null && conversionOpenState?.feedbackKey === conversionFeedbackKey
+      ? conversionOpenState.error
+      : null;
+  const conversionNavigationErrorKey =
+    conversionNavigationError !== null ? (conversionOpenState?.errorFocusKey ?? null) : null;
   const visibleEntries = useMemo(
     () => filterInboxEntries(entries, query, filter, requestedEntryId),
     [entries, filter, query, requestedEntryId],
   );
+
+  useLayoutEffect(() => {
+    conversionFeedbackRef.current = conversionFeedback;
+  }, [conversionFeedback]);
+
+  useEffect(() => {
+    if (
+      conversionFeedbackKey === null ||
+      conversionFeedbackFocusBlocked ||
+      focusedConversionFeedbackKey === conversionFeedbackKey
+    ) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (
+        conversionFeedbackRef.current !== null &&
+        inboxConversionFeedbackKey(conversionFeedbackRef.current) === conversionFeedbackKey
+      ) {
+        const action = conversionActionRef.current;
+        action?.focus({ preventScroll: true });
+        if (document.activeElement === action) {
+          onConversionFeedbackFocused(conversionFeedbackKey);
+        }
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    conversionFeedbackFocusBlocked,
+    conversionFeedbackKey,
+    focusedConversionFeedbackKey,
+    onConversionFeedbackFocused,
+    status,
+  ]);
+
+  useEffect(() => {
+    if (
+      conversionNavigationErrorKey === null ||
+      conversionFeedbackFocusBlocked ||
+      focusedConversionErrorKeyRef.current === conversionNavigationErrorKey
+    ) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const error = conversionErrorRef.current;
+      error?.focus({ preventScroll: true });
+      if (document.activeElement === error) {
+        focusedConversionErrorKeyRef.current = conversionNavigationErrorKey;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [conversionFeedbackFocusBlocked, conversionNavigationErrorKey, status]);
 
   useEffect(() => {
     if (!requestedEntryId) return;
@@ -88,6 +186,33 @@ export function InboxPage({
     };
   }, [entries, onRequestedEntryHandled, requestedEntryId]);
 
+  const openConversionOutput = async (feedback: InboxConversionFeedback): Promise<void> => {
+    if (!conversionOpenGate.begin(feedback)) return;
+    setConversionOpenState(inboxConversionOpenStarted(feedback));
+    try {
+      await onOpenConversionOutput(feedback);
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : feedback.outputKind === 'task'
+            ? '无法打开刚转换的任务，请重试。'
+            : '无法打开刚转换的笔记，请重试。';
+      conversionErrorFocusSequenceRef.current += 1;
+      const errorFocusKey = JSON.stringify([
+        inboxConversionFeedbackKey(feedback),
+        conversionErrorFocusSequenceRef.current,
+        message,
+      ]);
+      setConversionOpenState((current) =>
+        inboxConversionOpenFailed(current, feedback, message, errorFocusKey),
+      );
+    } finally {
+      conversionOpenGate.end(feedback);
+      setConversionOpenState((current) => inboxConversionOpenFinished(current, feedback));
+    }
+  };
+
   return (
     <div className="section-page inbox-page" aria-busy={status === 'loading'}>
       <header className="section-page__header">
@@ -96,7 +221,9 @@ export function InboxPage({
             <Inbox size={20} />
           </span>
           <div>
-            <h1 tabIndex={-1}>收件箱</h1>
+            <h1 ref={headingRef} tabIndex={-1}>
+              收件箱
+            </h1>
             <p>{entries.length > 0 ? `${entries.length} 项等待处理` : '随手记录，稍后再整理。'}</p>
           </div>
         </div>
@@ -156,6 +283,65 @@ export function InboxPage({
               );
             })}
           </div>
+
+          {conversionFeedback ? (
+            <div
+              className="inbox-conversion-feedback"
+              aria-busy={openingConversionOutput}
+              data-conversion-feedback={conversionFeedbackKey ?? undefined}
+            >
+              <CheckCircle2 size={17} aria-hidden="true" />
+              <div>
+                <strong>已转为{conversionFeedback.outputKind === 'task' ? '任务' : '笔记'}</strong>
+                <span>{conversionFeedback.outputTitle}</span>
+              </div>
+              <button
+                ref={conversionActionRef}
+                type="button"
+                className="inbox-conversion-feedback__open"
+                aria-label={`已转为${
+                  conversionFeedback.outputKind === 'task' ? '任务' : '笔记'
+                }“${conversionFeedback.outputTitle}”；打开${
+                  conversionFeedback.outputKind === 'task' ? '任务' : '笔记'
+                }`}
+                disabled={openingConversionOutput}
+                onClick={() => void openConversionOutput(conversionFeedback)}
+              >
+                {openingConversionOutput ? (
+                  <LoaderCircle className="is-spinning" size={14} aria-hidden="true" />
+                ) : (
+                  <ArrowRight size={14} aria-hidden="true" />
+                )}
+                {openingConversionOutput
+                  ? '正在打开…'
+                  : `打开${conversionFeedback.outputKind === 'task' ? '任务' : '笔记'}`}
+              </button>
+              <button
+                type="button"
+                className="inbox-conversion-feedback__dismiss"
+                aria-label="关闭转换成功提示"
+                disabled={openingConversionOutput}
+                onClick={() => {
+                  onDismissConversionFeedback(conversionFeedback);
+                  window.requestAnimationFrame(() =>
+                    headingRef.current?.focus({ preventScroll: true }),
+                  );
+                }}
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
+          {conversionNavigationError ? (
+            <p
+              className="inbox-conversion-navigation-error"
+              ref={conversionErrorRef}
+              role="alert"
+              tabIndex={-1}
+            >
+              {conversionNavigationError}
+            </p>
+          ) : null}
 
           {operationError ? (
             <p className="inbox-operation-error" role="alert">
@@ -227,11 +413,26 @@ export function InboxPage({
                         {pendingConversionEntryIds.has(entry.id) ? '转换中…' : '转任务'}
                       </button>
                       <button
+                        ref={(element) => {
+                          if (element) noteConversionButtonRefs.current.set(entry.id, element);
+                          else noteConversionButtonRefs.current.delete(entry.id);
+                        }}
                         type="button"
                         className="inbox-entry__convert inbox-entry__convert--note"
                         aria-label={`转为笔记：${entry.content}`}
                         disabled={pending}
-                        onClick={() => void onConvertNote(entry).catch(() => undefined)}
+                        onClick={() => {
+                          void onConvertNote(entry).catch(() => {
+                            window.requestAnimationFrame(() => {
+                              const action = noteConversionButtonRefs.current.get(entry.id);
+                              if (action && !action.disabled) {
+                                action.focus({ preventScroll: true });
+                              } else {
+                                entryRefs.current.get(entry.id)?.focus({ preventScroll: true });
+                              }
+                            });
+                          });
+                        }}
                       >
                         {pendingNoteConversionEntryIds.has(entry.id) ? (
                           <LoaderCircle className="is-spinning" size={14} />

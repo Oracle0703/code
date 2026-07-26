@@ -2,6 +2,48 @@ import type { InboxCategory, InboxEntry, InboxSnapshot } from '../shared/contrac
 
 export type InboxFilter = 'all' | InboxCategory;
 
+export interface InboxWorkspaceIdentity {
+  readonly workspaceId: string | null;
+}
+
+export interface InboxRequestIdentity {
+  readonly workspace: InboxWorkspaceIdentity;
+  readonly workspaceId: string;
+  readonly sequence: number;
+}
+
+export interface InboxSnapshotState {
+  readonly activation: InboxWorkspaceIdentity;
+  readonly snapshot: InboxSnapshot;
+}
+
+export function createInboxWorkspaceIdentity(workspaceId: string | null): InboxWorkspaceIdentity {
+  return { workspaceId };
+}
+
+export function createInboxRequestIdentity(
+  workspace: InboxWorkspaceIdentity,
+  sequence: number,
+): InboxRequestIdentity | null {
+  if (workspace.workspaceId === null || !Number.isSafeInteger(sequence) || sequence < 0) {
+    return null;
+  }
+  return {
+    workspace,
+    workspaceId: workspace.workspaceId,
+    sequence,
+  };
+}
+
+export function isInboxRequestCurrent(
+  currentWorkspace: InboxWorkspaceIdentity,
+  request: InboxRequestIdentity,
+): boolean {
+  return (
+    currentWorkspace === request.workspace && currentWorkspace.workspaceId === request.workspaceId
+  );
+}
+
 export function isInboxSequenceCurrent(sequence: number, lastAppliedSequence: number): boolean {
   return Number.isSafeInteger(sequence) && sequence >= 0 && sequence >= lastAppliedSequence;
 }
@@ -15,6 +57,30 @@ export function isInboxWorkspaceCurrent(
   snapshot: InboxSnapshot,
 ): boolean {
   return activeWorkspaceId !== null && snapshot.workspaceId === activeWorkspaceId;
+}
+
+export function shouldApplyInboxSnapshot(
+  currentWorkspace: InboxWorkspaceIdentity,
+  lastAppliedSequence: number,
+  request: InboxRequestIdentity,
+  snapshot: InboxSnapshot,
+): boolean {
+  return (
+    isInboxRequestCurrent(currentWorkspace, request) &&
+    snapshot.workspaceId === request.workspaceId &&
+    request.sequence > lastAppliedSequence
+  );
+}
+
+export function inboxSnapshotForActivation(
+  currentWorkspace: InboxWorkspaceIdentity,
+  state: InboxSnapshotState | null,
+): InboxSnapshot | null {
+  return state !== null &&
+    state.activation === currentWorkspace &&
+    state.snapshot.workspaceId === currentWorkspace.workspaceId
+    ? state.snapshot
+    : null;
 }
 
 export function countInboxEntries(entries: readonly InboxEntry[]) {
