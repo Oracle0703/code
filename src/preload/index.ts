@@ -62,6 +62,7 @@ import {
   type TaskConversionResult,
   type TaskConvertInboxInput,
   type TaskCreateInput,
+  type TaskCreateResult,
   type TaskPlanningInput,
   type TaskRenameInput,
   type TaskSnapshot,
@@ -238,7 +239,7 @@ const workbenchApi: WorkbenchApi = Object.freeze({
   task: Object.freeze({
     getSnapshot: (input: WorkspaceTargetInput) =>
       invoke<TaskSnapshot>(IPC_CHANNELS.task.getSnapshot, input),
-    create: (input: TaskCreateInput) => invoke<TaskSnapshot>(IPC_CHANNELS.task.create, input),
+    create: (input: TaskCreateInput) => invoke<TaskCreateResult>(IPC_CHANNELS.task.create, input),
     rename: (input: TaskRenameInput) => invoke<TaskSnapshot>(IPC_CHANNELS.task.rename, input),
     updateStatus: (input: TaskStatusInput) =>
       invoke<TaskSnapshot>(IPC_CHANNELS.task.updateStatus, input),

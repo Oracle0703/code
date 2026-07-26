@@ -41,6 +41,7 @@ import type {
   TaskConversionResult,
   TaskConvertInboxInput,
   TaskCreateInput,
+  TaskCreateResult,
   TaskPlanningInput,
   TaskRenameInput,
   TaskSnapshot,
@@ -703,7 +704,7 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#taskService.getSnapshot(input);
   }
 
-  createTask(input: TaskCreateInput): Promise<TaskSnapshot> {
+  createTask(input: TaskCreateInput): Promise<TaskCreateResult> {
     return this.#taskService.create(input);
   }
 

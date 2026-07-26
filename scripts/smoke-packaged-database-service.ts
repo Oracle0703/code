@@ -291,11 +291,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(tasks.todayDate, FIXED_TODAY);
     assert.deepEqual(tasks.planningDays, FIXED_PLANNING_DAYS);
     assert.deepEqual(tasks.tasks, []);
-    tasks = await service.createTask({
+    let taskCreation = await service.createTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       title: '  打包后的任务 / e\u0301 / 👩‍💻  ',
       planning: 'day-0',
     });
+    assert.equal(taskCreation.createdTaskId, FIRST_TASK_ID);
+    tasks = taskCreation.taskSnapshot;
     let task = tasks.tasks.find(({ id }) => id === FIRST_TASK_ID);
     assert.ok(task);
     assert.equal(task.title, '打包后的任务 / e\u0301 / 👩‍💻');
@@ -304,11 +306,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(task.sourceInboxEntryId, null);
     assert.equal(task.completedAt, null);
 
-    tasks = await service.createTask({
+    taskCreation = await service.createTask({
       workspaceId: DEFAULT_WORKSPACE_ID,
       title: '稍后处理的任务',
       planning: 'day-6',
     });
+    assert.equal(taskCreation.createdTaskId, SECOND_TASK_ID);
+    tasks = taskCreation.taskSnapshot;
     task = tasks.tasks.find(({ id }) => id === SECOND_TASK_ID);
     assert.ok(task);
     assert.equal(task.plannedFor, FIXED_DAY_SIX);
@@ -556,11 +560,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(secondWorkspaceInboxCreation.createdEntryId, SECOND_INBOX_ID);
     inbox = secondWorkspaceInboxCreation.inboxSnapshot;
     assert.equal(inbox.entries[0]?.id, SECOND_INBOX_ID);
-    tasks = await service.createTask({
+    taskCreation = await service.createTask({
       workspaceId: SECOND_WORKSPACE_ID,
       title: '第二工作区任务',
       planning: 'none',
     });
+    assert.equal(taskCreation.createdTaskId, THIRD_TASK_ID);
+    tasks = taskCreation.taskSnapshot;
     assert.equal(tasks.workspaceId, SECOND_WORKSPACE_ID);
     assert.equal(tasks.tasks[0]?.id, THIRD_TASK_ID);
     tasks = await service.updateTaskStatus({

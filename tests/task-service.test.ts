@@ -73,11 +73,13 @@ describe('task service', () => {
     });
 
     const original = '  完成 ＡPI / e\u0301 / 👩‍💻  ';
-    let snapshot = await service.createTask({
+    const created = await service.createTask({
       workspaceId: WORKSPACE_A,
       title: original,
       planning: 'day-0',
     });
+    expect(created.createdTaskId).toBe(TASK_A);
+    let snapshot = created.taskSnapshot;
     expect(snapshot.tasks).toMatchObject([
       {
         id: TASK_A,
@@ -150,11 +152,13 @@ describe('task service', () => {
     await service.open();
 
     for (const [index, planning] of PLANNING_DAY_TOKENS.entries()) {
-      const snapshot = await service.createTask({
+      const created = await service.createTask({
         workspaceId: WORKSPACE_A,
         title: `创建 ${planning}`,
         planning,
       });
+      expect(created.createdTaskId).toBe(taskIds[index]);
+      const snapshot = created.taskSnapshot;
       expect(snapshot.planningDays).toEqual(PLANNING_DAYS);
       expect(snapshot.tasks.find(({ id }) => id === taskIds[index])).toMatchObject({
         plannedFor: PLANNING_DATES[index],

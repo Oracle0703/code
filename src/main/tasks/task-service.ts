@@ -3,6 +3,7 @@ import type {
   TaskConversionResult,
   TaskConvertInboxInput,
   TaskCreateInput,
+  TaskCreateResult,
   TaskPlanning,
   TaskPlanningInput,
   TaskRenameInput,
@@ -78,7 +79,7 @@ export class TaskService {
     });
   }
 
-  create(input: TaskCreateInput): Promise<TaskSnapshot> {
+  create(input: TaskCreateInput): Promise<TaskCreateResult> {
     const workspaceId = this.#workspaceId(input?.workspaceId);
     const title = this.#title(input?.title);
     const planning = this.#planning(input?.planning);
@@ -96,7 +97,10 @@ export class TaskService {
           sourceInboxEntryId: null,
           timestamp,
         });
-        return tasks.readSnapshot(workspaceId, todayDate);
+        return {
+          taskSnapshot: tasks.readSnapshot(workspaceId, todayDate),
+          createdTaskId: taskId,
+        };
       }),
     );
   }

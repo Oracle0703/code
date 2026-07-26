@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Task, TaskSnapshot } from '../src/shared/contracts';
 import { createRollingPlanningDays } from '../src/shared/planning-domain';
 import {
   countTasks,
+  createdTaskFromResult,
   convertedTaskFromResult,
   createTaskRequestIdentity,
   createTaskWorkspaceIdentity,
@@ -13,6 +14,7 @@ import {
   isTaskSnapshotDateCurrent,
   isTaskWorkspaceCurrent,
   millisecondsUntilNextLocalDay,
+  reconcileTaskCreateResult,
   shouldApplyTaskSnapshot,
   taskSnapshotForActivation,
   toLocalDateKey,
@@ -31,6 +33,164 @@ const tasks: readonly Task[] = [
 ];
 
 describe('task renderer state', () => {
+  it('resolves only the exact task identity returned by manual creation', () => {
+    const created = task('ffffffff-ffff-4fff-8fff-ffffffffffff', '重复标题', 'todo', TODAY);
+    const duplicate = task('99999999-9999-4999-8999-999999999999', '重复标题', 'todo', TODAY);
+    const result = {
+      taskSnapshot: snapshot({ tasks: [duplicate, created] }),
+      createdTaskId: created.id,
+    };
+
+    expect(createdTaskFromResult(WORKSPACE_A, result)).toBe(created);
+    expect(
+      createdTaskFromResult(WORKSPACE_A, {
+        ...result,
+        createdTaskId: '88888888-8888-4888-8888-888888888888',
+      }),
+    ).toBeNull();
+    expect(createdTaskFromResult(WORKSPACE_B, result)).toBeNull();
+  });
+
+  it('commits the task:create transaction snapshot without an extra read', async () => {
+    const created = task('ffffffff-ffff-4fff-8fff-ffffffffffff', '已创建任务', 'todo', TODAY);
+    const commitResultSnapshot = vi.fn(() => true);
+    const prepareSnapshotRefresh = vi.fn();
+
+    await expect(
+      reconcileTaskCreateResult({
+        expectedWorkspaceId: WORKSPACE_A,
+        result: {
+          taskSnapshot: snapshot({ tasks: [created] }),
+          createdTaskId: created.id,
+        },
+        commitResultSnapshot,
+        getCommittedTask: () => null,
+        prepareSnapshotRefresh,
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({
+      createdTask: created,
+      committed: true,
+      error: undefined,
+    });
+    expect(commitResultSnapshot).toHaveBeenCalledOnce();
+    expect(prepareSnapshotRefresh).not.toHaveBeenCalled();
+  });
+
+  it('recovers on the second authoritative read after the first read fails', async () => {
+    const created = task('ffffffff-ffff-4fff-8fff-ffffffffffff', '已创建任务', 'todo', TODAY);
+    const firstFailure = new Error('internal database path must not become UI text');
+    const prepareSnapshotRefresh = vi
+      .fn()
+      .mockRejectedValueOnce(firstFailure)
+      .mockResolvedValueOnce({
+        snapshot: snapshot({ tasks: [created] }),
+        commit: () => true,
+      });
+
+    const reconciled = await reconcileTaskCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: {
+        taskSnapshot: snapshot({ tasks: [created] }),
+        createdTaskId: created.id,
+      },
+      commitResultSnapshot: () => false,
+      getCommittedTask: () => null,
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled.createdTask).toBe(created);
+    expect(reconciled.committed).toBe(true);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers on the second authoritative read after the first omits the exact id', async () => {
+    const created = task('ffffffff-ffff-4fff-8fff-ffffffffffff', '重复标题', 'todo', TODAY);
+    const wrong = task('99999999-9999-4999-8999-999999999999', '重复标题', 'todo', TODAY);
+    const prepareSnapshotRefresh = vi
+      .fn()
+      .mockResolvedValueOnce({
+        snapshot: snapshot({ tasks: [wrong] }),
+        commit: () => true,
+      })
+      .mockResolvedValueOnce({
+        snapshot: snapshot({ tasks: [wrong, created] }),
+        commit: () => true,
+      });
+
+    const reconciled = await reconcileTaskCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: {
+        taskSnapshot: snapshot({ tasks: [created] }),
+        createdTaskId: created.id,
+      },
+      commitResultSnapshot: () => false,
+      getCommittedTask: () => null,
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled.createdTask).toBe(created);
+    expect(reconciled.committed).toBe(true);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed after two reads and accepts a newer committed snapshot in the final check', async () => {
+    const created = task('ffffffff-ffff-4fff-8fff-ffffffffffff', '已创建任务', 'todo', TODAY);
+    const prepareSnapshotRefresh = vi.fn(async () => ({
+      snapshot: snapshot({ tasks: [created] }),
+      commit: () => false,
+    }));
+    let committedSnapshotChecks = 0;
+
+    const reconciled = await reconcileTaskCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: {
+        taskSnapshot: snapshot({ tasks: [created] }),
+        createdTaskId: created.id,
+      },
+      commitResultSnapshot: () => false,
+      getCommittedTask: () => {
+        committedSnapshotChecks += 1;
+        return committedSnapshotChecks === 3 ? created : null;
+      },
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled.createdTask).toBe(created);
+    expect(reconciled.committed).toBe(true);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+    expect(committedSnapshotChecks).toBe(3);
+  });
+
+  it('returns a bounded post-commit failure after both authoritative reads miss the exact id', async () => {
+    const created = task('ffffffff-ffff-4fff-8fff-ffffffffffff', '重复标题', 'todo', TODAY);
+    const wrong = task('99999999-9999-4999-8999-999999999999', '重复标题', 'todo', TODAY);
+    const prepareSnapshotRefresh = vi.fn(async () => ({
+      snapshot: snapshot({ tasks: [wrong] }),
+      commit: () => true,
+    }));
+
+    const reconciled = await reconcileTaskCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: {
+        taskSnapshot: snapshot({ tasks: [created] }),
+        createdTaskId: created.id,
+      },
+      commitResultSnapshot: () => false,
+      getCommittedTask: () => null,
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled.createdTask).toBe(created);
+    expect(reconciled.committed).toBe(false);
+    expect(reconciled.error).toBeInstanceOf(Error);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
   it('resolves only the exact task identity returned by an inbox conversion', () => {
     const sourceEntryId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
     const converted = {

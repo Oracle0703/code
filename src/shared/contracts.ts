@@ -602,6 +602,11 @@ export interface TaskCreateInput {
   readonly planning: TaskPlanning;
 }
 
+export interface TaskCreateResult {
+  readonly taskSnapshot: TaskSnapshot;
+  readonly createdTaskId: string;
+}
+
 export interface TaskTargetInput {
   readonly workspaceId: string;
   readonly taskId: string;
@@ -1133,7 +1138,7 @@ export interface WorkbenchApi {
   };
   task: {
     getSnapshot(input: WorkspaceTargetInput): Promise<TaskSnapshot>;
-    create(input: TaskCreateInput): Promise<TaskSnapshot>;
+    create(input: TaskCreateInput): Promise<TaskCreateResult>;
     rename(input: TaskRenameInput): Promise<TaskSnapshot>;
     updateStatus(input: TaskStatusInput): Promise<TaskSnapshot>;
     updatePlanning(input: TaskPlanningInput): Promise<TaskSnapshot>;

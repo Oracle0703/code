@@ -1,4 +1,9 @@
-import type { Task, TaskConversionResult, TaskSnapshot } from '../shared/contracts';
+import type {
+  Task,
+  TaskConversionResult,
+  TaskCreateResult,
+  TaskSnapshot,
+} from '../shared/contracts';
 
 export type TaskFilter = 'open' | 'today' | 'completed' | 'all';
 
@@ -16,6 +21,28 @@ export interface TaskSnapshotState {
   readonly activation: TaskWorkspaceIdentity;
   readonly snapshot: TaskSnapshot;
 }
+
+export interface TaskCreateSnapshotRefresh {
+  readonly snapshot: TaskSnapshot;
+  readonly commit: () => boolean;
+}
+
+export interface TaskCreateReconciliation {
+  readonly createdTask: Task | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+interface TaskCreateReconciliationInput {
+  readonly expectedWorkspaceId: string;
+  readonly result: TaskCreateResult;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedTask: () => Task | null;
+  readonly prepareSnapshotRefresh: () => Promise<TaskCreateSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
+const TASK_CREATE_REFRESH_ATTEMPTS = 2;
 
 export function createTaskWorkspaceIdentity(workspaceId: string | null): TaskWorkspaceIdentity {
   return { workspaceId };
@@ -113,6 +140,82 @@ export function convertedTaskFromResult(
   if (result.taskSnapshot.workspaceId !== expectedWorkspaceId) return null;
   const task = result.taskSnapshot.tasks.find(({ id }) => id === result.createdTaskId);
   return task?.sourceInboxEntryId === expectedSourceEntryId ? task : null;
+}
+
+export function createdTaskFromResult(
+  expectedWorkspaceId: string,
+  result: TaskCreateResult,
+): Task | null {
+  if (result.taskSnapshot.workspaceId !== expectedWorkspaceId) return null;
+  const matches = result.taskSnapshot.tasks.filter(({ id }) => id === result.createdTaskId);
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+export async function reconcileTaskCreateResult(
+  input: TaskCreateReconciliationInput,
+): Promise<TaskCreateReconciliation> {
+  let createdTask: Task | null = null;
+  let committed = false;
+  let error: unknown;
+
+  try {
+    createdTask = createdTaskFromResult(input.expectedWorkspaceId, input.result);
+    committed = createdTask !== null ? input.commitResultSnapshot() : false;
+  } catch (caughtError) {
+    error = caughtError;
+  }
+
+  for (
+    let attempt = 0;
+    !committed && input.isCurrent() && attempt < TASK_CREATE_REFRESH_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      const currentTask = input.getCommittedTask();
+      if (currentTask) {
+        createdTask = currentTask;
+        committed = true;
+        break;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+    if (!input.isCurrent()) break;
+
+    try {
+      const refresh = await input.prepareSnapshotRefresh();
+      if (!input.isCurrent()) break;
+      const freshTask = createdTaskFromResult(input.expectedWorkspaceId, {
+        taskSnapshot: refresh.snapshot,
+        createdTaskId: input.result.createdTaskId,
+      });
+      if (!freshTask) {
+        throw new Error('The committed task was not returned by the authoritative refresh.');
+      }
+      createdTask = freshTask;
+      if (refresh.commit()) {
+        committed = true;
+        break;
+      }
+      error = new Error('The authoritative task snapshot could not be committed.');
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  if (!committed && input.isCurrent()) {
+    try {
+      const currentTask = input.getCommittedTask();
+      if (currentTask) {
+        createdTask = currentTask;
+        committed = true;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  return { createdTask, committed, error };
 }
 
 export function countTasks(tasks: readonly Task[], todayDate: string) {

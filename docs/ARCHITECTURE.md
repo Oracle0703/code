@@ -185,6 +185,8 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 任务与工作区、收件箱共用同一个 SQLite 连接和 FIFO 操作队列。Renderer 每次取得带 `workspaceId`、Main 计算的本地民用日期 `todayDate` 和固定 7 个 `{token, date}` 项的完整任务快照；创建、移动和转换只接受 `day-0` 至 `day-6` 或 `none` 计划意图，不允许页面提交任意持久化日期、完成时间或来源关系。
 
 - 任务 ID、时间戳、`plannedFor`、`completedAt` 和收件箱来源只由 Main 生成或推进。
+- 既有 `task:create` 在同一个 Main 事务中创建任务，并返回事务后的完整 `taskSnapshot` 与实际插入的 opaque `createdTaskId`；这只扩展返回契约，不新增 IPC 通道、schema 或 migration，也不改变 schema v11 或 `.dwbx` v3。
+- Today、Tasks 与命令面板手动创建成功后都留在发起页面并显示回执。只有用户显式打开时才 fresh-read 当前工作区任务、按 `createdTaskId` 精确匹配，并在权威快照 commit 后进入 Tasks 的编辑界面；目标缺失会留在原页报错，工作区、页面、反馈或较新请求变化则失败关闭，不会按标题、计划日期或列表位置回退。若 Main 已提交创建但 Renderer 仍无法提交权威快照，创建框会关闭并明确提示刷新且不要重复创建，同时不发布未经确认的成功回执。
 - 状态固定为 `todo`、`in_progress`、`completed`；完成时间必须与状态一致。
 - `plannedFor` 是本地民用 `YYYY-MM-DD` 或 `null`。Today 的今日清单只展示计划到 `todayDate` 的任务；滚动计划与完整任务页使用同一真实快照展示接下来 7 天，窗口外历史日期仍可读取但不能由 Renderer 伪造成新计划。
 - Today 从同一完整快照中独立派生 `plannedFor < todayDate` 的未完成遗留项，按旧计划日期、创建时间与 opaque ID 稳定排序并有界预览。它们不计入今日进度、AI Today 上下文或专注候选，也不会自动顺延；用户只能逐项完成、提交 Main 签发的 `day-0…day-6`，或提交 `none` 移出计划。
