@@ -149,6 +149,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test npm audit response compatibility
+        run: npm run test:audit-compat
+
       - name: Test terminal ownership and protocol
         run: npm run test:terminal
 

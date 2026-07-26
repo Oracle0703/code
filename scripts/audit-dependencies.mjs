@@ -8,18 +8,16 @@ const reportDirectory = path.join(projectRoot, 'reports');
 const reportPath = path.join(reportDirectory, 'npm-audit.json');
 const allowlistPath = path.join(projectRoot, 'config', 'audit-allowlist.json');
 const lockfilePath = path.join(projectRoot, 'package-lock.json');
+const auditRunnerPath = path.join(projectRoot, 'scripts', 'run-npm-audit.mjs');
 
 await mkdir(reportDirectory, { recursive: true });
 
-const npmExecutable = process.env.npm_execpath;
-const command = npmExecutable ? process.execPath : process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const args = npmExecutable ? [npmExecutable, 'audit', '--json'] : ['audit', '--json'];
-const auditRun = spawnSync(command, args, {
+const auditRun = spawnSync(process.execPath, [auditRunnerPath, 'full'], {
   cwd: projectRoot,
   encoding: 'utf8',
   env: process.env,
   maxBuffer: 20 * 1024 * 1024,
-  shell: !npmExecutable && process.platform === 'win32',
+  shell: false,
 });
 
 if (auditRun.stderr) {
