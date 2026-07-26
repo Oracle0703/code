@@ -18,6 +18,9 @@ interface QuickCaptureDialogProps {
 export function QuickCaptureDialog({ target, onClose, onSubmit }: QuickCaptureDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  const submitFocusReturnRef = useRef<HTMLElement | null>(null);
+  const failureFocusFrameRef = useRef<number | null>(null);
   const [content, setContent] = useState('');
   const [category, setCategory] = useState<InboxCategory>('uncategorized');
   const [submitting, setSubmitting] = useState(false);
@@ -31,6 +34,9 @@ export function QuickCaptureDialog({ target, onClose, onSubmit }: QuickCaptureDi
     const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
     return () => {
       window.cancelAnimationFrame(frame);
+      if (failureFocusFrameRef.current !== null) {
+        window.cancelAnimationFrame(failureFocusFrameRef.current);
+      }
       if (dialog?.open) dialog.close();
     };
   }, []);
@@ -38,6 +44,12 @@ export function QuickCaptureDialog({ target, onClose, onSubmit }: QuickCaptureDi
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting || content.trim().length === 0 || contentTooLong) return;
+    const activeElement = document.activeElement;
+    submitFocusReturnRef.current =
+      dialogRef.current?.contains(activeElement) &&
+      (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLSelectElement)
+        ? activeElement
+        : inputRef.current;
     setSubmitting(true);
     setError(null);
     try {
@@ -45,6 +57,18 @@ export function QuickCaptureDialog({ target, onClose, onSubmit }: QuickCaptureDi
       onClose();
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : '快速记录失败，请重试。');
+      failureFocusFrameRef.current = window.requestAnimationFrame(() => {
+        failureFocusFrameRef.current = null;
+        const returnTarget = submitFocusReturnRef.current;
+        if (
+          returnTarget?.isConnected &&
+          !returnTarget.matches(':disabled, [aria-disabled="true"]')
+        ) {
+          returnTarget.focus({ preventScroll: true });
+          return;
+        }
+        errorRef.current?.focus({ preventScroll: true });
+      });
     } finally {
       setSubmitting(false);
     }
@@ -140,7 +164,7 @@ export function QuickCaptureDialog({ target, onClose, onSubmit }: QuickCaptureDi
         </div>
 
         {error ? (
-          <p className="quick-capture-dialog__error" role="alert">
+          <p className="quick-capture-dialog__error" ref={errorRef} role="alert" tabIndex={-1}>
             {error}
           </p>
         ) : null}

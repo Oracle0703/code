@@ -237,11 +237,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     );
     let inbox = await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID });
     assert.deepEqual(inbox.entries, []);
-    inbox = await service.createInboxEntry({
+    const firstInboxCreation = await service.createInboxEntry({
       workspaceId: DEFAULT_WORKSPACE_ID,
       content: '  打包后的 ＡPI / e\u0301 / 👩‍💻  ',
       category: 'uncategorized',
     });
+    assert.equal(firstInboxCreation.createdEntryId, FIRST_INBOX_ID);
+    inbox = firstInboxCreation.inboxSnapshot;
     assert.equal(inbox.entries[0]?.id, FIRST_INBOX_ID);
     assert.equal(inbox.entries[0]?.content, '打包后的 ＡPI / e\u0301 / 👩‍💻');
     inbox = await service.categorizeInboxEntry({
@@ -546,11 +548,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(browser.activeTabId, THIRD_BROWSER_TAB_ID);
     assert.equal(browser.tabs.length, 1);
     assert.deepEqual(browser.bookmarks, []);
-    inbox = await service.createInboxEntry({
+    const secondWorkspaceInboxCreation = await service.createInboxEntry({
       workspaceId: SECOND_WORKSPACE_ID,
       content: 'https://example.com/工作区隔离',
       category: 'link',
     });
+    assert.equal(secondWorkspaceInboxCreation.createdEntryId, SECOND_INBOX_ID);
+    inbox = secondWorkspaceInboxCreation.inboxSnapshot;
     assert.equal(inbox.entries[0]?.id, SECOND_INBOX_ID);
     tasks = await service.createTask({
       workspaceId: SECOND_WORKSPACE_ID,
@@ -633,11 +637,13 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       },
       { theme: 'light', activeView: 'notes', browserWidth: 518 },
     );
-    inbox = await service.createInboxEntry({
+    const noteInboxCreation = await service.createInboxEntry({
       workspaceId: DEFAULT_WORKSPACE_ID,
       content: '来自收件箱的 Markdown 笔记 👩‍💻',
       category: 'note',
     });
+    assert.equal(noteInboxCreation.createdEntryId, NOTE_INBOX_ID);
+    inbox = noteInboxCreation.inboxSnapshot;
     assert.equal(
       inbox.entries.some(({ id }) => id === NOTE_INBOX_ID),
       true,

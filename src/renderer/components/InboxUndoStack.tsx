@@ -1,18 +1,33 @@
 import { RotateCcw, X } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { InboxUndoNotice } from '../hooks/useInboxController';
 
 interface InboxUndoStackProps {
+  children?: ReactNode;
   notices: readonly InboxUndoNotice[];
   pendingTokens: ReadonlySet<string>;
   onUndo: (notice: InboxUndoNotice) => Promise<void>;
   onDismiss: (undoToken: string) => void;
 }
 
-export function InboxUndoStack({ notices, pendingTokens, onUndo, onDismiss }: InboxUndoStackProps) {
+export function InboxUndoStack({
+  children,
+  notices,
+  pendingTokens,
+  onUndo,
+  onDismiss,
+}: InboxUndoStackProps) {
   return (
-    <section className="inbox-undo-stack" aria-label="收件箱操作通知" aria-live="polite">
+    <section className="inbox-undo-stack" aria-label="收件箱操作通知">
+      {children}
       {notices.map((notice) => (
-        <div className="inbox-undo-toast" key={notice.undoToken}>
+        <div
+          className="inbox-undo-toast"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          key={notice.undoToken}
+        >
           <div>
             <strong>已归档</strong>
             <span>{notice.content}</span>

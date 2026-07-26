@@ -1,4 +1,9 @@
-import type { InboxCategory, InboxEntry, InboxSnapshot } from '../shared/contracts';
+import type {
+  InboxCategory,
+  InboxCreateResult,
+  InboxEntry,
+  InboxSnapshot,
+} from '../shared/contracts';
 
 export type InboxFilter = 'all' | InboxCategory;
 
@@ -81,6 +86,14 @@ export function inboxSnapshotForActivation(
     state.snapshot.workspaceId === currentWorkspace.workspaceId
     ? state.snapshot
     : null;
+}
+
+export function createdInboxEntryFromResult(
+  expectedWorkspaceId: string,
+  result: InboxCreateResult,
+): InboxEntry | null {
+  if (result.inboxSnapshot.workspaceId !== expectedWorkspaceId) return null;
+  return result.inboxSnapshot.entries.find(({ id }) => id === result.createdEntryId) ?? null;
 }
 
 export function countInboxEntries(entries: readonly InboxEntry[]) {

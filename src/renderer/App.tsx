@@ -67,6 +67,7 @@ import { CommandPalette, type PaletteCommand } from './components/CommandPalette
 import { DataImportDialog } from './components/DataImportDialog';
 import { FocusSessionDialog } from './components/FocusSessionDialog';
 import { IconButton } from './components/IconButton';
+import { InboxCaptureToast } from './components/InboxCaptureToast';
 import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
 import { NotePage } from './components/NotePage';
@@ -106,6 +107,15 @@ import {
   automationOutputNavigationError,
   resolveAutomationOutputNavigationTarget,
 } from './automation-output-navigation';
+import {
+  createInboxCaptureWorkspaceIdentity,
+  InboxCaptureCoordinator,
+  InboxCaptureSupersededError,
+  inboxCaptureNavigationError,
+  resolveInboxCaptureNavigationTarget,
+  type InboxCaptureFeedback,
+  type InboxCaptureWorkspaceIdentity,
+} from './inbox-capture-navigation';
 import {
   createInboxConversionWorkspaceIdentity,
   InboxConversionNavigationCoordinator,
@@ -239,6 +249,10 @@ export function App() {
     readonly generation: number;
     readonly handled: boolean;
   } | null>(null);
+  const [inboxCaptureFeedbackState, setInboxCaptureFeedbackState] = useState<{
+    readonly activation: InboxCaptureWorkspaceIdentity;
+    readonly feedback: InboxCaptureFeedback;
+  } | null>(null);
   const [inboxConversionFeedbackState, setInboxConversionFeedbackState] = useState<{
     readonly activation: InboxConversionWorkspaceIdentity;
     readonly feedback: InboxConversionFeedback;
@@ -248,6 +262,7 @@ export function App() {
   >(null);
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
+  const [inboxCaptureCoordinator] = useState(() => new InboxCaptureCoordinator());
   const [inboxConversionRequestCoordinator] = useState(
     () => new InboxConversionRequestCoordinator(),
   );
@@ -275,6 +290,12 @@ export function App() {
     createAutomationWorkspaceIdentity(null),
   );
   const automationRunFeedbackRef = useRef<AutomationRunFeedback | null>(null);
+  const inboxCaptureActivationRef = useRef<InboxCaptureWorkspaceIdentity>(
+    createInboxCaptureWorkspaceIdentity(null),
+  );
+  const inboxCaptureFeedbackRef = useRef<InboxCaptureFeedback | null>(null);
+  const inboxCaptureSurfaceRef = useRef<AppSurfaceId>('today');
+  const inboxCaptureSurfaceGenerationRef = useRef(0);
   const inboxConversionActivationRef = useRef<InboxConversionWorkspaceIdentity>(
     createInboxConversionWorkspaceIdentity(null),
   );
@@ -302,6 +323,10 @@ export function App() {
     () => createAssistantWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
+  const inboxCaptureActivation = useMemo(
+    () => createInboxCaptureWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -318,6 +343,12 @@ export function App() {
     });
   }, [snapshot?.currentWorkspaceId]);
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
+  const createInbox = inboxController.create;
+  const prepareInboxSnapshotRefresh = inboxController.prepareSnapshotRefresh;
+  const visibleInboxCaptureFeedback =
+    inboxCaptureFeedbackState?.activation === inboxCaptureActivation
+      ? inboxCaptureFeedbackState.feedback
+      : null;
   const visibleInboxConversionFeedback =
     inboxConversionFeedbackState?.activation === inboxController.activation
       ? inboxConversionFeedbackState.feedback
@@ -471,6 +502,27 @@ export function App() {
     overlayOpen,
   ]);
   useLayoutEffect(() => {
+    const previousActivation = inboxCaptureActivationRef.current;
+    const previousSurface = inboxCaptureSurfaceRef.current;
+    inboxCaptureActivationRef.current = inboxCaptureActivation;
+    inboxCaptureFeedbackRef.current = visibleInboxCaptureFeedback;
+    inboxCaptureSurfaceRef.current = activeSurface;
+    if (previousSurface !== activeSurface) {
+      inboxCaptureSurfaceGenerationRef.current += 1;
+    }
+    if (previousActivation !== inboxCaptureActivation) {
+      inboxCaptureCoordinator.invalidate();
+    } else if (previousSurface !== activeSurface || overlayOpen) {
+      inboxCaptureCoordinator.cancelOpen();
+    }
+  }, [
+    activeSurface,
+    inboxCaptureActivation,
+    inboxCaptureCoordinator,
+    overlayOpen,
+    visibleInboxCaptureFeedback,
+  ]);
+  useLayoutEffect(() => {
     const previousActivation = inboxConversionActivationRef.current;
     const previousSurface = inboxConversionSurfaceRef.current;
     inboxConversionActivationRef.current = inboxController.activation;
@@ -583,6 +635,7 @@ export function App() {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
       automationOutputNavigation.invalidate();
       assistantSavedNoteNavigation.invalidate();
+      inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       if (view === 'assistant') {
@@ -600,6 +653,7 @@ export function App() {
       assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
       updatePreferences,
@@ -608,6 +662,7 @@ export function App() {
   const openAssistant = useCallback(
     (context: AssistantContextReference) => {
       if (!activeWorkspace || !confirmLeaveNoteDraft()) return;
+      inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       setAssistantEntry((current) => ({
@@ -620,6 +675,7 @@ export function App() {
     [
       activeWorkspace,
       confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
     ],
@@ -634,10 +690,12 @@ export function App() {
   }, [requestActiveView]);
   const requestWorkspaceActivation = useCallback(
     (workspaceId: string) => {
+      if (workspaceId === currentWorkspaceIdRef.current) return;
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
       assistantSavedNoteNavigation.invalidate();
+      inboxCaptureCoordinator.invalidate();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       void workspaceController.activate(workspaceId).catch(() => undefined);
@@ -646,6 +704,7 @@ export function App() {
       assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
       searchNavigation,
@@ -666,6 +725,7 @@ export function App() {
     ) {
       return;
     }
+    inboxCaptureCoordinator.cancelOpen();
     setPaletteOpen(false);
     setQuickCaptureTarget(
       (current) =>
@@ -678,10 +738,140 @@ export function App() {
     scheduleDialog,
     dataState.importPreview,
     focusDialogOpen,
+    inboxCaptureCoordinator,
     taskDialog,
     workspaceController.pendingOperation,
     workspaceDialog,
   ]);
+  const createInboxCapture = useCallback(
+    async (
+      workspaceId: string,
+      content: string,
+      category: InboxEntry['category'],
+      errorOwner: 'dialog' | 'today' = 'dialog',
+    ) => {
+      const activation = inboxCaptureActivationRef.current;
+      const originSurface = inboxCaptureSurfaceRef.current;
+      const originSurfaceGeneration = inboxCaptureSurfaceGenerationRef.current;
+      const intent = inboxCaptureCoordinator.beginCapture(activation);
+      inboxCaptureFeedbackRef.current = null;
+      setInboxCaptureFeedbackState(null);
+      try {
+        const commit = await createInbox(
+          workspaceId,
+          content,
+          category,
+          () =>
+            inboxCaptureCoordinator.isCaptureCurrent(intent, inboxCaptureActivationRef.current) &&
+            errorOwner === 'today' &&
+            (inboxCaptureSurfaceRef.current !== originSurface ||
+              inboxCaptureSurfaceGenerationRef.current !== originSurfaceGeneration),
+        );
+        const feedback = inboxCaptureCoordinator.createFeedback(
+          intent,
+          inboxCaptureActivationRef.current,
+          commit.createdEntry,
+          commit.committed,
+        );
+        inboxCaptureFeedbackRef.current = feedback;
+        setInboxCaptureFeedbackState({
+          activation: intent.workspace,
+          feedback,
+        });
+      } catch (error) {
+        if (
+          !inboxCaptureCoordinator.isCaptureCurrent(intent, inboxCaptureActivationRef.current) ||
+          error instanceof InboxCaptureSupersededError
+        ) {
+          return;
+        }
+        throw error;
+      } finally {
+        inboxCaptureCoordinator.endCapture(intent);
+      }
+    },
+    [createInbox, inboxCaptureCoordinator],
+  );
+  const openInboxCapture = useCallback(
+    async (feedback: InboxCaptureFeedback): Promise<void> => {
+      if (!confirmLeaveNoteDraft()) {
+        throw new Error('已取消打开收件箱记录；当前笔记仍保留未保存的更改。');
+      }
+      try {
+        const intent = inboxCaptureCoordinator.beginOpen(
+          inboxCaptureActivationRef.current,
+          feedback,
+        );
+        const assertCurrent = () =>
+          inboxCaptureCoordinator.assertOpenCurrent(
+            intent,
+            inboxCaptureActivationRef.current,
+            inboxCaptureFeedbackRef.current,
+          );
+        const target = await resolveInboxCaptureNavigationTarget(
+          intent,
+          prepareInboxSnapshotRefresh,
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!activeWorkspace || activeWorkspace.id !== target.workspaceId) {
+          throw new InboxCaptureSupersededError();
+        }
+
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setRequestedNoteId(null);
+        updatePreferences({ activeView: 'inbox' }, true, target.workspaceId);
+        setInboxReveal({
+          workspaceId: target.workspaceId,
+          entryId: target.entry.id,
+          generation: intent.generation,
+          handled: false,
+        });
+        inboxCaptureFeedbackRef.current = null;
+        setInboxCaptureFeedbackState((current) =>
+          current?.feedback === feedback ? null : current,
+        );
+      } catch (error) {
+        throw inboxCaptureNavigationError(error);
+      }
+    },
+    [
+      activeWorkspace,
+      confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
+      prepareInboxSnapshotRefresh,
+      updatePreferences,
+    ],
+  );
+  const dismissInboxCapture = useCallback(
+    (feedback: InboxCaptureFeedback): boolean => {
+      if (
+        !inboxCaptureCoordinator.dismiss(
+          feedback,
+          inboxCaptureActivationRef.current,
+          inboxCaptureFeedbackRef.current,
+        )
+      ) {
+        return false;
+      }
+      inboxCaptureFeedbackRef.current = null;
+      setInboxCaptureFeedbackState((current) => (current?.feedback === feedback ? null : current));
+      return true;
+    },
+    [inboxCaptureCoordinator],
+  );
+  const restoreInboxCaptureFocus = useCallback((): void => {
+    const todayInput =
+      inboxCaptureSurfaceRef.current === 'today'
+        ? document.getElementById('quick-capture-input')
+        : null;
+    const fallback =
+      todayInput instanceof HTMLElement
+        ? todayInput
+        : document.querySelector<HTMLElement>('.page-chrome__actions button:not(:disabled)');
+    fallback?.focus({ preventScroll: true });
+  }, []);
 
   const openTaskCreate = useCallback(
     (planning: TaskPlanning) => {
@@ -1393,6 +1583,7 @@ export function App() {
       if (quickCaptureTarget) return;
       if (commandKey && event.key.toLowerCase() === 'k' && !isTerminalTarget(event.target)) {
         event.preventDefault();
+        inboxCaptureCoordinator.cancelOpen();
         setPaletteOpen((open) => !open);
         return;
       }
@@ -1427,6 +1618,7 @@ export function App() {
     automationDialog,
     dataState.importPreview,
     focusDialogOpen,
+    inboxCaptureCoordinator,
     paletteOpen,
     quickCaptureTarget,
     sidebarCollapsed,
@@ -1447,6 +1639,7 @@ export function App() {
         throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
       }
       automationOutputNavigation.invalidate();
+      inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
@@ -1600,6 +1793,7 @@ export function App() {
     [
       automationOutputNavigation,
       confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
       searchNavigation,
@@ -1971,7 +2165,13 @@ export function App() {
   }
 
   return (
-    <div className="app-shell" onClickCapture={() => automationOutputNavigation.invalidate()}>
+    <div
+      className="app-shell"
+      onClickCapture={() => {
+        automationOutputNavigation.invalidate();
+        inboxCaptureCoordinator.cancelOpen();
+      }}
+    >
       <header
         className="titlebar"
         onDoubleClick={(event) => {
@@ -2120,7 +2320,12 @@ export function App() {
                     pendingTaskIds={taskController.pendingTaskIds}
                     taskCreatePending={taskController.pendingCreate}
                     onCapture={(content) =>
-                      inboxController.create(snapshot.currentWorkspaceId, content, 'uncategorized')
+                      createInboxCapture(
+                        snapshot.currentWorkspaceId,
+                        content,
+                        'uncategorized',
+                        'today',
+                      )
                     }
                     scheduleSnapshot={scheduleController.snapshot}
                     scheduleItems={scheduleController.items}
@@ -2528,7 +2733,7 @@ export function App() {
         <QuickCaptureDialog
           target={quickCaptureTarget}
           onClose={() => setQuickCaptureTarget(null)}
-          onSubmit={inboxController.create}
+          onSubmit={createInboxCapture}
         />
       ) : null}
       {taskDialog ? (
@@ -2694,7 +2899,17 @@ export function App() {
         pendingTokens={inboxController.pendingUndoTokens}
         onUndo={inboxController.undoArchive}
         onDismiss={inboxController.dismissUndo}
-      />
+      >
+        {visibleInboxCaptureFeedback ? (
+          <InboxCaptureToast
+            feedback={visibleInboxCaptureFeedback}
+            focusBlocked={overlayOpen}
+            onOpen={openInboxCapture}
+            onDismiss={dismissInboxCapture}
+            onFocusFallback={restoreInboxCaptureFocus}
+          />
+        ) : null}
+      </InboxUndoStack>
     </div>
   );
 }

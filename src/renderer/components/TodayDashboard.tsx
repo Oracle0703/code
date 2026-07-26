@@ -137,7 +137,6 @@ export function TodayDashboard({
   onDismissFocusTaskCompletion,
 }: TodayDashboardProps) {
   const [capture, setCapture] = useState('');
-  const [recentCapture, setRecentCapture] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const focusCardRef = useRef<HTMLElement>(null);
   const captureLength = Array.from(capture.trim()).length;
@@ -218,7 +217,6 @@ export function TodayDashboard({
     setCaptureError(null);
     try {
       await onCapture(title);
-      setRecentCapture(title);
       setCapture('');
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : '快速记录失败，请重试。');
@@ -312,11 +310,6 @@ export function TodayDashboard({
       {captureTooLong ? (
         <div className="capture-confirmation is-error" role="alert">
           记录内容最多 {INBOX_CONTENT_MAX_LENGTH} 个字符。
-        </div>
-      ) : null}
-      {recentCapture ? (
-        <div className="capture-confirmation" role="status">
-          <Check size={14} aria-hidden="true" /> “{recentCapture}” 已加入收件箱
         </div>
       ) : null}
       {captureError ? (

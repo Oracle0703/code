@@ -29,6 +29,7 @@ import {
   type InboxArchiveResult,
   type InboxCategorizeInput,
   type InboxCreateInput,
+  type InboxCreateResult,
   type InboxSnapshot,
   type InboxTargetInput,
   type InboxUndoInput,
@@ -168,7 +169,7 @@ interface IpcDependencies {
   };
   inbox: {
     getInboxSnapshot(input: WorkspaceTargetInput): Promise<InboxSnapshot>;
-    createInboxEntry(input: InboxCreateInput): Promise<InboxSnapshot>;
+    createInboxEntry(input: InboxCreateInput): Promise<InboxCreateResult>;
     categorizeInboxEntry(input: InboxCategorizeInput): Promise<InboxSnapshot>;
     archiveInboxEntry(input: InboxTargetInput): Promise<InboxArchiveResult>;
     undoInboxArchive(input: InboxUndoInput): Promise<InboxSnapshot>;

@@ -528,6 +528,11 @@ export interface InboxCreateInput {
   readonly category: InboxCategory;
 }
 
+export interface InboxCreateResult {
+  readonly inboxSnapshot: InboxSnapshot;
+  readonly createdEntryId: string;
+}
+
 export interface InboxTargetInput {
   readonly workspaceId: string;
   readonly entryId: string;
@@ -1120,7 +1125,7 @@ export interface WorkbenchApi {
   };
   inbox: {
     getSnapshot(input: WorkspaceTargetInput): Promise<InboxSnapshot>;
-    create(input: InboxCreateInput): Promise<InboxSnapshot>;
+    create(input: InboxCreateInput): Promise<InboxCreateResult>;
     categorize(input: InboxCategorizeInput): Promise<InboxSnapshot>;
     archive(input: InboxTargetInput): Promise<InboxArchiveResult>;
     undoArchive(input: InboxUndoInput): Promise<InboxSnapshot>;

@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { InboxCategory, InboxEntry, InboxSnapshot } from '../../shared/contracts';
+import type {
+  InboxCategory,
+  InboxCreateResult,
+  InboxEntry,
+  InboxSnapshot,
+} from '../../shared/contracts';
 import { INBOX_UNDO_WINDOW_MS } from '../../shared/inbox-domain';
 import {
   countInboxEntries,
+  createdInboxEntryFromResult,
   createInboxRequestIdentity,
   createInboxWorkspaceIdentity,
   inboxSnapshotForActivation,
@@ -19,6 +25,12 @@ export interface InboxUndoNotice {
   readonly workspaceId: string;
   readonly content: string;
   readonly expiresAtMonotonicMs: number;
+}
+
+export interface InboxCaptureCommit {
+  readonly result: InboxCreateResult;
+  readonly createdEntry: InboxEntry;
+  readonly committed: boolean;
 }
 
 type InboxStatus = 'loading' | 'ready' | 'error';
@@ -198,6 +210,21 @@ export function useInboxController(workspaceId: string | null) {
     [applySnapshot, beginRequest, requestIsCurrent],
   );
 
+  const prepareSnapshotRefresh = useCallback(async () => {
+    const target = activeActivationRef.current;
+    const request = beginRequest(target);
+    if (!request) throw new Error('当前工作区不可用，无法读取收件箱。');
+    const snapshot = await window.workbench.inbox.getSnapshot({
+      workspaceId: request.workspaceId,
+    });
+    return {
+      snapshot,
+      commit: () =>
+        isInboxRequestLatest(request.sequence, latestRequestSequenceRef.current) &&
+        applySnapshot(snapshot, request),
+    };
+  }, [applySnapshot, beginRequest]);
+
   useLayoutEffect(() => {
     activeActivationRef.current = activation;
     return () => {
@@ -235,9 +262,14 @@ export function useInboxController(workspaceId: string | null) {
   }, []);
 
   const operationFailure = useCallback(
-    (error: unknown, target: InboxWorkspaceIdentity, fallback: string): Error => {
+    (
+      error: unknown,
+      target: InboxWorkspaceIdentity,
+      fallback: string,
+      shouldPublish: () => boolean = () => true,
+    ): Error => {
       const message = toMessage(error, fallback);
-      if (activeActivationRef.current === target) {
+      if (activeActivationRef.current === target && shouldPublish()) {
         setOperationErrorState({ activation: target, message });
       }
       return new Error(message, { cause: error });
@@ -246,7 +278,12 @@ export function useInboxController(workspaceId: string | null) {
   );
 
   const create = useCallback(
-    async (targetWorkspaceId: string, content: string, category: InboxCategory) => {
+    async (
+      targetWorkspaceId: string,
+      content: string,
+      category: InboxCategory,
+      shouldPublishFailure: () => boolean = () => true,
+    ): Promise<InboxCaptureCommit> => {
       const target = activeActivationRef.current;
       if (target.workspaceId === null || target.workspaceId !== targetWorkspaceId) {
         throw new Error('工作区已经切换，请重新打开快速记录。');
@@ -261,16 +298,27 @@ export function useInboxController(workspaceId: string | null) {
       }
       clearOperationErrorFor(target);
       try {
-        applySnapshot(
-          await window.workbench.inbox.create({
-            workspaceId: request.workspaceId,
-            content,
-            category,
-          }),
-          request,
-        );
+        const result = await window.workbench.inbox.create({
+          workspaceId: request.workspaceId,
+          content,
+          category,
+        });
+        const createdEntry = createdInboxEntryFromResult(request.workspaceId, result);
+        if (!createdEntry) {
+          throw new Error('快速记录结果与创建的收件箱记录不匹配，请重试。');
+        }
+        const committed = applySnapshot(result.inboxSnapshot, request);
+        return { result, createdEntry, committed };
       } catch (error) {
-        throw operationFailure(error, request.workspace, '快速记录失败，请重试。');
+        throw operationFailure(
+          error,
+          request.workspace,
+          '快速记录失败，请重试。',
+          () =>
+            shouldPublishFailure() &&
+            requestIsCurrent(request) &&
+            isInboxRequestLatest(request.sequence, latestRequestSequenceRef.current),
+        );
       } finally {
         endPendingCapture(request.workspace);
       }
@@ -282,6 +330,7 @@ export function useInboxController(workspaceId: string | null) {
       clearOperationErrorFor,
       endPendingCapture,
       operationFailure,
+      requestIsCurrent,
     ],
   );
 
@@ -452,6 +501,7 @@ export function useInboxController(workspaceId: string | null) {
       const current = activeActivationRef.current;
       if (current.workspaceId !== null) await load(current);
     },
+    prepareSnapshotRefresh,
     retry: () => {
       const current = activeActivationRef.current;
       if (current.workspaceId !== null) void load(current).catch(() => undefined);
