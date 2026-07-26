@@ -8,6 +8,7 @@ import {
   type AssistantStartInput,
   type AutomationChangedEvent,
   type AutomationCreateInput,
+  type AutomationCreateResult,
   type AutomationRunNowResult,
   type AutomationSetEnabledInput,
   type AutomationSnapshot,
@@ -281,7 +282,7 @@ const workbenchApi: WorkbenchApi = Object.freeze({
     getSnapshot: (input: WorkspaceTargetInput) =>
       invoke<AutomationSnapshot>(IPC_CHANNELS.automation.getSnapshot, input),
     create: (input: AutomationCreateInput) =>
-      invoke<AutomationSnapshot>(IPC_CHANNELS.automation.create, input),
+      invoke<AutomationCreateResult>(IPC_CHANNELS.automation.create, input),
     update: (input: AutomationUpdateInput) =>
       invoke<AutomationSnapshot>(IPC_CHANNELS.automation.update, input),
     setEnabled: (input: AutomationSetEnabledInput) =>

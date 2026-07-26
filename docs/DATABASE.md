@@ -51,7 +51,7 @@ userData/
 - 获取指定活动工作区由 Main 计算的当前 7 日日程；
 - 在当前 7 日窗口内创建、按 revision 更新或软归档固定类型时间段。
 - 获取指定活动工作区的自动化定义与运行摘要；
-- 新建默认停用的每日/每周规则，按 revision 编辑、启停或软归档；动作只允许创建今日任务或 Markdown 笔记；
+- 新建默认停用的每日/每周规则，并返回事务后快照与 Main 实际插入的 opaque ID；按 revision 编辑、启停或软归档；动作只允许创建今日任务或 Markdown 笔记；
 - 在界面展示已保存动作并获得显式确认后，以自动化 ID 与 revision 请求立即运行一次。
 - 获取指定活动工作区视角下的全局未结束专注会话与今日完成轮次；
 - 开始固定 25 分钟的自由专注或关联当天未完成任务，按 session ID 与 revision 暂停、继续或取消。
@@ -153,6 +153,8 @@ Profile 只接受共享协议中的固定 ID。本机启动目录以平台和绝
 v9 的 `automations` 按工作区保存定义，`automation_run_state` 一对一保存最后尝试、最后成功、失败退避与下一次重试，`automation_occurrences` 以 `(automation_id, occurrence_date)` 保存不可变成功账本。每个计划 occurrence 成功执行时，会在同一 `BEGIN IMMEDIATE` 事务中创建任务或笔记、写 occurrence 并推进成功状态；任一步失败都会整体回滚，不能出现有输出无账本或有账本无输出。
 
 新建定义固定为停用且没有 `effective_at`，显式启用后才从该时刻开始计算计划。计划只接受每日/每周、本地分钟和每周星期；动作固定为 `create-today-task` 或 `create-note`，动作类型创建后不可修改。每工作区最多启用 25 条，全部活动工作区最多保留 100 条活动定义。工作区归档会在同一事务中停用其规则；已归档定义、occurrence 与运行状态不能由普通业务流程删除或改写。
+
+`automation:create` 沿用既有输入与通道，在同一个 `BEGIN IMMEDIATE` 事务中生成 ID、插入默认停用的规则，并返回事务后的 `automationSnapshot` 与实际插入的 opaque `createdAutomationId`。创建成功仍留在发起页面；用户显式打开时，Renderer 会 fresh-read 当前工作区规则，只接受该 ID 的唯一匹配，并以权威快照中的当前 revision 打开编辑窗口。目标缺失、重复 ID、工作区 A→B→A、切页、较新创建或迟到结果都不会按名称、计划或列表位置回退。若规则已经提交但 Renderer 在有界重读后仍无法提交权威快照，创建窗口会关闭并显示独立的“刷新且不要重复创建”警告，不发布未经确认的成功回执。这个返回契约不新增 schema 或 migration；当前 schema 仍为 v11，`.dwbx` 仍为 v3。
 
 调度器是应用级单例，最长每 60 秒唤醒一次并保持 single-flight。应用关闭期间不运行，也不回放全部历史；启动、系统恢复或定义变化后的评估只选择每条规则最近一次已经到期且晚于 `effective_at` 的 occurrence。成功水位和唯一主键共同防止重复；失败按有界错误码从 5 分钟开始、最长 6 小时退避。
 

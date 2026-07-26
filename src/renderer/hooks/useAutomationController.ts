@@ -2,26 +2,37 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type {
   AutomationAction,
   AutomationChangedEvent,
+  AutomationCreateResult,
   AutomationItem,
   AutomationSchedule,
   AutomationSnapshot,
 } from '../../shared/contracts';
 import {
+  automationSnapshotForActivation,
   automationRunFeedbackForActivation,
   automationRunFeedbackForCurrentWorkspace,
+  createdAutomationFromResult,
+  createAutomationRequestIdentity,
   createAutomationRunRequestIdentity,
   createAutomationWorkspaceIdentity,
   isAutomationRequestLatest,
+  isAutomationRequestCurrent,
   isAutomationRunRequestCurrent,
-  isAutomationSequenceCurrent,
-  isAutomationWorkspaceCurrent,
+  reconcileAutomationCreateResult,
+  shouldApplyAutomationSnapshot,
   sortAutomationItems,
+  type AutomationRequestIdentity,
   type AutomationRunFeedbackState,
+  type AutomationSnapshotState,
+  type AutomationWorkspaceIdentity,
 } from '../automation-state';
 
 type AutomationControllerStatus = 'loading' | 'ready' | 'error';
 
 const EMPTY_ITEMS: readonly AutomationItem[] = Object.freeze([]);
+const INACTIVE_ACTIVATION = Object.freeze(createAutomationWorkspaceIdentity(null));
+const AUTOMATION_CREATE_RECONCILIATION_ERROR =
+  '自动化已创建，但当前规则列表未能同步。请刷新后查看，避免重复创建。';
 
 export interface AutomationRunOutput {
   readonly workspaceId: string;
@@ -32,23 +43,31 @@ export interface UseAutomationControllerOptions {
   readonly onRunOutput?: (output: AutomationRunOutput) => void;
 }
 
+export interface AutomationCreateCommit {
+  readonly result: AutomationCreateResult;
+  readonly createdAutomation: AutomationItem | null;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
+}
+
 export function useAutomationController(
   workspaceId: string | null,
   { onRunOutput }: UseAutomationControllerOptions = {},
 ) {
-  const [storedSnapshot, setStoredSnapshot] = useState<AutomationSnapshot | null>(null);
+  const [storedSnapshot, setStoredSnapshot] = useState<AutomationSnapshotState | null>(null);
+  const storedSnapshotRef = useRef<AutomationSnapshotState | null>(null);
   const [status, setStatus] = useState<AutomationControllerStatus>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [operationErrorState, setOperationErrorState] = useState<{
-    readonly workspaceId: string;
+    readonly activation: AutomationWorkspaceIdentity;
     readonly message: string;
   } | null>(null);
   const [pendingItemIds, setPendingItemIds] = useState<ReadonlySet<string>>(() => new Set());
   const [runningItemIds, setRunningItemIds] = useState<ReadonlySet<string>>(() => new Set());
   const [runFeedbackState, setRunFeedbackState] = useState<AutomationRunFeedbackState | null>(null);
-  const [pendingCreateWorkspaces, setPendingCreateWorkspaces] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  const [pendingCreateActivations, setPendingCreateActivations] = useState<
+    ReadonlySet<AutomationWorkspaceIdentity>
+  >(() => new Set());
   const activeWorkspaceRef = useRef(workspaceId);
   const activeWorkspaceIdentity = useMemo(
     () => createAutomationWorkspaceIdentity(workspaceId),
@@ -58,98 +77,148 @@ export function useAutomationController(
   useLayoutEffect(() => {
     activeWorkspaceRef.current = workspaceId;
     activeWorkspaceIdentityRef.current = activeWorkspaceIdentity;
+    return () => {
+      if (activeWorkspaceIdentityRef.current === activeWorkspaceIdentity) {
+        activeWorkspaceRef.current = null;
+        activeWorkspaceIdentityRef.current = INACTIVE_ACTIVATION;
+      }
+    };
   }, [activeWorkspaceIdentity, workspaceId]);
   const onRunOutputRef = useRef(onRunOutput);
   const requestSequenceRef = useRef(0);
   const runRequestSequenceRef = useRef(0);
   const latestRunRequestSequenceRef = useRef(0);
-  const latestRequestSequenceRef = useRef(new Map<string, number>());
-  const appliedSequenceRef = useRef(new Map<string, number>());
+  const latestRequestSequenceRef = useRef(-1);
+  const appliedSequenceRef = useRef(-1);
   const pendingItemIdsRef = useRef(new Set<string>());
   const runningItemIdsRef = useRef(new Set<string>());
-  const pendingCreateWorkspacesRef = useRef(new Set<string>());
+  const pendingCreateActivationsRef = useRef(new Set<AutomationWorkspaceIdentity>());
 
   useEffect(() => {
     onRunOutputRef.current = onRunOutput;
   }, [onRunOutput]);
 
-  const beginRequest = useCallback((targetWorkspaceId: string): number => {
-    const sequence = ++requestSequenceRef.current;
-    latestRequestSequenceRef.current.set(targetWorkspaceId, sequence);
-    return sequence;
+  const setStored = useCallback((value: AutomationSnapshotState | null) => {
+    storedSnapshotRef.current = value;
+    setStoredSnapshot(value);
   }, []);
 
-  const applySnapshot = useCallback((snapshot: AutomationSnapshot, sequence: number): boolean => {
-    const lastApplied = appliedSequenceRef.current.get(snapshot.workspaceId) ?? -1;
-    if (!isAutomationSequenceCurrent(sequence, lastApplied)) return false;
-    appliedSequenceRef.current.set(snapshot.workspaceId, sequence);
-    if (!isAutomationWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return false;
-    setStoredSnapshot(snapshot);
-    setStatus('ready');
-    setLoadError(null);
-    return true;
-  }, []);
+  const beginRequest = useCallback(
+    (target: AutomationWorkspaceIdentity): AutomationRequestIdentity | null => {
+      if (target.workspaceId === null) return null;
+      const sequence = ++requestSequenceRef.current;
+      latestRequestSequenceRef.current = sequence;
+      return createAutomationRequestIdentity(target, sequence);
+    },
+    [],
+  );
+
+  const requestIsCurrent = useCallback(
+    (request: AutomationRequestIdentity): boolean =>
+      isAutomationRequestCurrent(activeWorkspaceIdentityRef.current, request),
+    [],
+  );
+
+  const applySnapshot = useCallback(
+    (snapshot: AutomationSnapshot, request: AutomationRequestIdentity): boolean => {
+      if (
+        !shouldApplyAutomationSnapshot(
+          activeWorkspaceIdentityRef.current,
+          appliedSequenceRef.current,
+          request,
+          snapshot,
+        )
+      ) {
+        return false;
+      }
+      appliedSequenceRef.current = request.sequence;
+      setStored({ activation: request.workspace, snapshot });
+      setStatus('ready');
+      setLoadError(null);
+      return true;
+    },
+    [setStored],
+  );
 
   const load = useCallback(
-    async (targetWorkspaceId: string): Promise<void> => {
-      const sequence = beginRequest(targetWorkspaceId);
-      if (activeWorkspaceRef.current === targetWorkspaceId) {
+    async (target: AutomationWorkspaceIdentity): Promise<void> => {
+      const request = beginRequest(target);
+      if (!request) return;
+      if (requestIsCurrent(request)) {
         setStatus('loading');
         setLoadError(null);
       }
       try {
         const snapshot = await window.workbench.automation.getSnapshot({
-          workspaceId: targetWorkspaceId,
+          workspaceId: request.workspaceId,
         });
-        applySnapshot(snapshot, sequence);
+        applySnapshot(snapshot, request);
       } catch (error) {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
         if (
-          isAutomationRequestLatest(sequence, latestRequested) &&
-          activeWorkspaceRef.current === targetWorkspaceId
+          requestIsCurrent(request) &&
+          isAutomationRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
-          setStoredSnapshot(null);
+          setStored(null);
           setStatus('error');
           setLoadError(toMessage(error, '自动化暂时无法读取。'));
         }
       }
     },
-    [applySnapshot, beginRequest],
+    [applySnapshot, beginRequest, requestIsCurrent, setStored],
   );
 
+  const prepareSnapshotRefresh = useCallback(async () => {
+    const target = activeWorkspaceIdentityRef.current;
+    const request = beginRequest(target);
+    if (!request) throw new Error('当前工作区不可用，无法读取自动化。');
+    const snapshot = await window.workbench.automation.getSnapshot({
+      workspaceId: request.workspaceId,
+    });
+    return {
+      snapshot,
+      commit: () =>
+        isAutomationRequestLatest(request.sequence, latestRequestSequenceRef.current) &&
+        applySnapshot(snapshot, request),
+    };
+  }, [applySnapshot, beginRequest]);
+
   useEffect(() => {
-    if (workspaceId) void load(workspaceId);
-  }, [load, workspaceId]);
+    if (
+      activeWorkspaceIdentity.workspaceId !== null &&
+      activeWorkspaceIdentityRef.current === activeWorkspaceIdentity
+    ) {
+      void load(activeWorkspaceIdentity);
+    }
+  }, [activeWorkspaceIdentity, load]);
 
   useEffect(
     () =>
       window.workbench.automation.onChanged((event: AutomationChangedEvent) => {
-        if (activeWorkspaceRef.current !== event.workspaceId) return;
+        const target = activeWorkspaceIdentityRef.current;
+        if (target.workspaceId !== event.workspaceId) return;
         if (event.reason === 'run' && event.outputKind !== null) {
           onRunOutputRef.current?.({
             workspaceId: event.workspaceId,
             outputKind: event.outputKind,
           });
         }
-        void load(event.workspaceId);
+        void load(target);
       }),
     [load],
   );
 
-  const beginPendingCreate = useCallback((targetWorkspaceId: string): boolean => {
-    if (pendingCreateWorkspacesRef.current.has(targetWorkspaceId)) return false;
-    pendingCreateWorkspacesRef.current = new Set(pendingCreateWorkspacesRef.current).add(
-      targetWorkspaceId,
-    );
-    setPendingCreateWorkspaces(pendingCreateWorkspacesRef.current);
+  const beginPendingCreate = useCallback((target: AutomationWorkspaceIdentity): boolean => {
+    if (pendingCreateActivationsRef.current.has(target)) return false;
+    pendingCreateActivationsRef.current = new Set(pendingCreateActivationsRef.current).add(target);
+    setPendingCreateActivations(pendingCreateActivationsRef.current);
     return true;
   }, []);
 
-  const endPendingCreate = useCallback((targetWorkspaceId: string): void => {
-    const next = new Set(pendingCreateWorkspacesRef.current);
-    next.delete(targetWorkspaceId);
-    pendingCreateWorkspacesRef.current = next;
-    setPendingCreateWorkspaces(next);
+  const endPendingCreate = useCallback((target: AutomationWorkspaceIdentity): void => {
+    const next = new Set(pendingCreateActivationsRef.current);
+    next.delete(target);
+    pendingCreateActivationsRef.current = next;
+    setPendingCreateActivations(next);
   }, []);
 
   const beginPendingItem = useCallback((automationId: string): boolean => {
@@ -179,39 +248,94 @@ export function useAutomationController(
   }, []);
 
   const operationFailure = useCallback(
-    (error: unknown, targetWorkspaceId: string, fallback: string): Error => {
+    (
+      error: unknown,
+      target: AutomationWorkspaceIdentity,
+      fallback: string,
+      shouldPublish: () => boolean = () => true,
+    ): Error => {
       const message = toMessage(error, fallback);
-      setOperationErrorState({ workspaceId: targetWorkspaceId, message });
+      if (activeWorkspaceIdentityRef.current === target && shouldPublish()) {
+        setOperationErrorState({ activation: target, message });
+      }
       return new Error(message, { cause: error });
     },
     [],
   );
 
   const create = useCallback(
-    async (name: string, schedule: AutomationSchedule, action: AutomationAction): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingCreate(targetWorkspaceId)) {
+    async (
+      name: string,
+      schedule: AutomationSchedule,
+      action: AutomationAction,
+    ): Promise<AutomationCreateCommit> => {
+      const target = activeWorkspaceIdentityRef.current;
+      if (target.workspaceId === null || !beginPendingCreate(target)) {
         throw new Error('这个工作区正在创建另一条自动化。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingCreate(target);
+        throw new Error('当前工作区不可用，无法创建自动化。');
+      }
       setOperationErrorState(null);
       try {
-        applySnapshot(
-          await window.workbench.automation.create({
-            workspaceId: targetWorkspaceId,
+        let result: AutomationCreateResult;
+        try {
+          result = await window.workbench.automation.create({
+            workspaceId: request.workspaceId,
             name,
             schedule,
             action,
-          }),
-          sequence,
-        );
-      } catch (error) {
-        throw operationFailure(error, targetWorkspaceId, '自动化创建失败，请重试。');
+          });
+        } catch (error) {
+          throw operationFailure(error, request.workspace, '自动化创建失败，请重试。');
+        }
+
+        const reconciliation = await reconcileAutomationCreateResult({
+          expectedWorkspaceId: request.workspaceId,
+          result,
+          commitResultSnapshot: () =>
+            isAutomationRequestLatest(request.sequence, latestRequestSequenceRef.current) &&
+            applySnapshot(result.automationSnapshot, request),
+          getCommittedAutomation: () => {
+            const currentSnapshot = automationSnapshotForActivation(
+              request.workspace,
+              storedSnapshotRef.current,
+            );
+            return currentSnapshot
+              ? createdAutomationFromResult(request.workspaceId, {
+                  automationSnapshot: currentSnapshot,
+                  createdAutomationId: result.createdAutomationId,
+                })
+              : null;
+          },
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
+        });
+
+        return {
+          result,
+          createdAutomation: reconciliation.createdAutomation,
+          committed: reconciliation.committed,
+          reconciliationWarning:
+            !reconciliation.committed && requestIsCurrent(request)
+              ? AUTOMATION_CREATE_RECONCILIATION_ERROR
+              : null,
+        };
       } finally {
-        endPendingCreate(targetWorkspaceId);
+        endPendingCreate(target);
       }
     },
-    [applySnapshot, beginPendingCreate, beginRequest, endPendingCreate, operationFailure],
+    [
+      applySnapshot,
+      beginPendingCreate,
+      beginRequest,
+      endPendingCreate,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
   );
 
   const runItemMutation = useCallback(
@@ -220,16 +344,20 @@ export function useAutomationController(
       fallback: string,
       action: (workspaceId: string) => Promise<AutomationSnapshot>,
     ): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingItem(item.id)) {
+      const target = activeWorkspaceIdentityRef.current;
+      if (target.workspaceId === null || !beginPendingItem(item.id)) {
         throw new Error('这条自动化正在保存。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingItem(item.id);
+        throw new Error('当前工作区不可用，无法保存自动化。');
+      }
       setOperationErrorState(null);
       try {
-        applySnapshot(await action(targetWorkspaceId), sequence);
+        applySnapshot(await action(request.workspaceId), request);
       } catch (error) {
-        throw operationFailure(error, targetWorkspaceId, fallback);
+        throw operationFailure(error, request.workspace, fallback);
       } finally {
         endPendingItem(item.id);
       }
@@ -326,7 +454,7 @@ export function useAutomationController(
       } catch (error) {
         if (!requestIsCurrent()) return;
         const message = toMessage(error, '自动化立即运行失败，请重试。');
-        setOperationErrorState({ workspaceId: targetWorkspaceId, message });
+        setOperationErrorState({ activation: workspaceIdentity, message });
         throw new Error(message, { cause: error });
       } finally {
         endRunningItem(item.id);
@@ -336,8 +464,7 @@ export function useAutomationController(
     [beginPendingItem, beginRunningItem, endPendingItem, endRunningItem],
   );
 
-  const snapshot =
-    storedSnapshot?.workspaceId === workspaceId && workspaceId !== null ? storedSnapshot : null;
+  const snapshot = automationSnapshotForActivation(activeWorkspaceIdentity, storedSnapshot);
   const items = useMemo(
     () => (snapshot ? sortAutomationItems(snapshot.items) : EMPTY_ITEMS),
     [snapshot],
@@ -349,22 +476,27 @@ export function useAutomationController(
     status:
       snapshot !== null
         ? ('ready' as const)
-        : storedSnapshot !== null && storedSnapshot.workspaceId !== workspaceId
+        : storedSnapshot !== null && storedSnapshot.activation !== activeWorkspaceIdentity
           ? ('loading' as const)
           : status,
     loadError,
     operationError:
-      operationErrorState?.workspaceId === workspaceId ? operationErrorState.message : null,
+      operationErrorState?.activation === activeWorkspaceIdentity
+        ? operationErrorState.message
+        : null,
     runFeedback: automationRunFeedbackForActivation(activeWorkspaceIdentity, runFeedbackState),
     pendingItemIds,
     runningItemIds,
-    pendingCreate: workspaceId ? pendingCreateWorkspaces.has(workspaceId) : false,
+    pendingCreate:
+      activeWorkspaceIdentity.workspaceId !== null &&
+      pendingCreateActivations.has(activeWorkspaceIdentity),
     retry: () => {
-      if (workspaceId) void load(workspaceId);
+      if (activeWorkspaceIdentity.workspaceId !== null) void load(activeWorkspaceIdentity);
     },
     refresh: async () => {
-      if (workspaceId) await load(workspaceId);
+      if (activeWorkspaceIdentity.workspaceId !== null) await load(activeWorkspaceIdentity);
     },
+    prepareSnapshotRefresh,
     clearOperationError: () => setOperationErrorState(null),
     create,
     update,

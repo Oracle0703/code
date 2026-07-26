@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   AutomationAction,
   AutomationCreateInput,
+  AutomationCreateResult,
   AutomationRunErrorCode,
   AutomationRunNowResult,
   AutomationSetEnabledInput,
@@ -123,12 +124,11 @@ export class AutomationService {
     });
   }
 
-  create(input: AutomationCreateInput): Promise<AutomationSnapshot> {
+  create(input: AutomationCreateInput): Promise<AutomationCreateResult> {
     const workspaceId = this.#workspaceId(input?.workspaceId);
     const name = this.#name(input?.name);
     const schedule = this.#schedule(input?.schedule);
     const action = this.#action(input?.action);
-    const automationId = this.#newAutomationId();
     return this.#execute((database) =>
       this.#transaction(database, 'create an automation', () => {
         const workspace = this.#requireActiveWorkspace(database, workspaceId);
@@ -138,6 +138,7 @@ export class AutomationService {
             `Daily Workbench can keep at most ${AUTOMATION_ACTIVE_GLOBAL_LIMIT} active automations.`,
           );
         }
+        const automationId = this.#newAutomationId();
         const timestamp = this.#timestampAtLeast(workspace.createdAt, workspace.updatedAt);
         repository.insert({
           id: automationId,
@@ -147,7 +148,10 @@ export class AutomationService {
           action,
           timestamp,
         });
-        return this.#readSnapshot(repository, workspaceId, this.#validNow());
+        return {
+          automationSnapshot: this.#readSnapshot(repository, workspaceId, this.#validNow()),
+          createdAutomationId: automationId,
+        };
       }),
     );
   }

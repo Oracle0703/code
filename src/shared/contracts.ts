@@ -850,6 +850,11 @@ export interface AutomationSnapshot {
   readonly items: readonly AutomationItem[];
 }
 
+export interface AutomationCreateResult {
+  readonly automationSnapshot: AutomationSnapshot;
+  readonly createdAutomationId: string;
+}
+
 export interface AutomationCreateInput {
   readonly workspaceId: string;
   readonly name: string;
@@ -1167,7 +1172,7 @@ export interface WorkbenchApi {
   };
   automation: {
     getSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;
-    create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
+    create(input: AutomationCreateInput): Promise<AutomationCreateResult>;
     update(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
     setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
     runNow(input: AutomationTargetInput): Promise<AutomationRunNowResult>;

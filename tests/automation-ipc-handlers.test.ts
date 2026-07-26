@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IpcMainInvokeEvent } from 'electron';
-import type { AutomationRunNowResult, AutomationSnapshot } from '../src/shared/contracts';
+import type {
+  AutomationCreateResult,
+  AutomationRunNowResult,
+  AutomationSnapshot,
+} from '../src/shared/contracts';
 
 const RENDERER_URL = 'file:///app/renderer/index.html';
 
@@ -37,12 +41,14 @@ describe('automation IPC handlers', () => {
     const action = { kind: 'create-today-task' as const, title: '检查今日计划' };
 
     await harness.invoke('automation:get-snapshot', { workspaceId });
-    await harness.invoke('automation:create', {
-      workspaceId,
-      name: '每日准备',
-      schedule,
-      action,
-    });
+    await expect(
+      harness.invoke('automation:create', {
+        workspaceId,
+        name: '每日准备',
+        schedule,
+        action,
+      }),
+    ).resolves.toBe(harness.createResult);
     await harness.invoke('automation:update', {
       workspaceId,
       automationId,
@@ -179,6 +185,10 @@ async function createHarness() {
     workspaceId: '123e4567-e89b-42d3-a456-426614174000',
     items: [],
   };
+  const createResult: AutomationCreateResult = {
+    automationSnapshot: snapshot,
+    createdAutomationId: 'b23e4567-e89b-42d3-a456-426614174000',
+  };
   const runNowResult: AutomationRunNowResult = {
     workspaceId: '123e4567-e89b-42d3-a456-426614174000',
     automationId: 'b23e4567-e89b-42d3-a456-426614174000',
@@ -187,7 +197,7 @@ async function createHarness() {
   };
   const automation = {
     getSnapshot: vi.fn(async () => snapshot),
-    create: vi.fn(async () => snapshot),
+    create: vi.fn(async () => createResult),
     update: vi.fn(async () => snapshot),
     setEnabled: vi.fn(async () => snapshot),
     runNow: vi.fn(async () => runNowResult),
@@ -224,6 +234,7 @@ async function createHarness() {
   } as unknown as IpcMainInvokeEvent;
   return {
     automation,
+    createResult,
     webContents,
     unregister,
     invoke: async (channel: string, ...args: unknown[]) => {

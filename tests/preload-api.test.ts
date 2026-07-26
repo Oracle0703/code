@@ -1,5 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TaskCreateResult, WorkbenchApi } from '../src/shared/contracts';
+import type {
+  AutomationCreateResult,
+  TaskCreateResult,
+  WorkbenchApi,
+} from '../src/shared/contracts';
 
 const electron = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
@@ -561,6 +565,44 @@ describe('preload automation API', () => {
       ['automation:run-now', { workspaceId, automationId, expectedRevision: 3 }],
       ['automation:archive', { workspaceId, automationId, expectedRevision: 4 }],
     ]);
+  });
+
+  it('returns the exact automation:create identity envelope from Main', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const createdAutomationId = 'b23e4567-e89b-42d3-a456-426614174000';
+    const schedule = { cadence: 'daily' as const, localTimeMinute: 510, weekday: null };
+    const action = { kind: 'create-today-task' as const, title: '检查今日计划' };
+    const result: AutomationCreateResult = {
+      automationSnapshot: {
+        workspaceId,
+        items: [
+          {
+            id: createdAutomationId,
+            name: '重复名称',
+            enabled: false,
+            schedule,
+            action,
+            revision: 1,
+            nextRunAt: null,
+            lastRun: { status: 'never' },
+            createdAt: '2026-07-26T12:00:00.000Z',
+            updatedAt: '2026-07-26T12:00:00.000Z',
+          },
+        ],
+      },
+      createdAutomationId,
+    };
+    electron.invoke.mockResolvedValueOnce(result as never);
+
+    await expect(
+      api.automation.create({ workspaceId, name: '重复名称', schedule, action }),
+    ).resolves.toBe(result);
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith('automation:create', {
+      workspaceId,
+      name: '重复名称',
+      schedule,
+      action,
+    });
   });
 
   it('subscribes and removes narrow automation change listeners', () => {

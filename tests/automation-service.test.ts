@@ -261,7 +261,8 @@ describe('AutomationService through DatabaseService', () => {
       schedule: { cadence: 'daily', localTimeMinute: 8 * 60 + 30, weekday: null },
       action: { kind: 'create-today-task', title: '检查今日计划' },
     });
-    expect(created.items[0]).toMatchObject({
+    expect(created.createdAutomationId).toBe(AUTOMATION_ID);
+    expect(created.automationSnapshot.items[0]).toMatchObject({
       id: AUTOMATION_ID,
       enabled: false,
       revision: 1,
@@ -307,6 +308,40 @@ describe('AutomationService through DatabaseService', () => {
     expect(
       (await service.getAutomationSnapshot({ workspaceId: WORKSPACE_ID })).items[0]?.lastRun,
     ).toMatchObject({ status: 'success', outputKind: 'task' });
+    await service.close();
+  });
+
+  it('returns the exact inserted identities when automation names are duplicated', async () => {
+    const automationIds = [AUTOMATION_ID, NOTE_AUTOMATION_ID];
+    const service = await createService({
+      now: () => new Date(2026, 6, 23, 8, 0, 0),
+      automationIdFactory: () => automationIds.shift()!,
+    });
+    const input = {
+      workspaceId: WORKSPACE_ID,
+      name: '重复名称',
+      schedule: { cadence: 'daily' as const, localTimeMinute: 510, weekday: null },
+      action: { kind: 'create-today-task' as const, title: '同名定义的动作' },
+    };
+
+    const first = await service.createAutomation(input);
+    const second = await service.createAutomation(input);
+
+    expect(first.createdAutomationId).toBe(AUTOMATION_ID);
+    expect(first.automationSnapshot.items).toEqual([
+      expect.objectContaining({ id: AUTOMATION_ID, name: input.name }),
+    ]);
+    expect(second.createdAutomationId).toBe(NOTE_AUTOMATION_ID);
+    expect(
+      new Set(
+        second.automationSnapshot.items
+          .filter(({ name }) => name === input.name)
+          .map(({ id }) => id),
+      ),
+    ).toEqual(new Set([AUTOMATION_ID, NOTE_AUTOMATION_ID]));
+    expect(
+      second.automationSnapshot.items.find(({ id }) => id === second.createdAutomationId),
+    ).toMatchObject({ id: NOTE_AUTOMATION_ID, name: input.name });
     await service.close();
   });
 
@@ -399,13 +434,15 @@ describe('AutomationService through DatabaseService', () => {
     });
     const createdIds: string[] = [];
     for (let index = 0; index < 100; index += 1) {
-      const snapshot = await service.createAutomation({
+      const result = await service.createAutomation({
         workspaceId: WORKSPACE_ID,
         name: `自动化 ${index + 1}`,
         schedule: { cadence: 'daily', localTimeMinute: 510, weekday: null },
         action: { kind: 'create-today-task', title: `任务 ${index + 1}` },
       });
-      const created = snapshot.items.find(({ name }) => name === `自动化 ${index + 1}`);
+      const created = result.automationSnapshot.items.find(
+        ({ id }) => id === result.createdAutomationId,
+      );
       expect(created).toMatchObject({ enabled: false, revision: 1 });
       createdIds.push(created!.id);
     }
