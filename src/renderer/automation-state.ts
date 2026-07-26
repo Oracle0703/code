@@ -1,5 +1,6 @@
 import type {
   AutomationAction,
+  AutomationCreateResult,
   AutomationItem,
   AutomationLastRun,
   AutomationRunNowResult,
@@ -31,6 +32,37 @@ export interface AutomationWorkspaceIdentity {
   readonly workspaceId: string | null;
 }
 
+export interface AutomationRequestIdentity {
+  readonly workspace: AutomationWorkspaceIdentity;
+  readonly workspaceId: string;
+  readonly sequence: number;
+}
+
+export interface AutomationSnapshotState {
+  readonly activation: AutomationWorkspaceIdentity;
+  readonly snapshot: AutomationSnapshot;
+}
+
+export interface AutomationCreateSnapshotRefresh {
+  readonly snapshot: AutomationSnapshot;
+  readonly commit: () => boolean;
+}
+
+export interface AutomationCreateReconciliation {
+  readonly createdAutomation: AutomationItem | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+interface AutomationCreateReconciliationInput {
+  readonly expectedWorkspaceId: string;
+  readonly result: AutomationCreateResult;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedAutomation: () => AutomationItem | null;
+  readonly prepareSnapshotRefresh: () => Promise<AutomationCreateSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
 export interface AutomationRunRequestIdentity {
   readonly workspace: AutomationWorkspaceIdentity;
   readonly workspaceId: string;
@@ -50,6 +82,8 @@ const RUN_ERROR_LABELS = {
   'database-unavailable': '本地数据库暂时不可用',
   'workspace-unavailable': '所属工作区不可用',
 } as const;
+
+const AUTOMATION_CREATE_REFRESH_ATTEMPTS = 2;
 
 export function isAutomationSequenceCurrent(
   sequence: number,
@@ -76,6 +110,131 @@ export function createAutomationWorkspaceIdentity(
   workspaceId: string | null,
 ): AutomationWorkspaceIdentity {
   return { workspaceId };
+}
+
+export function createAutomationRequestIdentity(
+  workspace: AutomationWorkspaceIdentity,
+  sequence: number,
+): AutomationRequestIdentity | null {
+  if (workspace.workspaceId === null || !Number.isSafeInteger(sequence) || sequence < 0) {
+    return null;
+  }
+  return {
+    workspace,
+    workspaceId: workspace.workspaceId,
+    sequence,
+  };
+}
+
+export function isAutomationRequestCurrent(
+  currentWorkspace: AutomationWorkspaceIdentity,
+  request: AutomationRequestIdentity,
+): boolean {
+  return (
+    currentWorkspace === request.workspace && currentWorkspace.workspaceId === request.workspaceId
+  );
+}
+
+export function shouldApplyAutomationSnapshot(
+  currentWorkspace: AutomationWorkspaceIdentity,
+  lastAppliedSequence: number,
+  request: AutomationRequestIdentity,
+  snapshot: AutomationSnapshot,
+): boolean {
+  return (
+    isAutomationRequestCurrent(currentWorkspace, request) &&
+    snapshot.workspaceId === request.workspaceId &&
+    request.sequence > lastAppliedSequence
+  );
+}
+
+export function automationSnapshotForActivation(
+  currentWorkspace: AutomationWorkspaceIdentity,
+  state: AutomationSnapshotState | null,
+): AutomationSnapshot | null {
+  return state !== null &&
+    state.activation === currentWorkspace &&
+    state.snapshot.workspaceId === currentWorkspace.workspaceId
+    ? state.snapshot
+    : null;
+}
+
+export function createdAutomationFromResult(
+  expectedWorkspaceId: string,
+  result: AutomationCreateResult,
+): AutomationItem | null {
+  if (result.automationSnapshot.workspaceId !== expectedWorkspaceId) return null;
+  const matches = result.automationSnapshot.items.filter(
+    ({ id }) => id === result.createdAutomationId,
+  );
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+export async function reconcileAutomationCreateResult(
+  input: AutomationCreateReconciliationInput,
+): Promise<AutomationCreateReconciliation> {
+  let createdAutomation: AutomationItem | null = null;
+  let committed = false;
+  let error: unknown;
+
+  try {
+    createdAutomation = createdAutomationFromResult(input.expectedWorkspaceId, input.result);
+    committed = createdAutomation !== null ? input.commitResultSnapshot() : false;
+  } catch (caughtError) {
+    error = caughtError;
+  }
+
+  for (
+    let attempt = 0;
+    !committed && input.isCurrent() && attempt < AUTOMATION_CREATE_REFRESH_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      const currentAutomation = input.getCommittedAutomation();
+      if (currentAutomation) {
+        createdAutomation = currentAutomation;
+        committed = true;
+        break;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+    if (!input.isCurrent()) break;
+
+    try {
+      const refresh = await input.prepareSnapshotRefresh();
+      if (!input.isCurrent()) break;
+      const freshAutomation = createdAutomationFromResult(input.expectedWorkspaceId, {
+        automationSnapshot: refresh.snapshot,
+        createdAutomationId: input.result.createdAutomationId,
+      });
+      if (!freshAutomation) {
+        throw new Error('The committed automation was not returned by the authoritative refresh.');
+      }
+      createdAutomation = freshAutomation;
+      if (refresh.commit()) {
+        committed = true;
+        break;
+      }
+      error = new Error('The authoritative automation snapshot could not be committed.');
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  if (!committed && input.isCurrent()) {
+    try {
+      const currentAutomation = input.getCommittedAutomation();
+      if (currentAutomation) {
+        createdAutomation = currentAutomation;
+        committed = true;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  return { createdAutomation, committed, error };
 }
 
 export function createAutomationRunRequestIdentity(

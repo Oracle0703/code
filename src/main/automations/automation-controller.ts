@@ -1,6 +1,7 @@
 import type {
   AutomationChangedEvent,
   AutomationCreateInput,
+  AutomationCreateResult,
   AutomationRunNowResult,
   AutomationSetEnabledInput,
   AutomationSnapshot,
@@ -14,7 +15,7 @@ import type { StoredAutomation } from './automation-repository';
 
 export interface AutomationControllerDatabase {
   getAutomationSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;
-  createAutomation(input: AutomationCreateInput): Promise<AutomationSnapshot>;
+  createAutomation(input: AutomationCreateInput): Promise<AutomationCreateResult>;
   updateAutomation(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
   setAutomationEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
   archiveAutomation(input: AutomationTargetInput): Promise<AutomationSnapshot>;
@@ -66,11 +67,11 @@ export class AutomationController {
     return this.#database.getAutomationSnapshot(input);
   }
 
-  async create(input: AutomationCreateInput): Promise<AutomationSnapshot> {
-    const snapshot = await this.#database.createAutomation(input);
+  async create(input: AutomationCreateInput): Promise<AutomationCreateResult> {
+    const result = await this.#database.createAutomation(input);
     this.#emit({ workspaceId: input.workspaceId, reason: 'definition', outputKind: null });
     void this.evaluate().catch((error) => this.#safeError(error));
-    return snapshot;
+    return result;
   }
 
   async update(input: AutomationUpdateInput): Promise<AutomationSnapshot> {

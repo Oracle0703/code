@@ -42,7 +42,9 @@ import {
   DEFAULT_WORKSPACE_PREFERENCES,
   WORKSPACE_COLORS,
   type AssistantContextReference,
+  type AutomationAction,
   type AutomationItem,
+  type AutomationSchedule,
   type DatabaseBackupRestoreInput,
   type DatabaseBackupRestoreResult,
   type InboxEntry,
@@ -60,6 +62,8 @@ import { findCurrentWorkspace } from '../shared/workspace-domain';
 import { ActivityRail } from './components/ActivityRail';
 import { ArchivedWorkspacesDialog } from './components/ArchivedWorkspacesDialog';
 import { AssistantPage } from './components/AssistantPage';
+import { AutomationCreateSyncWarning } from './components/AutomationCreateSyncWarning';
+import { AutomationCreateToast } from './components/AutomationCreateToast';
 import { AutomationDialog, type AutomationDialogState } from './components/AutomationDialog';
 import { AutomationPage } from './components/AutomationPage';
 import { BrowserPanel } from './components/BrowserPanel';
@@ -109,6 +113,18 @@ import {
   automationOutputNavigationError,
   resolveAutomationOutputNavigationTarget,
 } from './automation-output-navigation';
+import {
+  AutomationCreateCoordinator,
+  AutomationCreateNoteDraftPreservedError,
+  AutomationCreateSupersededError,
+  AutomationCreateSyncRefreshError,
+  automationCreateNavigationError,
+  automationCreateSyncRefreshError,
+  createAutomationCreateWorkspaceIdentity,
+  resolveAutomationCreateNavigationTarget,
+  type AutomationCreateFeedback,
+  type AutomationCreateWorkspaceIdentity,
+} from './automation-create-navigation';
 import {
   createInboxCaptureWorkspaceIdentity,
   InboxCaptureCoordinator,
@@ -214,6 +230,21 @@ interface FocusDialogState {
   } | null;
 }
 
+interface AutomationCreateSyncWarningState {
+  readonly activation: AutomationCreateWorkspaceIdentity;
+  readonly requestGeneration: number;
+  readonly createdAutomationId: string;
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly message: string;
+}
+
+function focusAutomationActivityRailAnchor(): void {
+  document
+    .querySelector<HTMLButtonElement>('.activity-rail button[aria-label="自动化"]')
+    ?.focus({ preventScroll: true });
+}
+
 export function App() {
   const workspaceController = useWorkspaceController();
   const {
@@ -275,6 +306,12 @@ export function App() {
     readonly title: string;
     readonly message: string;
   } | null>(null);
+  const [automationCreateFeedbackState, setAutomationCreateFeedbackState] = useState<{
+    readonly activation: AutomationCreateWorkspaceIdentity;
+    readonly feedback: AutomationCreateFeedback;
+  } | null>(null);
+  const [automationCreateSyncWarningState, setAutomationCreateSyncWarningState] =
+    useState<AutomationCreateSyncWarningState | null>(null);
   const [inboxConversionFeedbackState, setInboxConversionFeedbackState] = useState<{
     readonly activation: InboxConversionWorkspaceIdentity;
     readonly feedback: InboxConversionFeedback;
@@ -286,6 +323,7 @@ export function App() {
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
   const [inboxCaptureCoordinator] = useState(() => new InboxCaptureCoordinator());
   const [taskCreateCoordinator] = useState(() => new TaskCreateCoordinator());
+  const [automationCreateCoordinator] = useState(() => new AutomationCreateCoordinator());
   const [inboxConversionRequestCoordinator] = useState(
     () => new InboxConversionRequestCoordinator(),
   );
@@ -324,6 +362,11 @@ export function App() {
   );
   const taskCreateFeedbackRef = useRef<TaskCreateFeedback | null>(null);
   const taskCreateSurfaceRef = useRef<AppSurfaceId>('today');
+  const automationCreateActivationRef = useRef<AutomationCreateWorkspaceIdentity>(
+    createAutomationCreateWorkspaceIdentity(null),
+  );
+  const automationCreateFeedbackRef = useRef<AutomationCreateFeedback | null>(null);
+  const automationCreateSurfaceRef = useRef<AppSurfaceId>('today');
   const inboxConversionActivationRef = useRef<InboxConversionWorkspaceIdentity>(
     createInboxConversionWorkspaceIdentity(null),
   );
@@ -359,6 +402,10 @@ export function App() {
     () => createTaskCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
+  const automationCreateActivation = useMemo(
+    () => createAutomationCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -388,6 +435,14 @@ export function App() {
   const visibleTaskCreateSyncWarning =
     taskCreateSyncWarningState?.activation === taskCreateActivation
       ? taskCreateSyncWarningState
+      : null;
+  const visibleAutomationCreateFeedback =
+    automationCreateFeedbackState?.activation === automationCreateActivation
+      ? automationCreateFeedbackState.feedback
+      : null;
+  const visibleAutomationCreateSyncWarning =
+    automationCreateSyncWarningState?.activation === automationCreateActivation
+      ? automationCreateSyncWarningState
       : null;
   const visibleInboxConversionFeedback =
     inboxConversionFeedbackState?.activation === inboxController.activation
@@ -529,6 +584,12 @@ export function App() {
     automationDialog !== null ||
     focusDialogOpen ||
     dataState.importPreview !== null;
+  const invalidateAutomationCreate = useCallback((): void => {
+    automationCreateCoordinator.invalidate();
+    automationCreateFeedbackRef.current = null;
+    setAutomationCreateFeedbackState(null);
+    setAutomationCreateSyncWarningState(null);
+  }, [automationCreateCoordinator]);
   useLayoutEffect(() => {
     automationOutputActivationRef.current = automationOutputActivation;
     automationRunFeedbackRef.current = automationController.runFeedback;
@@ -579,6 +640,25 @@ export function App() {
     taskCreateActivation,
     taskCreateCoordinator,
     visibleTaskCreateFeedback,
+  ]);
+  useLayoutEffect(() => {
+    const previousActivation = automationCreateActivationRef.current;
+    const previousSurface = automationCreateSurfaceRef.current;
+    automationCreateActivationRef.current = automationCreateActivation;
+    automationCreateFeedbackRef.current = visibleAutomationCreateFeedback;
+    automationCreateSurfaceRef.current = activeSurface;
+    if (previousActivation !== automationCreateActivation) {
+      invalidateAutomationCreate();
+    } else if (previousSurface !== activeSurface || overlayOpen) {
+      automationCreateCoordinator.cancelOpen();
+    }
+  }, [
+    activeSurface,
+    automationCreateActivation,
+    automationCreateCoordinator,
+    invalidateAutomationCreate,
+    overlayOpen,
+    visibleAutomationCreateFeedback,
   ]);
   useLayoutEffect(() => {
     const previousActivation = inboxConversionActivationRef.current;
@@ -671,6 +751,7 @@ export function App() {
   const restoreBackupWithApproval = useCallback(
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
       if (!confirmLeaveNoteDraft()) return null;
+      invalidateAutomationCreate();
       dataReplacementApprovedRef.current = true;
       dataReplacementNoteDiscardApprovedRef.current = true;
       try {
@@ -686,12 +767,13 @@ export function App() {
         throw error;
       }
     },
-    [confirmLeaveNoteDraft, restoreBackup],
+    [confirmLeaveNoteDraft, invalidateAutomationCreate, restoreBackup],
   );
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
       automationOutputNavigation.invalidate();
+      automationCreateCoordinator.cancelOpen();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
@@ -709,6 +791,7 @@ export function App() {
     [
       activeSurface,
       activeView,
+      automationCreateCoordinator,
       assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
@@ -722,6 +805,7 @@ export function App() {
   const openAssistant = useCallback(
     (context: AssistantContextReference) => {
       if (!activeWorkspace || !confirmLeaveNoteDraft()) return;
+      automationCreateCoordinator.cancelOpen();
       inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
@@ -734,6 +818,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      automationCreateCoordinator,
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
@@ -754,6 +839,7 @@ export function App() {
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
+      invalidateAutomationCreate();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.invalidate();
       taskCreateCoordinator.invalidate();
@@ -770,6 +856,7 @@ export function App() {
       inboxConversionRequestCoordinator,
       searchNavigation,
       taskCreateCoordinator,
+      invalidateAutomationCreate,
       workspaceController,
     ],
   );
@@ -859,6 +946,7 @@ export function App() {
       if (!confirmLeaveNoteDraft()) {
         throw new Error('已取消打开收件箱记录；当前笔记仍保留未保存的更改。');
       }
+      automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
         const intent = inboxCaptureCoordinator.beginOpen(
@@ -901,6 +989,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      automationCreateCoordinator,
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       prepareInboxSnapshotRefresh,
@@ -986,6 +1075,7 @@ export function App() {
     async (feedback: TaskCreateFeedback): Promise<void> => {
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
+      automationCreateCoordinator.cancelOpen();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
@@ -1043,6 +1133,7 @@ export function App() {
     [
       activeWorkspace,
       assistantSavedNoteNavigation,
+      automationCreateCoordinator,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
@@ -1176,6 +1267,258 @@ export function App() {
       workspaceController.pendingOperation,
       workspaceDialog,
     ],
+  );
+
+  const createManualAutomation = useCallback(
+    async (
+      workspaceId: string,
+      name: string,
+      schedule: AutomationSchedule,
+      action: AutomationAction,
+    ): Promise<void> => {
+      const activation = automationCreateActivationRef.current;
+      const intent = automationCreateCoordinator.beginCreate(activation);
+      automationCreateFeedbackRef.current = null;
+      setAutomationCreateFeedbackState(null);
+      setAutomationCreateSyncWarningState(null);
+      try {
+        if (activation.workspaceId !== workspaceId) {
+          throw new AutomationCreateSupersededError();
+        }
+        const commit = await automationController.create(name, schedule, action);
+        if (
+          !automationCreateCoordinator.isCreateCurrent(
+            intent,
+            automationCreateActivationRef.current,
+          )
+        ) {
+          return;
+        }
+        if (!commit.committed || commit.createdAutomation === null) {
+          if (commit.reconciliationWarning) {
+            setAutomationCreateSyncWarningState({
+              activation: intent.workspace,
+              requestGeneration: intent.generation,
+              createdAutomationId: commit.result.createdAutomationId,
+              name: commit.createdAutomation?.name ?? name,
+              enabled: commit.createdAutomation?.enabled ?? false,
+              message: commit.reconciliationWarning,
+            });
+          }
+          return;
+        }
+        const feedback = automationCreateCoordinator.createFeedback(
+          intent,
+          automationCreateActivationRef.current,
+          commit.createdAutomation,
+          true,
+        );
+        automationCreateFeedbackRef.current = feedback;
+        setAutomationCreateFeedbackState({
+          activation: intent.workspace,
+          feedback,
+        });
+      } catch (error) {
+        if (
+          !automationCreateCoordinator.isCreateCurrent(
+            intent,
+            automationCreateActivationRef.current,
+          ) ||
+          error instanceof AutomationCreateSupersededError
+        ) {
+          return;
+        }
+        throw error;
+      } finally {
+        automationCreateCoordinator.endCreate(intent);
+      }
+    },
+    [automationController, automationCreateCoordinator],
+  );
+
+  const openCreatedAutomation = useCallback(
+    async (feedback: AutomationCreateFeedback): Promise<void> => {
+      searchNavigation.invalidate();
+      automationOutputNavigation.invalidate();
+      assistantSavedNoteNavigation.invalidate();
+      inboxCaptureCoordinator.cancelOpen();
+      taskCreateCoordinator.cancelOpen();
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
+      try {
+        const intent = automationCreateCoordinator.beginOpen(
+          automationCreateActivationRef.current,
+          feedback,
+        );
+        const assertCurrent = () =>
+          automationCreateCoordinator.assertOpenCurrent(
+            intent,
+            automationCreateActivationRef.current,
+            automationCreateFeedbackRef.current,
+          );
+        const target = await resolveAutomationCreateNavigationTarget(
+          intent,
+          automationController.prepareSnapshotRefresh,
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!activeWorkspace || activeWorkspace.id !== target.workspaceId) {
+          throw new AutomationCreateSupersededError();
+        }
+        if (!confirmLeaveNoteDraft()) {
+          throw new AutomationCreateNoteDraftPreservedError();
+        }
+        assertCurrent();
+        const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
+        focusAutomationActivityRailAnchor();
+        if (
+          !automationCreateCoordinator.dismiss(
+            feedback,
+            automationCreateActivationRef.current,
+            automationCreateFeedbackRef.current,
+          )
+        ) {
+          throw new AutomationCreateSupersededError();
+        }
+
+        automationCreateFeedbackRef.current = null;
+        setAutomationCreateFeedbackState((current) =>
+          current?.feedback === feedback ? null : current,
+        );
+        if (discardConfirmedNoteDraft) {
+          setNotePageGeneration((generation) => generation + 1);
+        }
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setRequestedNoteId(null);
+        setInboxReveal(null);
+        updatePreferences({ activeView: 'automations' }, true, target.workspaceId);
+        setAutomationDialog({
+          mode: 'edit',
+          workspaceId: target.workspaceId,
+          workspaceName: activeWorkspace.name,
+          item: target.item,
+        });
+      } catch (error) {
+        throw automationCreateNavigationError(error);
+      }
+    },
+    [
+      activeWorkspace,
+      assistantSavedNoteNavigation,
+      automationController.prepareSnapshotRefresh,
+      automationCreateCoordinator,
+      automationOutputNavigation,
+      confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
+      searchNavigation,
+      taskCreateCoordinator,
+      updatePreferences,
+    ],
+  );
+
+  const dismissAutomationCreate = useCallback(
+    (feedback: AutomationCreateFeedback): boolean => {
+      if (
+        !automationCreateCoordinator.dismiss(
+          feedback,
+          automationCreateActivationRef.current,
+          automationCreateFeedbackRef.current,
+        )
+      ) {
+        return false;
+      }
+      automationCreateFeedbackRef.current = null;
+      setAutomationCreateFeedbackState((current) =>
+        current?.feedback === feedback ? null : current,
+      );
+      return true;
+    },
+    [automationCreateCoordinator],
+  );
+
+  const restoreAutomationCreateFocus = useCallback((): void => {
+    const heading = document.querySelector<HTMLElement>('.section-page h1, .today-dashboard h1');
+    heading?.focus({ preventScroll: true });
+    if (document.activeElement === heading) return;
+    document
+      .querySelector<HTMLElement>(
+        '.page-chrome__actions button:not(:disabled), .dashboard-hero__actions button:not(:disabled), .activity-rail button[aria-current="page"]',
+      )
+      ?.focus({ preventScroll: true });
+  }, []);
+
+  const dismissAutomationCreateSyncWarning = useCallback(
+    (warning: AutomationCreateSyncWarningState): void => {
+      if (
+        !automationCreateCoordinator.isGenerationCurrent(
+          warning.requestGeneration,
+          warning.activation,
+        )
+      ) {
+        return;
+      }
+      invalidateAutomationCreate();
+      window.requestAnimationFrame(restoreAutomationCreateFocus);
+    },
+    [automationCreateCoordinator, invalidateAutomationCreate, restoreAutomationCreateFocus],
+  );
+
+  const refreshAutomationCreateSyncWarning = useCallback(
+    async (warning: AutomationCreateSyncWarningState): Promise<void> => {
+      try {
+        if (
+          warning.activation !== automationCreateActivationRef.current ||
+          !automationCreateCoordinator.isGenerationCurrent(
+            warning.requestGeneration,
+            warning.activation,
+          )
+        ) {
+          throw new AutomationCreateSupersededError();
+        }
+        const refresh = await automationController.prepareSnapshotRefresh();
+        if (
+          warning.activation !== automationCreateActivationRef.current ||
+          refresh.snapshot.workspaceId !== warning.activation.workspaceId ||
+          !automationCreateCoordinator.isGenerationCurrent(
+            warning.requestGeneration,
+            warning.activation,
+          )
+        ) {
+          throw new AutomationCreateSupersededError();
+        }
+        const matches = refresh.snapshot.items.filter(
+          ({ id }) => id === warning.createdAutomationId,
+        );
+        if (matches.length !== 1) {
+          throw new AutomationCreateSyncRefreshError(
+            '重新读取后仍无法确认刚创建的自动化。请稍后再试；规则可能已经创建，请不要重复创建。',
+          );
+        }
+        if (!refresh.commit()) {
+          throw new AutomationCreateSyncRefreshError(
+            '自动化列表在读取期间发生变化。请重新读取；规则可能已经创建，请不要重复创建。',
+          );
+        }
+        const feedback = automationCreateCoordinator.createRecoveredFeedback(
+          warning.requestGeneration,
+          warning.activation,
+          matches[0]!,
+          true,
+        );
+        automationCreateFeedbackRef.current = feedback;
+        setAutomationCreateSyncWarningState((current) => (current === warning ? null : current));
+        setAutomationCreateFeedbackState({
+          activation: warning.activation,
+          feedback,
+        });
+      } catch (error) {
+        throw automationCreateSyncRefreshError(error);
+      }
+    },
+    [automationController, automationCreateCoordinator],
   );
 
   const openAutomationCreate = useCallback(() => {
@@ -1428,6 +1771,7 @@ export function App() {
 
   const openAssistantSavedNote = useCallback(
     async (target: AssistantSavedNoteTarget): Promise<void> => {
+      automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
         const intent = assistantSavedNoteNavigation.begin(
@@ -1459,6 +1803,7 @@ export function App() {
     },
     [
       assistantSavedNoteNavigation,
+      automationCreateCoordinator,
       prepareNoteSnapshotRefresh,
       taskCreateCoordinator,
       updatePreferences,
@@ -1575,6 +1920,7 @@ export function App() {
 
   const openInboxConversionOutput = useCallback(
     async (feedback: InboxConversionFeedback): Promise<void> => {
+      automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
         const intent = inboxConversionNavigation.begin(
@@ -1624,6 +1970,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      automationCreateCoordinator,
       inboxConversionNavigation,
       noteController.prepareSnapshotRefresh,
       taskController.prepareSnapshotRefresh,
@@ -1634,6 +1981,7 @@ export function App() {
 
   const openAutomationRunOutput = useCallback(
     async (feedback: AutomationRunFeedback): Promise<void> => {
+      automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
         const intent = automationOutputNavigation.begin(
@@ -1683,6 +2031,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      automationCreateCoordinator,
       automationOutputNavigation,
       noteController.prepareSnapshotRefresh,
       taskController.prepareSnapshotRefresh,
@@ -1867,6 +2216,7 @@ export function App() {
         throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
       }
       automationOutputNavigation.invalidate();
+      automationCreateCoordinator.cancelOpen();
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
@@ -2020,6 +2370,7 @@ export function App() {
       }
     },
     [
+      automationCreateCoordinator,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
@@ -2399,6 +2750,7 @@ export function App() {
       className="app-shell"
       onClickCapture={() => {
         automationOutputNavigation.invalidate();
+        automationCreateCoordinator.cancelOpen();
         inboxCaptureCoordinator.cancelOpen();
       }}
     >
@@ -3042,7 +3394,7 @@ export function App() {
             if (automationDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开自动化窗口。');
             }
-            await automationController.create(name, schedule, action);
+            await createManualAutomation(automationDialog.workspaceId, name, schedule, action);
           }}
           onUpdate={async (item, name, schedule, action) => {
             if (automationDialog.workspaceId !== snapshot.currentWorkspaceId) {
@@ -3112,6 +3464,7 @@ export function App() {
           onCancel={cancelImport}
           onConfirm={async () => {
             if (!confirmLeaveNoteDraft()) return;
+            invalidateAutomationCreate();
             dataReplacementApprovedRef.current = true;
             dataReplacementNoteDiscardApprovedRef.current = true;
             try {
@@ -3130,6 +3483,24 @@ export function App() {
         onUndo={inboxController.undoArchive}
         onDismiss={inboxController.dismissUndo}
       >
+        {visibleAutomationCreateSyncWarning ? (
+          <AutomationCreateSyncWarning
+            name={visibleAutomationCreateSyncWarning.name}
+            enabled={visibleAutomationCreateSyncWarning.enabled}
+            message={visibleAutomationCreateSyncWarning.message}
+            onRefresh={() => refreshAutomationCreateSyncWarning(visibleAutomationCreateSyncWarning)}
+            onDismiss={() => dismissAutomationCreateSyncWarning(visibleAutomationCreateSyncWarning)}
+          />
+        ) : null}
+        {visibleAutomationCreateFeedback ? (
+          <AutomationCreateToast
+            feedback={visibleAutomationCreateFeedback}
+            focusBlocked={overlayOpen}
+            onOpen={openCreatedAutomation}
+            onDismiss={dismissAutomationCreate}
+            onFocusFallback={restoreAutomationCreateFocus}
+          />
+        ) : null}
         {visibleTaskCreateSyncWarning ? (
           <TaskCreateSyncWarning
             title={visibleTaskCreateSyncWarning.title}

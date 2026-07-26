@@ -1,11 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AutomationItem, AutomationSnapshot } from '../src/shared/contracts';
 import {
+  automationSnapshotForActivation,
   automationRunFeedbackForActivation,
   automationRunFeedbackKey,
   automationRunOutputLabel,
   automationRunFeedbackForCurrentWorkspace,
   automationRunNowConfirmation,
+  createdAutomationFromResult,
+  createAutomationRequestIdentity,
   createAutomationRunRequestIdentity,
   createAutomationWorkspaceIdentity,
   describeAutomationAction,
@@ -13,11 +16,14 @@ import {
   formatAutomationInputMinute,
   formatAutomationSchedule,
   isAutomationRequestLatest,
+  isAutomationRequestCurrent,
   isAutomationRunRequestCurrent,
   isAutomationSequenceCurrent,
   isAutomationWorkspaceCurrent,
   parseAutomationInputMinute,
   requestAutomationRunNow,
+  reconcileAutomationCreateResult,
+  shouldApplyAutomationSnapshot,
   sortAutomationItems,
 } from '../src/renderer/automation-state';
 
@@ -83,6 +89,144 @@ describe('automation renderer state', () => {
     expect(isAutomationWorkspaceCurrent(WORKSPACE_A, snapshot)).toBe(true);
     expect(isAutomationWorkspaceCurrent(WORKSPACE_B, snapshot)).toBe(false);
     expect(isAutomationWorkspaceCurrent(null, snapshot)).toBe(false);
+  });
+
+  it('binds snapshot requests and committed state to one activation identity', () => {
+    const firstA = createAutomationWorkspaceIdentity(WORKSPACE_A);
+    const secondA = createAutomationWorkspaceIdentity(WORKSPACE_A);
+    const request = createAutomationRequestIdentity(firstA, 7);
+    expect(request).not.toBeNull();
+    if (!request) return;
+    const snapshot: AutomationSnapshot = { workspaceId: WORKSPACE_A, items: [] };
+
+    expect(isAutomationRequestCurrent(firstA, request)).toBe(true);
+    expect(isAutomationRequestCurrent(secondA, request)).toBe(false);
+    expect(shouldApplyAutomationSnapshot(firstA, 6, request, snapshot)).toBe(true);
+    expect(shouldApplyAutomationSnapshot(firstA, 7, request, snapshot)).toBe(false);
+    expect(
+      shouldApplyAutomationSnapshot(firstA, 6, request, {
+        workspaceId: WORKSPACE_B,
+        items: [],
+      }),
+    ).toBe(false);
+    expect(automationSnapshotForActivation(firstA, { activation: firstA, snapshot })).toBe(
+      snapshot,
+    );
+    expect(automationSnapshotForActivation(secondA, { activation: firstA, snapshot })).toBeNull();
+    expect(createAutomationRequestIdentity(createAutomationWorkspaceIdentity(null), 8)).toBeNull();
+    expect(createAutomationRequestIdentity(firstA, -1)).toBeNull();
+  });
+
+  it('resolves a created automation only by the Main-returned opaque id', () => {
+    const expected = item('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-07-22T00:00:00.000Z');
+    const sameName = {
+      ...item('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '2026-07-23T00:00:00.000Z'),
+      name: expected.name,
+    };
+    const result = {
+      automationSnapshot: {
+        workspaceId: WORKSPACE_A,
+        items: [sameName, expected],
+      },
+      createdAutomationId: expected.id,
+    };
+
+    expect(createdAutomationFromResult(WORKSPACE_A, result)).toBe(expected);
+    expect(createdAutomationFromResult(WORKSPACE_B, result)).toBeNull();
+    expect(
+      createdAutomationFromResult(WORKSPACE_A, {
+        ...result,
+        createdAutomationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      }),
+    ).toBeNull();
+    expect(
+      createdAutomationFromResult(WORKSPACE_A, {
+        ...result,
+        automationSnapshot: {
+          ...result.automationSnapshot,
+          items: [expected, { ...expected }],
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it('reconciles an onChanged race from committed state without another read', async () => {
+    const created = item('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-07-22T00:00:00.000Z');
+    const refresh = vi.fn();
+
+    await expect(
+      reconcileAutomationCreateResult({
+        expectedWorkspaceId: WORKSPACE_A,
+        result: {
+          automationSnapshot: { workspaceId: WORKSPACE_A, items: [created] },
+          createdAutomationId: created.id,
+        },
+        commitResultSnapshot: () => false,
+        getCommittedAutomation: () => created,
+        prepareSnapshotRefresh: refresh,
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({
+      createdAutomation: created,
+      committed: true,
+      error: undefined,
+    });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('recovers a failed first refresh on the bounded second authoritative read', async () => {
+    const created = item('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-07-22T00:00:00.000Z');
+    const firstFailure = new Error('first read failed');
+    const prepareSnapshotRefresh = vi
+      .fn()
+      .mockRejectedValueOnce(firstFailure)
+      .mockResolvedValueOnce({
+        snapshot: { workspaceId: WORKSPACE_A, items: [created] },
+        commit: () => true,
+      });
+
+    await expect(
+      reconcileAutomationCreateResult({
+        expectedWorkspaceId: WORKSPACE_A,
+        result: {
+          automationSnapshot: { workspaceId: WORKSPACE_A, items: [created] },
+          createdAutomationId: created.id,
+        },
+        commitResultSnapshot: () => false,
+        getCommittedAutomation: () => null,
+        prepareSnapshotRefresh,
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({
+      createdAutomation: created,
+      committed: true,
+      error: firstFailure,
+    });
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops create reconciliation when its activation is no longer current', async () => {
+    const created = item('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-07-22T00:00:00.000Z');
+    const prepareSnapshotRefresh = vi.fn();
+
+    await expect(
+      reconcileAutomationCreateResult({
+        expectedWorkspaceId: WORKSPACE_A,
+        result: {
+          automationSnapshot: { workspaceId: WORKSPACE_A, items: [created] },
+          createdAutomationId: created.id,
+        },
+        commitResultSnapshot: () => false,
+        getCommittedAutomation: () => null,
+        prepareSnapshotRefresh,
+        isCurrent: () => false,
+      }),
+    ).resolves.toEqual({
+      createdAutomation: created,
+      committed: false,
+      error: undefined,
+    });
+    expect(prepareSnapshotRefresh).not.toHaveBeenCalled();
   });
 
   it('parses and formats bounded local-time schedules', () => {

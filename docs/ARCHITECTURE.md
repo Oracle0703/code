@@ -88,6 +88,8 @@ v7 追加外部内容 FTS5 索引和应用级备份策略/运行状态；v8 追�
 自动化 Controller 是应用级单例，不绑定窗口或当前工作区。它在数据库打开后启动，系统从睡眠恢复时重新评估；数据替换和应用受控退出必须先停止调度并等待正在进行的 single-flight 评估，再关闭数据库。关闭 macOS 窗口或 Renderer 崩溃不会让应用级调度器伪装成已停止。
 
 - 定义只允许每日/每周本地时间，以及固定的“创建今日任务”或“创建 Markdown 笔记”；创建时默认停用，动作类型创建后不可更改。
+- 既有 `automation:create` 在同一个 Main 事务中返回事务后的完整 `automationSnapshot` 与实际插入的 opaque `createdAutomationId`；这只扩展返回契约，不新增 IPC 通道、schema 或 migration。Renderer 创建成功后仍留在发起页面并显示“默认停用”的回执；只有用户显式打开时才 fresh-read 当前工作区规则、按该 ID 唯一匹配，并用权威快照中的当前 revision 打开编辑窗口。目标缺失、重复 ID、切页、较新创建、工作区 A→B→A 或迟到请求都失败关闭，不按名称、计划或列表位置回退。
+- 若 Main 已提交创建但 Renderer 在有界重读后仍无法提交权威快照，创建窗口会关闭并显示不依赖页面状态栏的独立警告，明确要求刷新且不要重复创建；此路径不发布未经确认的成功回执。
 - 用户可以对活动且未归档的定义显式请求立即运行，无论该定义当前启用或停用。可信 Renderer 必须先完整展示已保存动作并获得确认，随后只提交 `{workspaceId, automationId, expectedRevision}`；Main 在数据库事务中重新读取工作区与定义、核对 revision，并只执行持久化的动作，不能接受 Renderer 拼出的任务、笔记正文或运行时间。
 - 手动运行成功只原子创建一条任务或笔记并返回输出类型与 opaque ID；它不改变 `enabled`、`effective_at`、定义 revision、`automation_run_state`、`automation_occurrences` 或下一次计划时间，也不会消费或伪造一个计划 occurrence。相邻的定时 occurrence 仍按原计划独立判定。
 - Renderer 只为当前工作区最新一次显式手动运行保留成功入口，不自动跳转。用户点击后必须重新读取对应任务或笔记快照，按 Main 返回的精确 opaque ID 复核目标，并在工作区、页面或反馈身份变化时淘汰迟到导航；计划运行事件不携带 ID，也不会生成入口。

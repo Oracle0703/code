@@ -1350,7 +1350,7 @@ async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
       DEFAULT_MIGRATIONS.map(({ version }) => version),
     );
 
-    let automations = await service.createAutomation({
+    const taskAutomationCreation = await service.createAutomation({
       workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
       name: '手动创建今日任务',
       schedule: {
@@ -1363,6 +1363,8 @@ async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
         title: '真实 DatabaseService 手动任务',
       },
     });
+    assert.equal(taskAutomationCreation.createdAutomationId, MANUAL_TASK_AUTOMATION_ID);
+    let automations = taskAutomationCreation.automationSnapshot;
     let taskAutomation = requireAutomationItem(automations.items, MANUAL_TASK_AUTOMATION_ID);
     assert.deepEqual(readAutomationView(taskAutomation), {
       enabled: false,
@@ -1371,7 +1373,7 @@ async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
       lastRun: { status: 'never' },
     });
 
-    automations = await service.createAutomation({
+    const noteAutomationCreation = await service.createAutomation({
       workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
       name: '手动创建 Markdown 笔记',
       schedule: {
@@ -1385,6 +1387,8 @@ async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
         body: '# 手动运行\n\n- packaged smoke',
       },
     });
+    assert.equal(noteAutomationCreation.createdAutomationId, MANUAL_NOTE_AUTOMATION_ID);
+    automations = noteAutomationCreation.automationSnapshot;
     let noteAutomation = requireAutomationItem(automations.items, MANUAL_NOTE_AUTOMATION_ID);
     assert.deepEqual(readAutomationView(noteAutomation), {
       enabled: false,
@@ -1393,7 +1397,7 @@ async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
       lastRun: { status: 'never' },
     });
 
-    await service.createAutomation({
+    const archivedAutomationCreation = await service.createAutomation({
       workspaceId: MANUAL_AUTOMATION_WORKSPACE_ID,
       name: '归档后禁止手动运行',
       schedule: {
@@ -1406,6 +1410,7 @@ async function smokeManualAutomationRuns(dataDirectory: string): Promise<void> {
         title: '不应创建的归档输出',
       },
     });
+    assert.equal(archivedAutomationCreation.createdAutomationId, MANUAL_ARCHIVED_AUTOMATION_ID);
 
     const disabledPersistence = readManualAutomationPersistence(dataDirectory);
     assert.equal(disabledPersistence.definitions.length, 3);
@@ -1689,7 +1694,7 @@ async function smokeScheduledAutomations(
   const fixedLocalMinute = FIXED_NOW.getHours() * 60 + FIXED_NOW.getMinutes();
   assert.ok(fixedLocalMinute <= 1_436, 'The fixed automation smoke time must leave three minutes.');
 
-  let automations = await service.createAutomation({
+  const dailyAutomationCreation = await service.createAutomation({
     workspaceId: DEFAULT_WORKSPACE_ID,
     name: '每日自动创建今日任务',
     schedule: {
@@ -1702,13 +1707,15 @@ async function smokeScheduledAutomations(
       title: '自动生成的待办',
     },
   });
+  assert.equal(dailyAutomationCreation.createdAutomationId, DAILY_AUTOMATION_ID);
+  let automations = dailyAutomationCreation.automationSnapshot;
   let daily = automations.items.find(({ id }) => id === DAILY_AUTOMATION_ID);
   assert.ok(daily);
   assert.equal(daily.enabled, false);
   assert.equal(daily.revision, 1);
   assert.deepEqual(daily.lastRun, { status: 'never' });
 
-  automations = await service.createAutomation({
+  const weeklyAutomationCreation = await service.createAutomation({
     workspaceId: DEFAULT_WORKSPACE_ID,
     name: '每周自动创建笔记',
     schedule: {
@@ -1722,6 +1729,8 @@ async function smokeScheduledAutomations(
       body: '由受控定时自动化创建。',
     },
   });
+  assert.equal(weeklyAutomationCreation.createdAutomationId, WEEKLY_AUTOMATION_ID);
+  automations = weeklyAutomationCreation.automationSnapshot;
   const weekly = automations.items.find(({ id }) => id === WEEKLY_AUTOMATION_ID);
   assert.ok(weekly);
   assert.equal(weekly.enabled, false);
@@ -3145,7 +3154,7 @@ async function smokeBackupPointInTimeRestore(dataDirectory: string): Promise<voi
       title: '来自 v10 备份的恢复目标',
       planning: 'day-0',
     });
-    let automations = await legacy.createAutomation({
+    const automationCreation = await legacy.createAutomation({
       workspaceId: DEFAULT_WORKSPACE_ID,
       name: '恢复后必须停用的自动化',
       schedule: {
@@ -3159,6 +3168,8 @@ async function smokeBackupPointInTimeRestore(dataDirectory: string): Promise<voi
         body: '不得在数据库恢复后自行运行。',
       },
     });
+    assert.equal(automationCreation.createdAutomationId, BACKUP_RESTORE_AUTOMATION_ID);
+    let automations = automationCreation.automationSnapshot;
     const automation = automations.items.find(({ id }) => id === BACKUP_RESTORE_AUTOMATION_ID);
     assert.ok(automation);
     automations = await legacy.setAutomationEnabled({

@@ -7,6 +7,7 @@ import {
   type AssistantStartInput,
   IPC_CHANNELS,
   type AutomationCreateInput,
+  type AutomationCreateResult,
   type AutomationRunNowResult,
   type AutomationSetEnabledInput,
   type AutomationSnapshot,
@@ -205,7 +206,7 @@ interface IpcDependencies {
   };
   automation: {
     getSnapshot(input: WorkspaceTargetInput): Promise<AutomationSnapshot>;
-    create(input: AutomationCreateInput): Promise<AutomationSnapshot>;
+    create(input: AutomationCreateInput): Promise<AutomationCreateResult>;
     update(input: AutomationUpdateInput): Promise<AutomationSnapshot>;
     setEnabled(input: AutomationSetEnabledInput): Promise<AutomationSnapshot>;
     runNow(input: AutomationTargetInput): Promise<AutomationRunNowResult>;
