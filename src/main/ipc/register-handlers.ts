@@ -49,6 +49,7 @@ import {
   type TaskConversionResult,
   type TaskConvertInboxInput,
   type TaskCreateInput,
+  type TaskCreateResult,
   type TaskPlanningInput,
   type TaskRenameInput,
   type TaskSnapshot,
@@ -176,7 +177,7 @@ interface IpcDependencies {
   };
   task: {
     getTaskSnapshot(input: WorkspaceTargetInput): Promise<TaskSnapshot>;
-    createTask(input: TaskCreateInput): Promise<TaskSnapshot>;
+    createTask(input: TaskCreateInput): Promise<TaskCreateResult>;
     renameTask(input: TaskRenameInput): Promise<TaskSnapshot>;
     updateTaskStatus(input: TaskStatusInput): Promise<TaskSnapshot>;
     updateTaskPlanning(input: TaskPlanningInput): Promise<TaskSnapshot>;

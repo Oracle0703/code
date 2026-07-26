@@ -2,11 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type {
   Task,
   TaskConversionResult,
+  TaskCreateResult,
   TaskPlanning,
   TaskSnapshot,
   TaskStatus,
 } from '../../shared/contracts';
 import {
+  createdTaskFromResult,
   convertedTaskFromResult,
   countTasks,
   createTaskRequestIdentity,
@@ -15,6 +17,7 @@ import {
   isTaskRequestCurrent,
   isTaskSnapshotDateCurrent,
   millisecondsUntilNextLocalDay,
+  reconcileTaskCreateResult,
   shouldApplyTaskSnapshot,
   taskSnapshotForActivation,
   type TaskRequestIdentity,
@@ -37,11 +40,20 @@ interface TaskOperationError {
 
 const EMPTY_TASKS: readonly Task[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createTaskWorkspaceIdentity(null));
+const TASK_CREATE_RECONCILIATION_ERROR =
+  '任务已创建，但当前任务列表未能同步。请刷新后查看，避免重复创建。';
 
 export interface TaskInboxConversionCommit {
   readonly result: TaskConversionResult;
   readonly createdTask: Task;
   readonly committed: boolean;
+}
+
+export interface TaskCreateCommit {
+  readonly result: TaskCreateResult;
+  readonly createdTask: Task | null;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
 }
 
 export function useTaskController(workspaceId: string | null) {
@@ -308,7 +320,7 @@ export function useTaskController(workspaceId: string | null) {
   );
 
   const create = useCallback(
-    async (title: string, planning: TaskPlanning): Promise<void> => {
+    async (title: string, planning: TaskPlanning): Promise<TaskCreateCommit> => {
       const target = activeActivationRef.current;
       if (target.workspaceId === null || !beginPendingCreate(target)) {
         throw new Error('这个工作区正在创建另一项任务。');
@@ -320,19 +332,61 @@ export function useTaskController(workspaceId: string | null) {
       }
       setOperationErrorState(null);
       try {
-        const snapshot = await window.workbench.task.create({
-          workspaceId: request.workspaceId,
-          title,
-          planning,
+        let result: TaskCreateResult;
+        try {
+          result = await window.workbench.task.create({
+            workspaceId: request.workspaceId,
+            title,
+            planning,
+          });
+        } catch (error) {
+          throw createOperationError(error, request.workspace, '任务创建失败，请重试。');
+        }
+
+        const reconciliation = await reconcileTaskCreateResult({
+          expectedWorkspaceId: request.workspaceId,
+          result,
+          commitResultSnapshot: () => applySnapshot(result.taskSnapshot, request),
+          getCommittedTask: () => {
+            const currentSnapshot = taskSnapshotForActivation(
+              request.workspace,
+              storedSnapshotRef.current,
+              new Date(),
+            );
+            return currentSnapshot
+              ? createdTaskFromResult(request.workspaceId, {
+                  taskSnapshot: currentSnapshot,
+                  createdTaskId: result.createdTaskId,
+                })
+              : null;
+          },
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
         });
-        applySnapshot(snapshot, request);
-      } catch (error) {
-        throw createOperationError(error, request.workspace, '任务创建失败，请重试。');
+
+        let reconciliationWarning: string | null = null;
+        if (!reconciliation.committed && requestIsCurrent(request)) {
+          reconciliationWarning = TASK_CREATE_RECONCILIATION_ERROR;
+        }
+        return {
+          result,
+          createdTask: reconciliation.createdTask,
+          committed: reconciliation.committed,
+          reconciliationWarning,
+        };
       } finally {
         endPendingCreate(request.workspace);
       }
     },
-    [applySnapshot, beginPendingCreate, beginRequest, createOperationError, endPendingCreate],
+    [
+      applySnapshot,
+      beginPendingCreate,
+      beginRequest,
+      createOperationError,
+      endPendingCreate,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
   );
 
   const runTaskMutation = useCallback(

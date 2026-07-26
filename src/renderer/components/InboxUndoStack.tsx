@@ -18,7 +18,7 @@ export function InboxUndoStack({
   onDismiss,
 }: InboxUndoStackProps) {
   return (
-    <section className="inbox-undo-stack" aria-label="收件箱操作通知">
+    <section className="inbox-undo-stack" aria-label="操作通知">
       {children}
       {notices.map((notice) => (
         <div

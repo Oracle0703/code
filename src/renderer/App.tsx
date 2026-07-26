@@ -74,6 +74,8 @@ import { NotePage } from './components/NotePage';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
 import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
 import { SettingsPage, type SettingsSection } from './components/SettingsPage';
+import { TaskCreateSyncWarning } from './components/TaskCreateSyncWarning';
+import { TaskCreateToast } from './components/TaskCreateToast';
 import { TaskDialog, type TaskDialogState } from './components/TaskDialog';
 import { TaskPage } from './components/TaskPage';
 import { TerminalPanel } from './components/TerminalPanel';
@@ -161,6 +163,16 @@ import {
   type FocusTaskCompletionActionState,
   type FocusTaskCompletionNotice,
 } from './focus-task-completion';
+import {
+  createTaskCreateWorkspaceIdentity,
+  resolveTaskCreateNavigationTarget,
+  TaskCreateCoordinator,
+  TaskCreateNoteDraftPreservedError,
+  TaskCreateSupersededError,
+  taskCreateNavigationError,
+  type TaskCreateFeedback,
+  type TaskCreateWorkspaceIdentity,
+} from './task-create-navigation';
 import {
   evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
@@ -253,6 +265,16 @@ export function App() {
     readonly activation: InboxCaptureWorkspaceIdentity;
     readonly feedback: InboxCaptureFeedback;
   } | null>(null);
+  const [taskCreateFeedbackState, setTaskCreateFeedbackState] = useState<{
+    readonly activation: TaskCreateWorkspaceIdentity;
+    readonly feedback: TaskCreateFeedback;
+  } | null>(null);
+  const [taskCreateSyncWarningState, setTaskCreateSyncWarningState] = useState<{
+    readonly activation: TaskCreateWorkspaceIdentity;
+    readonly requestGeneration: number;
+    readonly title: string;
+    readonly message: string;
+  } | null>(null);
   const [inboxConversionFeedbackState, setInboxConversionFeedbackState] = useState<{
     readonly activation: InboxConversionWorkspaceIdentity;
     readonly feedback: InboxConversionFeedback;
@@ -263,6 +285,7 @@ export function App() {
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
   const [inboxCaptureCoordinator] = useState(() => new InboxCaptureCoordinator());
+  const [taskCreateCoordinator] = useState(() => new TaskCreateCoordinator());
   const [inboxConversionRequestCoordinator] = useState(
     () => new InboxConversionRequestCoordinator(),
   );
@@ -296,6 +319,11 @@ export function App() {
   const inboxCaptureFeedbackRef = useRef<InboxCaptureFeedback | null>(null);
   const inboxCaptureSurfaceRef = useRef<AppSurfaceId>('today');
   const inboxCaptureSurfaceGenerationRef = useRef(0);
+  const taskCreateActivationRef = useRef<TaskCreateWorkspaceIdentity>(
+    createTaskCreateWorkspaceIdentity(null),
+  );
+  const taskCreateFeedbackRef = useRef<TaskCreateFeedback | null>(null);
+  const taskCreateSurfaceRef = useRef<AppSurfaceId>('today');
   const inboxConversionActivationRef = useRef<InboxConversionWorkspaceIdentity>(
     createInboxConversionWorkspaceIdentity(null),
   );
@@ -327,6 +355,10 @@ export function App() {
     () => createInboxCaptureWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
+  const taskCreateActivation = useMemo(
+    () => createTaskCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -348,6 +380,14 @@ export function App() {
   const visibleInboxCaptureFeedback =
     inboxCaptureFeedbackState?.activation === inboxCaptureActivation
       ? inboxCaptureFeedbackState.feedback
+      : null;
+  const visibleTaskCreateFeedback =
+    taskCreateFeedbackState?.activation === taskCreateActivation
+      ? taskCreateFeedbackState.feedback
+      : null;
+  const visibleTaskCreateSyncWarning =
+    taskCreateSyncWarningState?.activation === taskCreateActivation
+      ? taskCreateSyncWarningState
       : null;
   const visibleInboxConversionFeedback =
     inboxConversionFeedbackState?.activation === inboxController.activation
@@ -523,6 +563,24 @@ export function App() {
     visibleInboxCaptureFeedback,
   ]);
   useLayoutEffect(() => {
+    const previousActivation = taskCreateActivationRef.current;
+    const previousSurface = taskCreateSurfaceRef.current;
+    taskCreateActivationRef.current = taskCreateActivation;
+    taskCreateFeedbackRef.current = visibleTaskCreateFeedback;
+    taskCreateSurfaceRef.current = activeSurface;
+    if (previousActivation !== taskCreateActivation) {
+      taskCreateCoordinator.invalidate();
+    } else if (previousSurface !== activeSurface || overlayOpen) {
+      taskCreateCoordinator.cancelOpen();
+    }
+  }, [
+    activeSurface,
+    overlayOpen,
+    taskCreateActivation,
+    taskCreateCoordinator,
+    visibleTaskCreateFeedback,
+  ]);
+  useLayoutEffect(() => {
     const previousActivation = inboxConversionActivationRef.current;
     const previousSurface = inboxConversionSurfaceRef.current;
     inboxConversionActivationRef.current = inboxController.activation;
@@ -636,6 +694,7 @@ export function App() {
       automationOutputNavigation.invalidate();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.cancelOpen();
+      taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       if (view === 'assistant') {
@@ -656,6 +715,7 @@ export function App() {
       inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
+      taskCreateCoordinator,
       updatePreferences,
     ],
   );
@@ -696,6 +756,7 @@ export function App() {
       automationOutputNavigation.invalidate();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.invalidate();
+      taskCreateCoordinator.invalidate();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       void workspaceController.activate(workspaceId).catch(() => undefined);
@@ -708,6 +769,7 @@ export function App() {
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
       searchNavigation,
+      taskCreateCoordinator,
       workspaceController,
     ],
   );
@@ -797,6 +859,7 @@ export function App() {
       if (!confirmLeaveNoteDraft()) {
         throw new Error('已取消打开收件箱记录；当前笔记仍保留未保存的更改。');
       }
+      taskCreateCoordinator.cancelOpen();
       try {
         const intent = inboxCaptureCoordinator.beginOpen(
           inboxCaptureActivationRef.current,
@@ -841,6 +904,7 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       prepareInboxSnapshotRefresh,
+      taskCreateCoordinator,
       updatePreferences,
     ],
   );
@@ -872,6 +936,160 @@ export function App() {
         : document.querySelector<HTMLElement>('.page-chrome__actions button:not(:disabled)');
     fallback?.focus({ preventScroll: true });
   }, []);
+  const createManualTask = useCallback(
+    async (workspaceId: string, title: string, planning: TaskPlanning): Promise<void> => {
+      const activation = taskCreateActivationRef.current;
+      const intent = taskCreateCoordinator.beginCreate(activation);
+      taskCreateFeedbackRef.current = null;
+      setTaskCreateFeedbackState(null);
+      try {
+        if (activation.workspaceId !== workspaceId) throw new TaskCreateSupersededError();
+        const commit = await taskController.create(title, planning);
+        if (!taskCreateCoordinator.isCreateCurrent(intent, taskCreateActivationRef.current)) return;
+        if (!commit.committed || commit.createdTask === null) {
+          if (commit.reconciliationWarning) {
+            setTaskCreateSyncWarningState({
+              activation: intent.workspace,
+              requestGeneration: intent.generation,
+              title: commit.createdTask?.title ?? title,
+              message: commit.reconciliationWarning,
+            });
+          }
+          return;
+        }
+        const feedback = taskCreateCoordinator.createFeedback(
+          intent,
+          taskCreateActivationRef.current,
+          commit.createdTask,
+          true,
+        );
+        taskCreateFeedbackRef.current = feedback;
+        setTaskCreateFeedbackState({
+          activation: intent.workspace,
+          feedback,
+        });
+      } catch (error) {
+        if (
+          !taskCreateCoordinator.isCreateCurrent(intent, taskCreateActivationRef.current) ||
+          error instanceof TaskCreateSupersededError
+        ) {
+          return;
+        }
+        throw error;
+      } finally {
+        taskCreateCoordinator.endCreate(intent);
+      }
+    },
+    [taskController, taskCreateCoordinator],
+  );
+  const openManualTask = useCallback(
+    async (feedback: TaskCreateFeedback): Promise<void> => {
+      searchNavigation.invalidate();
+      automationOutputNavigation.invalidate();
+      assistantSavedNoteNavigation.invalidate();
+      inboxCaptureCoordinator.cancelOpen();
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
+      try {
+        const intent = taskCreateCoordinator.beginOpen(taskCreateActivationRef.current, feedback);
+        const assertCurrent = () =>
+          taskCreateCoordinator.assertOpenCurrent(
+            intent,
+            taskCreateActivationRef.current,
+            taskCreateFeedbackRef.current,
+          );
+        const target = await resolveTaskCreateNavigationTarget(
+          intent,
+          taskController.prepareSnapshotRefresh,
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!activeWorkspace || activeWorkspace.id !== target.workspaceId) {
+          throw new TaskCreateSupersededError();
+        }
+        if (!confirmLeaveNoteDraft()) throw new TaskCreateNoteDraftPreservedError();
+        assertCurrent();
+        const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
+        if (
+          !taskCreateCoordinator.dismiss(
+            feedback,
+            taskCreateActivationRef.current,
+            taskCreateFeedbackRef.current,
+          )
+        ) {
+          throw new TaskCreateSupersededError();
+        }
+
+        taskCreateFeedbackRef.current = null;
+        setTaskCreateFeedbackState((current) => (current?.feedback === feedback ? null : current));
+        if (discardConfirmedNoteDraft) {
+          setNotePageGeneration((generation) => generation + 1);
+        }
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setRequestedNoteId(null);
+        setInboxReveal(null);
+        updatePreferences({ activeView: 'tasks' }, true, target.workspaceId);
+        setTaskDialog({
+          mode: 'rename',
+          workspaceId: target.workspaceId,
+          workspaceName: activeWorkspace.name,
+          task: target.task,
+        });
+      } catch (error) {
+        throw taskCreateNavigationError(error);
+      }
+    },
+    [
+      activeWorkspace,
+      assistantSavedNoteNavigation,
+      automationOutputNavigation,
+      confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
+      searchNavigation,
+      taskController.prepareSnapshotRefresh,
+      taskCreateCoordinator,
+      updatePreferences,
+    ],
+  );
+  const dismissTaskCreate = useCallback(
+    (feedback: TaskCreateFeedback): boolean => {
+      if (
+        !taskCreateCoordinator.dismiss(
+          feedback,
+          taskCreateActivationRef.current,
+          taskCreateFeedbackRef.current,
+        )
+      ) {
+        return false;
+      }
+      taskCreateFeedbackRef.current = null;
+      setTaskCreateFeedbackState((current) => (current?.feedback === feedback ? null : current));
+      return true;
+    },
+    [taskCreateCoordinator],
+  );
+  const restoreTaskCreateFocus = useCallback((): void => {
+    const heading = document.querySelector<HTMLElement>('.section-page h1, .today-dashboard h1');
+    heading?.focus({ preventScroll: true });
+    if (document.activeElement === heading) return;
+    document
+      .querySelector<HTMLElement>(
+        '.page-chrome__actions button:not(:disabled), .dashboard-hero__actions button:not(:disabled), .activity-rail button[aria-current="page"]',
+      )
+      ?.focus({ preventScroll: true });
+  }, []);
+  const dismissTaskCreateSyncWarning = useCallback(
+    (requestGeneration: number): void => {
+      setTaskCreateSyncWarningState((current) =>
+        current?.requestGeneration === requestGeneration ? null : current,
+      );
+      window.requestAnimationFrame(restoreTaskCreateFocus);
+    },
+    [restoreTaskCreateFocus],
+  );
 
   const openTaskCreate = useCallback(
     (planning: TaskPlanning) => {
@@ -1210,6 +1428,7 @@ export function App() {
 
   const openAssistantSavedNote = useCallback(
     async (target: AssistantSavedNoteTarget): Promise<void> => {
+      taskCreateCoordinator.cancelOpen();
       try {
         const intent = assistantSavedNoteNavigation.begin(
           assistantSavedNoteActivationRef.current,
@@ -1238,7 +1457,12 @@ export function App() {
         throw assistantSavedNoteNavigationError(error);
       }
     },
-    [assistantSavedNoteNavigation, prepareNoteSnapshotRefresh, updatePreferences],
+    [
+      assistantSavedNoteNavigation,
+      prepareNoteSnapshotRefresh,
+      taskCreateCoordinator,
+      updatePreferences,
+    ],
   );
 
   const convertInboxToTask = useCallback(
@@ -1351,6 +1575,7 @@ export function App() {
 
   const openInboxConversionOutput = useCallback(
     async (feedback: InboxConversionFeedback): Promise<void> => {
+      taskCreateCoordinator.cancelOpen();
       try {
         const intent = inboxConversionNavigation.begin(
           inboxConversionActivationRef.current,
@@ -1402,12 +1627,14 @@ export function App() {
       inboxConversionNavigation,
       noteController.prepareSnapshotRefresh,
       taskController.prepareSnapshotRefresh,
+      taskCreateCoordinator,
       updatePreferences,
     ],
   );
 
   const openAutomationRunOutput = useCallback(
     async (feedback: AutomationRunFeedback): Promise<void> => {
+      taskCreateCoordinator.cancelOpen();
       try {
         const intent = automationOutputNavigation.begin(
           automationOutputActivationRef.current,
@@ -1459,6 +1686,7 @@ export function App() {
       automationOutputNavigation,
       noteController.prepareSnapshotRefresh,
       taskController.prepareSnapshotRefresh,
+      taskCreateCoordinator,
       updatePreferences,
     ],
   );
@@ -1640,6 +1868,7 @@ export function App() {
       }
       automationOutputNavigation.invalidate();
       inboxCaptureCoordinator.cancelOpen();
+      taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
       const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
@@ -1797,6 +2026,7 @@ export function App() {
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
       searchNavigation,
+      taskCreateCoordinator,
       updatePreferences,
       workspaceController,
     ],
@@ -2748,7 +2978,7 @@ export function App() {
             if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开任务窗口。');
             }
-            await taskController.create(title, planning);
+            await createManualTask(taskDialog.workspaceId, title, planning);
           }}
           onRename={async (taskId, title) => {
             if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
@@ -2900,6 +3130,24 @@ export function App() {
         onUndo={inboxController.undoArchive}
         onDismiss={inboxController.dismissUndo}
       >
+        {visibleTaskCreateSyncWarning ? (
+          <TaskCreateSyncWarning
+            title={visibleTaskCreateSyncWarning.title}
+            message={visibleTaskCreateSyncWarning.message}
+            onDismiss={() =>
+              dismissTaskCreateSyncWarning(visibleTaskCreateSyncWarning.requestGeneration)
+            }
+          />
+        ) : null}
+        {visibleTaskCreateFeedback ? (
+          <TaskCreateToast
+            feedback={visibleTaskCreateFeedback}
+            focusBlocked={overlayOpen}
+            onOpen={openManualTask}
+            onDismiss={dismissTaskCreate}
+            onFocusFallback={restoreTaskCreateFocus}
+          />
+        ) : null}
         {visibleInboxCaptureFeedback ? (
           <InboxCaptureToast
             feedback={visibleInboxCaptureFeedback}

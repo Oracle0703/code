@@ -122,6 +122,8 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 任务 v4 也不会导入 `daily.today.tasks` 中的演示任务，或自动转换既有 `task` 分类收件箱条目。任务状态固定为 `todo`、`in_progress`、`completed`；`planned_for` 只保存 Main 计算的本地民用 `YYYY-MM-DD` 或 `NULL`，完成状态与 `completed_at` 必须一致。Renderer 只能提交 Main 快照签发语义下的 `day-0` 至 `day-6` 或 `none` 固定计划意图；Service 在数据库 FIFO 操作真正执行时把 token 映射到民用日期，不能由页面伪造日期、ID、时间戳或来源关系。这个扩展不改变 v4 表结构或当前 schema 版本。
 
+`task:create` 沿用既有输入与通道，在同一个 Main 事务中创建任务，并返回事务后的 `taskSnapshot` 与实际插入的 opaque `createdTaskId`。Today、Tasks 与命令面板中的手动创建成功后仍留在发起页面并显示回执；只有用户显式打开时，Renderer 才 fresh-read 当前工作区任务、只按该 ID 精确复核，并在权威快照提交后进入 Tasks 的编辑界面。目标缺失时会留在原页报错，工作区、页面、反馈或较新请求变化时失败关闭，不会按标题、计划日期或列表位置回退。若 Main 已提交创建但 Renderer 仍无法提交权威快照，创建框会关闭并明确提示刷新且不要重复创建，同时不发布未经确认的成功回执。这个返回契约不新增 schema 或 migration；当前 schema 仍为 v11，`.dwbx` 仍为 v3。
+
 显式收件箱转换在一个事务内创建任务、写入唯一 `source_inbox_entry_id` 并软归档来源条目。任一步失败都会整体回滚；同一来源不能转换两次。成功响应中的 `createdTaskId` 是 Main 在该事务中实际插入的任务 ID。归档工作区中的任务和来源关系继续进入备份，但不能再修改。
 
 笔记 v5 不导入 Renderer 中的演示卡片，也不会因为收件箱分类为 `note` 就自动创建笔记。标题最多 200 个 Unicode code point；正文最多 100,000 个 code point，并把 CRLF/CR 统一为 LF。正文允许 Markdown、普通换行和 Tab，但拒绝 NUL、畸形 Unicode 与不支持的控制字符。创建时 revision 为 1；更新和软归档必须携带当前 `expectedRevision`，并在数据库内只递增一次。已归档笔记和归档工作区笔记不可修改，笔记不提供永久删除。

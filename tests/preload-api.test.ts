@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { WorkbenchApi } from '../src/shared/contracts';
+import type { TaskCreateResult, WorkbenchApi } from '../src/shared/contracts';
 
 const electron = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn(),
@@ -277,6 +277,29 @@ describe('preload task API', () => {
       ['task:update-planning', { workspaceId, taskId, planning: 'none' }],
       ['task:convert-inbox', { workspaceId, entryId, planning: 'day-0' }],
     ]);
+  });
+
+  it('returns the exact task:create result envelope from Main', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const result: TaskCreateResult = {
+      taskSnapshot: {
+        workspaceId,
+        todayDate: '2026-07-26',
+        planningDays: [],
+        tasks: [],
+      },
+      createdTaskId: '423e4567-e89b-42d3-a456-426614174000',
+    };
+    electron.invoke.mockResolvedValueOnce(result as never);
+
+    await expect(
+      api.task.create({ workspaceId, title: '真实任务', planning: 'none' }),
+    ).resolves.toBe(result);
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith('task:create', {
+      workspaceId,
+      title: '真实任务',
+      planning: 'none',
+    });
   });
 });
 

@@ -231,8 +231,10 @@ describe('workspace service', () => {
       title: '恢复后仍在',
       planning: 'day-0',
     });
-    const taskId = taskBeforeArchive.tasks.find(({ title }) => title === '恢复后仍在')?.id;
-    expect(taskId).toBeDefined();
+    const taskId = taskBeforeArchive.createdTaskId;
+    expect(taskBeforeArchive.taskSnapshot.tasks).toContainEqual(
+      expect.objectContaining({ id: taskId, title: '恢复后仍在' }),
+    );
     await service.activateWorkspace({ workspaceId: DEFAULT_ID });
     await service.archiveWorkspace({ workspaceId: SECOND_ID });
     const archived = await service.getWorkspaceArchiveSnapshot();
