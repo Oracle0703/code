@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AutomationCreateResult,
+  ScheduleCreateResult,
   TaskCreateResult,
   WorkbenchApi,
 } from '../src/shared/contracts';
@@ -448,6 +449,40 @@ describe('preload schedule API', () => {
       ],
       ['schedule:archive', { workspaceId, scheduleId, expectedDate, expectedRevision: 2 }],
     ]);
+  });
+
+  it('returns the exact schedule:create result envelope from Main', async () => {
+    const workspaceId = '123e4567-e89b-42d3-a456-426614174000';
+    const createdScheduleId = '623e4567-e89b-42d3-a456-426614174000';
+    const result: ScheduleCreateResult = {
+      scheduleSnapshot: {
+        workspaceId,
+        todayDate: '2026-07-26',
+        planningDays: [],
+        items: [],
+      },
+      createdScheduleId,
+    };
+    electron.invoke.mockResolvedValueOnce(result as never);
+
+    await expect(
+      api.schedule.create({
+        workspaceId,
+        expectedDate: '2026-07-26',
+        title: '精确日程',
+        kind: 'focus',
+        startMinute: 540,
+        endMinute: 600,
+      }),
+    ).resolves.toBe(result);
+    expect(electron.invoke).toHaveBeenCalledExactlyOnceWith('schedule:create', {
+      workspaceId,
+      expectedDate: '2026-07-26',
+      title: '精确日程',
+      kind: 'focus',
+      startMinute: 540,
+      endMinute: 600,
+    });
   });
 });
 

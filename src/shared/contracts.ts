@@ -720,6 +720,11 @@ export interface ScheduleCreateInput {
   readonly endMinute: number;
 }
 
+export interface ScheduleCreateResult {
+  readonly scheduleSnapshot: ScheduleSnapshot;
+  readonly createdScheduleId: string;
+}
+
 export interface ScheduleTargetInput {
   readonly workspaceId: string;
   readonly scheduleId: string;
@@ -1158,7 +1163,7 @@ export interface WorkbenchApi {
   };
   schedule: {
     getSnapshot(input: WorkspaceTargetInput): Promise<ScheduleSnapshot>;
-    create(input: ScheduleCreateInput): Promise<ScheduleSnapshot>;
+    create(input: ScheduleCreateInput): Promise<ScheduleCreateResult>;
     update(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archive(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
   };

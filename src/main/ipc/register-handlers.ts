@@ -42,6 +42,7 @@ import {
   type NoteSnapshot,
   type NoteUpdateInput,
   type ScheduleCreateInput,
+  type ScheduleCreateResult,
   type ScheduleSnapshot,
   type ScheduleTargetInput,
   type ScheduleUpdateInput,
@@ -193,7 +194,7 @@ interface IpcDependencies {
   };
   schedule: {
     getScheduleSnapshot(input: WorkspaceTargetInput): Promise<ScheduleSnapshot>;
-    createScheduleItem(input: ScheduleCreateInput): Promise<ScheduleSnapshot>;
+    createScheduleItem(input: ScheduleCreateInput): Promise<ScheduleCreateResult>;
     updateScheduleItem(input: ScheduleUpdateInput): Promise<ScheduleSnapshot>;
     archiveScheduleItem(input: ScheduleTargetInput): Promise<ScheduleSnapshot>;
   };
