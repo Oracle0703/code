@@ -6,20 +6,25 @@ import type {
   NoteSnapshot,
 } from '../../shared/contracts';
 import {
-  beginPendingNoteCreate,
   convertedNoteFromResult,
   convertedNoteFromSnapshot,
+  createNoteArchiveMutationIntent,
   createdNoteFromResult,
   createNoteRequestIdentity,
+  createNoteUpdateMutationIntent,
   createNoteWorkspaceIdentity,
-  endPendingNoteCreate,
   isNoteRequestCurrent,
   isNoteRequestLatest,
   noteSnapshotForActivation,
+  reconcileNoteArchiveResult,
   reconcileNoteCreateResult,
+  reconcileNoteUpdateResult,
   shouldApplyNoteSnapshot,
+  type NoteArchiveMutationIntent,
+  type NoteMutationSyncWarningTarget,
   type NoteRequestIdentity,
   type NoteSnapshotState,
+  type NoteUpdateMutationIntent,
   type NoteWorkspaceIdentity,
 } from '../note-state';
 
@@ -36,10 +41,43 @@ interface NoteOperationError {
   readonly message: string;
 }
 
+type PendingNoteWrite =
+  | {
+      readonly activation: NoteWorkspaceIdentity;
+      readonly kind: 'create';
+    }
+  | {
+      readonly activation: NoteWorkspaceIdentity;
+      readonly kind: 'mutation';
+      readonly noteId: string;
+      readonly operation: 'update' | 'archive' | 'recover';
+    }
+  | {
+      readonly activation: NoteWorkspaceIdentity;
+      readonly kind: 'conversion';
+      readonly entryId: string;
+    };
+
+type PendingNoteWriteInput =
+  | { readonly kind: 'create' }
+  | {
+      readonly kind: 'mutation';
+      readonly noteId: string;
+      readonly operation: 'update' | 'archive' | 'recover';
+    }
+  | {
+      readonly kind: 'conversion';
+      readonly entryId: string;
+    };
+
 const EMPTY_NOTES: readonly Note[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createNoteWorkspaceIdentity(null));
 const NOTE_CREATE_RECONCILIATION_ERROR =
   '笔记已创建，但当前笔记列表未能同步。请重新读取后查看，避免重复创建。';
+const NOTE_UPDATE_RECONCILIATION_ERROR =
+  '笔记已保存，但当前笔记列表未能同步。请重新读取后查看，避免重复保存。';
+const NOTE_ARCHIVE_RECONCILIATION_ERROR =
+  '笔记已归档，但当前笔记列表未能同步。请重新读取后确认，避免重复归档。';
 
 export interface NoteInboxConversionCommit {
   readonly result: NoteConversionResult;
@@ -54,6 +92,34 @@ export interface NoteCreateCommit {
   readonly reconciliationWarning: string | null;
 }
 
+export interface NoteUpdateCommit {
+  readonly intent: NoteUpdateMutationIntent;
+  readonly result: NoteSnapshot;
+  readonly updatedNote: Note | null;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
+}
+
+export interface NoteArchiveCommit {
+  readonly intent: NoteArchiveMutationIntent;
+  readonly result: NoteSnapshot;
+  readonly confirmed: boolean;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
+}
+
+export type NoteMutationRecovery =
+  | {
+      readonly kind: 'update';
+      readonly updatedNote: Note | null;
+      readonly committed: boolean;
+    }
+  | {
+      readonly kind: 'archive';
+      readonly confirmed: boolean;
+      readonly committed: boolean;
+    };
+
 export function useNoteController(workspaceId: string | null) {
   const activation = useMemo(() => createNoteWorkspaceIdentity(workspaceId), [workspaceId]);
   const activeActivationRef = useRef<NoteWorkspaceIdentity>(activation);
@@ -65,21 +131,13 @@ export function useNoteController(workspaceId: string | null) {
     error: null,
   });
   const [operationErrorState, setOperationErrorState] = useState<NoteOperationError | null>(null);
-  const [pendingNoteOperations, setPendingNoteOperations] = useState<
-    ReadonlyMap<string, NoteWorkspaceIdentity>
-  >(() => new Map());
-  const [pendingCreateWorkspaceIds, setPendingCreateWorkspaceIds] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  const [pendingWrites, setPendingWrites] = useState<ReadonlyMap<string, PendingNoteWrite>>(
+    () => new Map(),
   );
-  const [pendingConversionOperations, setPendingConversionOperations] = useState<
-    ReadonlyMap<string, NoteWorkspaceIdentity>
-  >(() => new Map());
   const requestSequenceRef = useRef(0);
   const latestRequestSequenceRef = useRef(-1);
   const appliedSequenceRef = useRef(-1);
-  const pendingNoteOperationsRef = useRef(new Map<string, NoteWorkspaceIdentity>());
-  const pendingCreateWorkspaceIdsRef = useRef(new Set<string>());
-  const pendingConversionOperationsRef = useRef(new Map<string, NoteWorkspaceIdentity>());
+  const pendingWritesRef = useRef(new Map<string, PendingNoteWrite>());
 
   const setStored = useCallback((value: NoteSnapshotState | null) => {
     storedSnapshotRef.current = value;
@@ -187,62 +245,27 @@ export function useNoteController(workspaceId: string | null) {
     }
   }, [activation, load]);
 
-  const beginPendingNote = useCallback((target: NoteWorkspaceIdentity, noteId: string): boolean => {
-    if (pendingNoteOperationsRef.current.get(noteId) === target) return false;
-    pendingNoteOperationsRef.current = new Map(pendingNoteOperationsRef.current).set(
-      noteId,
-      target,
-    );
-    setPendingNoteOperations(pendingNoteOperationsRef.current);
-    return true;
-  }, []);
-
-  const endPendingNote = useCallback((target: NoteWorkspaceIdentity, noteId: string): void => {
-    if (pendingNoteOperationsRef.current.get(noteId) !== target) return;
-    const next = new Map(pendingNoteOperationsRef.current);
-    next.delete(noteId);
-    pendingNoteOperationsRef.current = next;
-    setPendingNoteOperations(next);
-  }, []);
-
-  const beginPendingCreate = useCallback((target: NoteWorkspaceIdentity): boolean => {
-    const next = beginPendingNoteCreate(pendingCreateWorkspaceIdsRef.current, target.workspaceId);
-    if (next === null) return false;
-    pendingCreateWorkspaceIdsRef.current = new Set(next);
-    setPendingCreateWorkspaceIds(next);
-    return true;
-  }, []);
-
-  const endPendingCreate = useCallback((target: NoteWorkspaceIdentity): void => {
-    const next = endPendingNoteCreate(pendingCreateWorkspaceIdsRef.current, target.workspaceId);
-    if (next === pendingCreateWorkspaceIdsRef.current) return;
-    pendingCreateWorkspaceIdsRef.current = new Set(next);
-    setPendingCreateWorkspaceIds(next);
-  }, []);
-
-  const beginPendingConversion = useCallback(
-    (target: NoteWorkspaceIdentity, entryId: string): boolean => {
-      if (pendingConversionOperationsRef.current.get(entryId) === target) return false;
-      pendingConversionOperationsRef.current = new Map(pendingConversionOperationsRef.current).set(
-        entryId,
-        target,
-      );
-      setPendingConversionOperations(pendingConversionOperationsRef.current);
-      return true;
+  const beginPendingWrite = useCallback(
+    (target: NoteWorkspaceIdentity, pending: PendingNoteWriteInput): PendingNoteWrite | null => {
+      if (target.workspaceId === null || pendingWritesRef.current.has(target.workspaceId)) {
+        return null;
+      }
+      const token = Object.freeze({ ...pending, activation: target }) as PendingNoteWrite;
+      pendingWritesRef.current = new Map(pendingWritesRef.current).set(target.workspaceId, token);
+      setPendingWrites(pendingWritesRef.current);
+      return token;
     },
     [],
   );
 
-  const endPendingConversion = useCallback(
-    (target: NoteWorkspaceIdentity, entryId: string): void => {
-      if (pendingConversionOperationsRef.current.get(entryId) !== target) return;
-      const next = new Map(pendingConversionOperationsRef.current);
-      next.delete(entryId);
-      pendingConversionOperationsRef.current = next;
-      setPendingConversionOperations(next);
-    },
-    [],
-  );
+  const endPendingWrite = useCallback((token: PendingNoteWrite): void => {
+    const workspaceId = token.activation.workspaceId;
+    if (workspaceId === null || pendingWritesRef.current.get(workspaceId) !== token) return;
+    const next = new Map(pendingWritesRef.current);
+    next.delete(workspaceId);
+    pendingWritesRef.current = next;
+    setPendingWrites(next);
+  }, []);
 
   const operationFailure = useCallback(
     (
@@ -263,12 +286,13 @@ export function useNoteController(workspaceId: string | null) {
   const create = useCallback(
     async (title: string, body: string): Promise<NoteCreateCommit> => {
       const target = activeActivationRef.current;
-      if (target.workspaceId === null || !beginPendingCreate(target)) {
+      const pending = beginPendingWrite(target, { kind: 'create' });
+      if (target.workspaceId === null || pending === null) {
         throw new Error('这个工作区正在创建另一篇笔记。');
       }
       const request = beginRequest(target);
       if (!request) {
-        endPendingCreate(target);
+        endPendingWrite(pending);
         throw new Error('当前工作区不可用，无法创建笔记。');
       }
       setOperationErrorState(null);
@@ -314,14 +338,14 @@ export function useNoteController(workspaceId: string | null) {
               : null,
         };
       } finally {
-        endPendingCreate(request.workspace);
+        endPendingWrite(pending);
       }
     },
     [
       applySnapshot,
-      beginPendingCreate,
+      beginPendingWrite,
       beginRequest,
-      endPendingCreate,
+      endPendingWrite,
       operationFailure,
       prepareSnapshotRefresh,
       requestIsCurrent,
@@ -364,67 +388,196 @@ export function useNoteController(workspaceId: string | null) {
   );
 
   const update = useCallback(
-    async (note: Note, title: string, body: string): Promise<Note> => {
+    async (note: Note, title: string, body: string): Promise<NoteUpdateCommit> => {
       const target = activeActivationRef.current;
-      if (target.workspaceId === null || !beginPendingNote(target, note.id)) {
-        throw new Error('这篇笔记正在保存。');
+      if (target.workspaceId === null) {
+        throw new Error('当前工作区不可用，无法保存笔记。');
+      }
+      const intent = createNoteUpdateMutationIntent(target.workspaceId, note, title, body);
+      const pending = beginPendingWrite(target, {
+        kind: 'mutation',
+        noteId: intent.originalNote.id,
+        operation: 'update',
+      });
+      if (pending === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
       }
       const request = beginRequest(target);
       if (!request) {
-        endPendingNote(target, note.id);
+        endPendingWrite(pending);
         throw new Error('当前工作区不可用，无法保存笔记。');
       }
       setOperationErrorState(null);
       try {
-        const snapshot = await window.workbench.note.update({
-          workspaceId: request.workspaceId,
-          noteId: note.id,
-          title,
-          body,
-          expectedRevision: note.revision,
+        let result: NoteSnapshot;
+        try {
+          result = await window.workbench.note.update({
+            workspaceId: request.workspaceId,
+            noteId: intent.originalNote.id,
+            title: intent.title,
+            body: intent.body,
+            expectedRevision: intent.originalNote.revision,
+          });
+        } catch (error) {
+          throw operationFailure(
+            error,
+            request.workspace,
+            '笔记保存失败，可能已在其他操作中更新。',
+          );
+        }
+
+        const reconciliation = await reconcileNoteUpdateResult({
+          intent,
+          resultSnapshot: result,
+          commitResultSnapshot: () => applySnapshot(result, request),
+          getCommittedSnapshot: () =>
+            noteSnapshotForActivation(request.workspace, storedSnapshotRef.current),
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
         });
-        applySnapshot(snapshot, request);
-        const updated =
-          snapshot.workspaceId === request.workspaceId
-            ? snapshot.notes.find(({ id }) => id === note.id)
-            : undefined;
-        if (!updated) throw new Error('The updated note was not returned.');
-        return updated;
-      } catch (error) {
-        throw operationFailure(error, request.workspace, '笔记保存失败，可能已在其他操作中更新。');
+
+        return {
+          intent,
+          result,
+          updatedNote: reconciliation.authoritativeNote,
+          committed: reconciliation.committed,
+          reconciliationWarning: reconciliation.committed ? null : NOTE_UPDATE_RECONCILIATION_ERROR,
+        };
       } finally {
-        endPendingNote(request.workspace, note.id);
+        endPendingWrite(pending);
       }
     },
-    [applySnapshot, beginPendingNote, beginRequest, endPendingNote, operationFailure],
+    [
+      applySnapshot,
+      beginPendingWrite,
+      beginRequest,
+      endPendingWrite,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
   );
 
   const archive = useCallback(
-    async (note: Note): Promise<void> => {
+    async (note: Note): Promise<NoteArchiveCommit> => {
       const target = activeActivationRef.current;
-      if (target.workspaceId === null || !beginPendingNote(target, note.id)) return;
+      if (target.workspaceId === null) {
+        throw new Error('当前工作区不可用，无法归档笔记。');
+      }
+      const intent = createNoteArchiveMutationIntent(target.workspaceId, note);
+      const pending = beginPendingWrite(target, {
+        kind: 'mutation',
+        noteId: intent.originalNote.id,
+        operation: 'archive',
+      });
+      if (pending === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
+      }
       const request = beginRequest(target);
       if (!request) {
-        endPendingNote(target, note.id);
-        return;
+        endPendingWrite(pending);
+        throw new Error('当前工作区不可用，无法归档笔记。');
       }
       setOperationErrorState(null);
       try {
-        applySnapshot(
-          await window.workbench.note.archive({
+        let result: NoteSnapshot;
+        try {
+          result = await window.workbench.note.archive({
             workspaceId: request.workspaceId,
-            noteId: note.id,
-            expectedRevision: note.revision,
-          }),
-          request,
-        );
-      } catch (error) {
-        throw operationFailure(error, request.workspace, '笔记归档失败，请重试。');
+            noteId: intent.originalNote.id,
+            expectedRevision: intent.originalNote.revision,
+          });
+        } catch (error) {
+          throw operationFailure(error, request.workspace, '笔记归档失败，请重试。');
+        }
+
+        const reconciliation = await reconcileNoteArchiveResult({
+          intent,
+          resultSnapshot: result,
+          commitResultSnapshot: () => applySnapshot(result, request),
+          getCommittedSnapshot: () =>
+            noteSnapshotForActivation(request.workspace, storedSnapshotRef.current),
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
+        });
+
+        return {
+          intent,
+          result,
+          confirmed: reconciliation.confirmed,
+          committed: reconciliation.committed,
+          reconciliationWarning: reconciliation.committed
+            ? null
+            : NOTE_ARCHIVE_RECONCILIATION_ERROR,
+        };
       } finally {
-        endPendingNote(request.workspace, note.id);
+        endPendingWrite(pending);
       }
     },
-    [applySnapshot, beginPendingNote, beginRequest, endPendingNote, operationFailure],
+    [
+      applySnapshot,
+      beginPendingWrite,
+      beginRequest,
+      endPendingWrite,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
+  );
+
+  const recoverNoteMutation = useCallback(
+    async (warning: NoteMutationSyncWarningTarget): Promise<NoteMutationRecovery> => {
+      const target = activeActivationRef.current;
+      if (
+        target.workspaceId === null ||
+        target.workspaceId !== warning.intent.expectedWorkspaceId
+      ) {
+        return warning.kind === 'update'
+          ? { kind: 'update', updatedNote: null, committed: false }
+          : { kind: 'archive', confirmed: false, committed: false };
+      }
+      const pending = beginPendingWrite(target, {
+        kind: 'mutation',
+        noteId: warning.intent.originalNote.id,
+        operation: 'recover',
+      });
+      if (pending === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
+      }
+
+      try {
+        const reconciliationInput = {
+          resultSnapshot: warning.resultSnapshot,
+          commitResultSnapshot: () => false,
+          getCommittedSnapshot: () => noteSnapshotForActivation(target, storedSnapshotRef.current),
+          prepareSnapshotRefresh,
+          isCurrent: () => activeActivationRef.current === target,
+        };
+        if (warning.kind === 'update') {
+          const reconciliation = await reconcileNoteUpdateResult({
+            ...reconciliationInput,
+            intent: warning.intent,
+          });
+          return {
+            kind: 'update',
+            updatedNote: reconciliation.authoritativeNote,
+            committed: reconciliation.committed,
+          };
+        }
+        const reconciliation = await reconcileNoteArchiveResult({
+          ...reconciliationInput,
+          intent: warning.intent,
+        });
+        return {
+          kind: 'archive',
+          confirmed: reconciliation.confirmed,
+          committed: reconciliation.committed,
+        };
+      } finally {
+        endPendingWrite(pending);
+      }
+    },
+    [beginPendingWrite, endPendingWrite, prepareSnapshotRefresh],
   );
 
   const convertInbox = useCallback(
@@ -433,12 +586,13 @@ export function useNoteController(workspaceId: string | null) {
       shouldPublishFailure: () => boolean,
     ): Promise<NoteInboxConversionCommit> => {
       const target = activeActivationRef.current;
-      if (target.workspaceId === null || !beginPendingConversion(target, entryId)) {
+      const pending = beginPendingWrite(target, { kind: 'conversion', entryId });
+      if (target.workspaceId === null || pending === null) {
         throw new Error('这条记录正在转换。');
       }
       const request = beginRequest(target);
       if (!request) {
-        endPendingConversion(target, entryId);
+        endPendingWrite(pending);
         throw new Error('当前工作区不可用，无法转换记录。');
       }
       setOperationErrorState(null);
@@ -461,10 +615,10 @@ export function useNoteController(workspaceId: string | null) {
         const committed = createdNote !== null && applySnapshot(result.noteSnapshot, request);
         return { result, createdNote, committed };
       } finally {
-        endPendingConversion(request.workspace, entryId);
+        endPendingWrite(pending);
       }
     },
-    [applySnapshot, beginPendingConversion, beginRequest, endPendingConversion, operationFailure],
+    [applySnapshot, beginPendingWrite, beginRequest, endPendingWrite, operationFailure],
   );
 
   const getCommittedConvertedNote = useCallback(
@@ -503,23 +657,16 @@ export function useNoteController(workspaceId: string | null) {
           status: 'loading' as const,
           error: null,
         };
+  const pendingWrite =
+    activation.workspaceId === null ? undefined : pendingWrites.get(activation.workspaceId);
   const pendingNoteIds = useMemo(
-    () =>
-      new Set(
-        [...pendingNoteOperations]
-          .filter(([, target]) => target === activation)
-          .map(([noteId]) => noteId),
-      ),
-    [activation, pendingNoteOperations],
+    () => (pendingWrite?.kind === 'mutation' ? new Set([pendingWrite.noteId]) : new Set<string>()),
+    [pendingWrite],
   );
   const pendingConversionEntryIds = useMemo(
     () =>
-      new Set(
-        [...pendingConversionOperations]
-          .filter(([, target]) => target === activation)
-          .map(([entryId]) => entryId),
-      ),
-    [activation, pendingConversionOperations],
+      pendingWrite?.kind === 'conversion' ? new Set([pendingWrite.entryId]) : new Set<string>(),
+    [pendingWrite],
   );
   const operationErrorMessage =
     operationErrorState?.activation === activation ? operationErrorState.message : null;
@@ -531,8 +678,8 @@ export function useNoteController(workspaceId: string | null) {
     loadError: visibleLoadState.error,
     operationError: operationErrorMessage,
     pendingNoteIds,
-    pendingCreate:
-      activation.workspaceId !== null && pendingCreateWorkspaceIds.has(activation.workspaceId),
+    pendingCreate: pendingWrite?.kind === 'create',
+    pendingMutation: pendingWrite?.kind === 'mutation',
     pendingConversionEntryIds,
     retry: () => {
       const current = activeActivationRef.current;
@@ -551,6 +698,7 @@ export function useNoteController(workspaceId: string | null) {
     recoverCreatedNote,
     update,
     archive,
+    recoverNoteMutation,
     convertInbox,
   };
 }

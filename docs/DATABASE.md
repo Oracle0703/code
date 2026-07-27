@@ -128,11 +128,15 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 笔记 v5 不导入 Renderer 中的演示卡片，也不会因为收件箱分类为 `note` 就自动创建笔记。标题最多 200 个 Unicode code point；正文最多 100,000 个 code point，并把 CRLF/CR 统一为 LF。正文允许 Markdown、普通换行和 Tab，但拒绝 NUL、畸形 Unicode 与不支持的控制字符。创建时 revision 为 1；更新和软归档必须携带当前 `expectedRevision`，并在数据库内只递增一次。已归档笔记和归档工作区笔记不可修改，笔记不提供永久删除。
 
-`note:create` 沿用既有输入与通道，在同一个 Main 事务中返回事务后的 `noteSnapshot` 与实际插入的 opaque `createdNoteId`。Notes 页面只在该 ID 唯一存在且快照真正提交后清除草稿并进入新笔记；若事务快照被较新读取淘汰，Renderer 最多再做两次权威读取，并在每个异步边界后复核当前 workspace activation。Main 已落库但仍无法同步时，App 按 workspace/page generation activation 保留 exact ID 和原内容；即使 Notes 组件因同工作区切页而卸载，返回后仍会重建不可再次提交的已落库内容，并显示“重新读取且不要重复保存”的独立警告。工作区切换、数据替换或精确恢复会使旧状态失效；真正的 IPC 创建失败才保留可编辑草稿供重试。这个协调不新增 schema、migration 或 IPC 通道；当前 schema 仍为 v11，`.dwbx` 仍为 v3。
+`note:create` 沿用既有输入与通道，在同一个 Main 事务中返回事务后的 `noteSnapshot` 与实际插入的 opaque `createdNoteId`。Notes 页面只在该 ID 唯一存在且快照真正提交后清除草稿并进入新笔记；若事务快照被较新读取淘汰，Renderer 最多再做两次权威读取，并在每个异步边界后复核当前 workspace activation。Main 已落库但仍无法同步时，App 按 workspace/page generation activation 保留 exact ID 和原内容；即使 Notes 组件因同工作区切页而卸载，返回后仍会重建不可再次提交的已落库内容，并显示“重新读取且不要重复保存”的独立警告。确认进行中或警告未恢复时会阻止工作区切换、新建或归档当前工作区以及跨工作区搜索；只有精确恢复或真正获批并提交的数据替换才使旧状态失效。真正的 IPC 创建失败才保留可编辑草稿供重试。这个协调不新增 schema、migration 或 IPC 通道；当前 schema 仍为 v11，`.dwbx` 仍为 v3。
+
+`note:update` 和 `note:archive` 继续返回事务后的完整 `noteSnapshot`，但 Renderer 不把 Main 已成功的响应降格为“可以再次提交”的错误。更新只接受同一工作区内唯一匹配原 ID、规范化标题/正文、预期 revision、来源 ID 与创建时间的行；实质更新要求时间不回拨，无内容变化则 revision 与更新时间都必须保持原值。归档只在同一工作区已提交活动快照中确认该 ID 已消失。事务响应无法提交时，Renderer 会检查最新 committed ref、最多执行两次权威读取并做最终 ref 复查；任一 `commit=false`、身份漂移、工作区/activation 变化或迟到结果都失败关闭。
+
+Main 已提交而 Renderer 仍无法确认时，App 保存精确 mutation intent 与事务快照，跨同工作区切页重建只读的已保存或已归档内容，并要求重新读取、禁止重复保存或归档；更新只有在精确行提交后才清草稿，归档只有在缺失事实提交后才清 selection。同一工作区的手动笔记创建、更新、归档、收件箱转笔记、AI 保存和立即运行笔记输出覆盖完整写入与对账周期的单飞边界；任何精确笔记警告未恢复时继续阻断竞争写入、工作区变更和跨工作区搜索，恢复读取重新持有同一协调器。取消备份恢复、取消原生替换确认或导入失败都不清除该恢复态，只有已批准并提交的数据替换才使其失效。这个变化只收紧 Renderer 发布契约，不改变 Main 事务、IPC、schema v11 或 `.dwbx` v3。
 
 显式“收件箱转笔记”在一个事务内归档来源、创建笔记并建立唯一来源关系。任务与笔记共享同一个来源排他边界：同一收件箱条目不能同时转换为任务和笔记，已关联来源不能恢复。转换任一步失败都会整体回滚；成功响应中的 `createdNoteId` 是 Main 在该事务中实际插入的笔记 ID。
 
-两个 created ID 只扩展既有转换响应，不新增 IPC 通道、schema 或 migration。Main 的事务提交成功后，Renderer 必须同时提交目标快照与已归档来源的收件箱快照；若响应只同步一侧，会最多再做两轮权威读取，只接受当前工作区内唯一匹配 created ID 与原始 `sourceInboxEntryId` 的目标，并确认来源不再出现在活动收件箱中。任一侧仍无法确认时，界面会保留 exact ID 与来源 ID 的独立警告，要求重新读取且不要重复转换；同一工作区的所有转任务与转笔记 mutation 也共享单飞锁，第二个来源不能静默淘汰仍在对账的第一笔转换。转换成功后界面仍停留在 Inbox；用户显式选择打开时，Renderer 会 fresh-read 对应快照，同时复核精确 created ID 与原始来源，并只在快照提交到当前工作区 activation 后导航。目标缺失、来源变化、切页、较新反馈、工作区 A→B→A、已获批的数据替换或迟到响应都不会按标题、时间或列表位置回退到其他记录；取消恢复或导入失败不会提前清除原数据库对应的警告。
+两个 created ID 只扩展既有转换响应，不新增 IPC 通道、schema 或 migration。Main 的事务提交成功后，Renderer 必须同时提交目标快照与已归档来源的收件箱快照；若响应只同步一侧，会最多再做两轮权威读取，只接受当前工作区内唯一匹配 created ID 与原始 `sourceInboxEntryId` 的目标，并确认来源不再出现在活动收件箱中。任一侧仍无法确认时，界面会保留 exact ID 与来源 ID 的独立警告，要求重新读取且不要重复转换；同一工作区的所有转任务与转笔记 mutation 也共享单飞锁，第二个来源不能静默淘汰仍在对账的第一笔转换。转笔记警告还会阻断竞争笔记写入、工作区变更与跨工作区搜索，且恢复读取重新持有笔记协调器；转任务警告仍按既有 activation 语义被工作区切换淘汰。转换成功后界面仍停留在 Inbox；用户显式选择打开时，Renderer 会 fresh-read 对应快照，同时复核精确 created ID 与原始来源，并只在快照提交到当前工作区 activation 后导航。目标缺失、来源变化、切页、较新反馈、工作区 A→B→A、已获批的数据替换或迟到响应都不会按标题、时间或列表位置回退到其他记录；取消恢复或导入失败不会提前清除原数据库对应的警告。
 
 日程 v5 保存真实的单日时间段，不包含重复、提醒、通知或外部日历同步。类型固定为 `focus`、`meeting`、`review`、`personal`；`scheduled_for` 是本地民用 `YYYY-MM-DD`，时间范围使用 `start_minute`/`end_minute`，满足 `0 <= start < end <= 1440`。Renderer 提交的 `expectedDate` 必须位于 Main 在数据库 FIFO 操作执行时计算的 `[todayDate, todayDate + 6]` 窗口，不能越过过去或第 8 天；更新和软归档也必须携带当前 revision。日程日期不可原地修改，归档项和归档工作区日程不可再修改，日程不提供永久删除。这个扩展不改变 v5 表结构、当前 schema v11 或 `.dwbx` v3。
 

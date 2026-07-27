@@ -51,6 +51,7 @@ import {
   type ScheduleKind,
   type SearchResult,
   type TaskPlanning,
+  type WorkspaceColor,
 } from '../shared/contracts';
 import {
   ASSISTANT_API_KEY_MAX_LENGTH,
@@ -96,7 +97,13 @@ import { useAutomationController } from './hooks/useAutomationController';
 import { useDataManagementController } from './hooks/useDataManagementController';
 import { useFocusController } from './hooks/useFocusController';
 import { useGlobalSearchController } from './hooks/useGlobalSearchController';
-import { useNoteController } from './hooks/useNoteController';
+import {
+  useNoteController,
+  type NoteArchiveCommit,
+  type NoteCreateCommit,
+  type NoteMutationRecovery,
+  type NoteUpdateCommit,
+} from './hooks/useNoteController';
 import { useScheduleController } from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
@@ -106,10 +113,19 @@ import {
   convertedNoteFromSnapshot,
   createNoteWorkspaceIdentity,
   isNoteCreateNavigationBlocked,
+  isNoteMutationNavigationBlocked,
   noteCreateSyncWarningForActivation,
+  noteMutationSyncWarningForActivation,
   type NoteCreateSyncWarningState,
   type NoteCreateSyncWarningTarget,
+  type NoteMutationSyncWarningState,
+  type NoteMutationSyncWarningTarget,
+  type NoteWorkspaceIdentity,
 } from './note-state';
+import {
+  NoteMutationCoordinator,
+  type NoteMutationCoordinatorIntent,
+} from './note-mutation-coordinator';
 import {
   AssistantSavedNoteNavigationCoordinator,
   AssistantSavedNoteSaveGate,
@@ -357,6 +373,36 @@ type AutomationRunPublication =
       readonly refreshError: string | null;
     };
 
+type NoteMutationSyncWarningPublication = NoteMutationSyncWarningState & {
+  readonly focusActionOnMount: boolean;
+  readonly refreshing: boolean;
+  readonly refreshError: string | null;
+};
+
+function noteUpdateSyncWarning(commit: NoteUpdateCommit): NoteMutationSyncWarningTarget {
+  return {
+    kind: 'update',
+    intent: commit.intent,
+    resultSnapshot: commit.result,
+    title: commit.intent.title,
+    message:
+      commit.reconciliationWarning ??
+      '笔记已保存，但当前笔记列表未能同步。请重新读取后查看，避免重复保存。',
+  };
+}
+
+function noteArchiveSyncWarning(commit: NoteArchiveCommit): NoteMutationSyncWarningTarget {
+  return {
+    kind: 'archive',
+    intent: commit.intent,
+    resultSnapshot: commit.result,
+    title: commit.intent.originalNote.title,
+    message:
+      commit.reconciliationWarning ??
+      '笔记已归档，但当前笔记列表未能同步。请重新读取后确认，避免重复归档。',
+  };
+}
+
 function focusAutomationActivityRailAnchor(): void {
   document
     .querySelector<HTMLButtonElement>('.activity-rail button[aria-label="自动化"]')
@@ -400,6 +446,8 @@ export function App() {
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
   const [noteCreateSyncWarningState, setNoteCreateSyncWarningState] =
     useState<NoteCreateSyncWarningState | null>(null);
+  const [noteMutationSyncWarningState, setNoteMutationSyncWarningState] =
+    useState<NoteMutationSyncWarningPublication | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [assistantSurfaceOpen, setAssistantSurfaceOpen] = useState(false);
   const [assistantEntry, setAssistantEntry] = useState<{
@@ -490,6 +538,7 @@ export function App() {
     () => new AssistantSavedNoteNavigationCoordinator(),
   );
   const [assistantSavedNoteSaveGate] = useState(() => new AssistantSavedNoteSaveGate());
+  const [noteMutationCoordinator] = useState(() => new NoteMutationCoordinator());
   const [focusTaskCompletionCoordinator] = useState(() => new FocusTaskCompletionCoordinator());
   const [focusTaskCompletionGate] = useState(() => new FocusTaskCompletionGate());
   const [maximized, setMaximized] = useState(false);
@@ -547,6 +596,8 @@ export function App() {
   const focusTaskCompletionSurfaceRef = useRef<AppSurfaceId>('today');
   const noteDraftDirtyRef = useRef(false);
   const noteCreateActivationRef = useRef(createNoteWorkspaceIdentity(null));
+  const noteCreateSyncWarningRef = useRef<NoteCreateSyncWarningState | null>(null);
+  const noteMutationSyncWarningRef = useRef<NoteMutationSyncWarningPublication | null>(null);
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
   const snapshot = workspaceController.snapshot;
@@ -651,12 +702,19 @@ export function App() {
     noteCreateActivation,
     noteCreateSyncWarningState,
   );
+  const visibleNoteMutationSyncWarningTarget = noteMutationSyncWarningForActivation(
+    noteCreateActivation,
+    noteMutationSyncWarningState,
+  );
+  const visibleNoteMutationSyncWarning =
+    visibleNoteMutationSyncWarningTarget === noteMutationSyncWarningState
+      ? noteMutationSyncWarningState
+      : null;
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const getCommittedTaskSnapshot = taskController.getCommittedSnapshot;
   const getCommittedNoteSnapshot = noteController.getCommittedSnapshot;
   const prepareTaskSnapshotRefresh = taskController.prepareSnapshotRefresh;
-  const createNote = noteController.create;
   const prepareNoteSnapshotRefresh = noteController.prepareSnapshotRefresh;
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
   const focusController = useFocusController(snapshot?.currentWorkspaceId ?? null);
@@ -703,6 +761,12 @@ export function App() {
     snapshot?.currentWorkspaceId === undefined
       ? null
       : (automationRunActivities.get(snapshot.currentWorkspaceId) ?? null);
+  const externalNoteMutationBlockMessage =
+    visibleInboxConversionSyncWarning?.feedback.outputKind === 'note'
+      ? '请返回收件箱重新读取已转换笔记'
+      : visibleAutomationRunSyncWarning?.outputKind === 'note'
+        ? '请返回自动化重新读取运行输出'
+        : null;
   const automationRunBlocked =
     snapshot?.currentWorkspaceId !== undefined &&
     (visibleAutomationRunActivity !== null || visibleAutomationRunSyncWarning !== null);
@@ -1177,25 +1241,322 @@ export function App() {
     (dirty: boolean) => synchronizeDirtyDraft(noteDraftDirtyRef, setNoteDraftDirty, dirty),
     [],
   );
-  const publishNoteCreateSyncWarning = useCallback(
-    (warning: NoteCreateSyncWarningTarget): void => {
-      const activation = noteCreateActivation;
+  const publishNoteCreateSyncWarningForActivation = useCallback(
+    (activation: NoteWorkspaceIdentity, warning: NoteCreateSyncWarningTarget): void => {
       if (noteCreateActivationRef.current !== activation) return;
       updateNoteDraftDirty(false);
-      setNoteCreateSyncWarningState({ activation, ...warning });
+      const publication = { activation, ...warning };
+      noteCreateSyncWarningRef.current = publication;
+      setNoteCreateSyncWarningState(publication);
     },
-    [noteCreateActivation, updateNoteDraftDirty],
+    [updateNoteDraftDirty],
+  );
+  const publishNoteCreateSyncWarning = useCallback(
+    (warning: NoteCreateSyncWarningTarget): void => {
+      publishNoteCreateSyncWarningForActivation(noteCreateActivation, warning);
+    },
+    [noteCreateActivation, publishNoteCreateSyncWarningForActivation],
   );
   const resolveNoteCreateSyncWarning = useCallback(
     (warning: NoteCreateSyncWarningTarget): void => {
       const activation = noteCreateActivation;
       if (noteCreateActivationRef.current !== activation) return;
-      setNoteCreateSyncWarningState((current) =>
-        clearResolvedNoteCreateSyncWarning(current, activation, warning),
+      const next = clearResolvedNoteCreateSyncWarning(
+        noteCreateSyncWarningRef.current,
+        activation,
+        warning,
       );
+      noteCreateSyncWarningRef.current = next;
+      setNoteCreateSyncWarningState(next);
     },
     [noteCreateActivation],
   );
+  const publishNoteMutationSyncWarningForActivation = useCallback(
+    (
+      activation: NoteWorkspaceIdentity,
+      warning: NoteMutationSyncWarningTarget,
+      focusActionOnMount: boolean,
+    ): void => {
+      if (noteCreateActivationRef.current !== activation) return;
+      updateNoteDraftDirty(false);
+      const current = noteMutationSyncWarningRef.current;
+      const publication: NoteMutationSyncWarningPublication =
+        current?.activation === activation &&
+        current.kind === warning.kind &&
+        current.intent === warning.intent &&
+        current.resultSnapshot === warning.resultSnapshot
+          ? {
+              ...current,
+              focusActionOnMount: current.focusActionOnMount || focusActionOnMount,
+            }
+          : {
+              activation,
+              ...warning,
+              focusActionOnMount,
+              refreshing: false,
+              refreshError: null,
+            };
+      noteMutationSyncWarningRef.current = publication;
+      setNoteMutationSyncWarningState(publication);
+    },
+    [updateNoteDraftDirty],
+  );
+  const publishNoteMutationSyncWarning = useCallback(
+    (warning: NoteMutationSyncWarningTarget, focusActionOnMount: boolean): void => {
+      publishNoteMutationSyncWarningForActivation(
+        noteCreateActivation,
+        warning,
+        focusActionOnMount,
+      );
+    },
+    [noteCreateActivation, publishNoteMutationSyncWarningForActivation],
+  );
+  const noteWriteIsBlocked = useCallback((activation: NoteWorkspaceIdentity): boolean => {
+    const workspaceId = activation.workspaceId;
+    const inboxWarning = inboxConversionSyncWarningRef.current;
+    const automationPublication =
+      workspaceId === null ? null : automationRunPublicationsRef.current.get(workspaceId);
+    return (
+      noteCreateSyncWarningRef.current?.activation === activation ||
+      noteMutationSyncWarningRef.current?.activation === activation ||
+      (workspaceId !== null &&
+        inboxWarning?.activation.workspaceId === workspaceId &&
+        inboxWarning.feedback.outputKind === 'note') ||
+      (automationPublication?.kind === 'warning' &&
+        automationPublication.feedback.outputKind === 'note')
+    );
+  }, []);
+  const noteWorkspaceChangeIsBlocked = useCallback((): boolean => {
+    const activation = noteCreateActivationRef.current;
+    return (
+      noteMutationCoordinator.isPending(activation.workspaceId) || noteWriteIsBlocked(activation)
+    );
+  }, [noteMutationCoordinator, noteWriteIsBlocked]);
+  const assertNoteOutputNavigationAvailable = useCallback(
+    (workspaceId: string): void => {
+      const activation = noteCreateActivationRef.current;
+      if (activation.workspaceId !== workspaceId) {
+        throw new Error('当前工作区已变化，无法打开刚创建的笔记。');
+      }
+      if (noteMutationCoordinator.isPending(workspaceId) || noteWriteIsBlocked(activation)) {
+        throw new Error('笔记写入仍在确认，请先返回笔记页面完成重新读取，再打开该笔记。');
+      }
+    },
+    [noteMutationCoordinator, noteWriteIsBlocked],
+  );
+  const noteWorkspaceChangeBlocked = noteWorkspaceChangeIsBlocked();
+  const createNote = useCallback(
+    async (title: string, body: string): Promise<NoteCreateCommit> => {
+      const activation = noteCreateActivationRef.current;
+      if (noteWriteIsBlocked(activation)) {
+        throw new Error('请先重新读取上一项已提交的笔记写入，再继续创建笔记。');
+      }
+      const intent = noteMutationCoordinator.begin(activation, 'create');
+      if (intent === null) throw new Error('这个工作区正在处理另一项笔记写入。');
+      try {
+        const commit = await noteController.create(title, body);
+        const publicationActivation = noteCreateActivationRef.current;
+        if (
+          !commit.committed &&
+          noteMutationCoordinator.canPublishWarning(intent, publicationActivation)
+        ) {
+          publishNoteCreateSyncWarningForActivation(publicationActivation, {
+            result: commit.result,
+            title,
+            body,
+            message:
+              commit.reconciliationWarning ??
+              '笔记已创建，但当前笔记列表未能同步。请重新读取后查看，避免重复创建。',
+          });
+        }
+        return commit;
+      } finally {
+        noteMutationCoordinator.end(intent);
+      }
+    },
+    [
+      noteController,
+      noteMutationCoordinator,
+      noteWriteIsBlocked,
+      publishNoteCreateSyncWarningForActivation,
+    ],
+  );
+  const recoverCreatedNote = useCallback(
+    async (result: Parameters<typeof noteController.recoverCreatedNote>[0]) => {
+      const activation = noteCreateActivationRef.current;
+      const warning = noteCreateSyncWarningRef.current;
+      if (
+        warning?.activation !== activation ||
+        warning.result.createdNoteId !== result.createdNoteId
+      ) {
+        return null;
+      }
+      const coordinatorIntent = noteMutationCoordinator.begin(activation, 'recover');
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在确认另一项笔记写入。');
+      }
+      try {
+        return await noteController.recoverCreatedNote(result);
+      } finally {
+        noteMutationCoordinator.end(coordinatorIntent);
+      }
+    },
+    [noteController, noteMutationCoordinator],
+  );
+  const updateNote = useCallback(
+    async (note: Parameters<typeof noteController.update>[0], title: string, body: string) => {
+      const activation = noteCreateActivationRef.current;
+      if (noteWriteIsBlocked(activation)) {
+        throw new Error('请先重新读取上一项已提交的笔记写入，再继续保存。');
+      }
+      const coordinatorIntent = noteMutationCoordinator.begin(activation, 'update');
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
+      }
+      try {
+        const commit = await noteController.update(note, title, body);
+        const publicationActivation = noteCreateActivationRef.current;
+        if (
+          !commit.committed &&
+          noteMutationCoordinator.canPublishWarning(coordinatorIntent, publicationActivation)
+        ) {
+          publishNoteMutationSyncWarningForActivation(
+            publicationActivation,
+            noteUpdateSyncWarning(commit),
+            false,
+          );
+        }
+        return commit;
+      } finally {
+        noteMutationCoordinator.end(coordinatorIntent);
+      }
+    },
+    [
+      noteController,
+      noteMutationCoordinator,
+      noteWriteIsBlocked,
+      publishNoteMutationSyncWarningForActivation,
+    ],
+  );
+  const archiveNote = useCallback(
+    async (note: Parameters<typeof noteController.archive>[0]) => {
+      const activation = noteCreateActivationRef.current;
+      if (noteWriteIsBlocked(activation)) {
+        throw new Error('请先重新读取上一项已提交的笔记写入，再继续归档。');
+      }
+      const coordinatorIntent = noteMutationCoordinator.begin(activation, 'archive');
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
+      }
+      try {
+        const commit = await noteController.archive(note);
+        const publicationActivation = noteCreateActivationRef.current;
+        if (
+          !commit.committed &&
+          noteMutationCoordinator.canPublishWarning(coordinatorIntent, publicationActivation)
+        ) {
+          publishNoteMutationSyncWarningForActivation(
+            publicationActivation,
+            noteArchiveSyncWarning(commit),
+            false,
+          );
+        }
+        return commit;
+      } finally {
+        noteMutationCoordinator.end(coordinatorIntent);
+      }
+    },
+    [
+      noteController,
+      noteMutationCoordinator,
+      noteWriteIsBlocked,
+      publishNoteMutationSyncWarningForActivation,
+    ],
+  );
+  const refreshNoteMutationSyncWarning = useCallback(
+    async (warning: NoteMutationSyncWarningTarget): Promise<NoteMutationRecovery> => {
+      const publication = noteMutationSyncWarningRef.current;
+      if (publication === null || publication !== warning) {
+        throw new Error('这项笔记同步状态已被较新的结果替代。');
+      }
+      const coordinatorIntent = noteMutationCoordinator.begin(publication.activation, 'recover');
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
+      }
+      const isSamePublication = (
+        current: NoteMutationSyncWarningPublication | null,
+      ): current is NoteMutationSyncWarningPublication =>
+        current?.activation === publication.activation &&
+        current.kind === publication.kind &&
+        current.intent === publication.intent &&
+        current.resultSnapshot === publication.resultSnapshot;
+      const updatePublication = (
+        update: (current: NoteMutationSyncWarningPublication) => NoteMutationSyncWarningPublication,
+      ): void => {
+        const current = noteMutationSyncWarningRef.current;
+        if (!isSamePublication(current)) return;
+        const next = update(current);
+        noteMutationSyncWarningRef.current = next;
+        setNoteMutationSyncWarningState(next);
+      };
+      updatePublication((current) => ({
+        ...current,
+        refreshing: true,
+        refreshError: null,
+        focusActionOnMount: false,
+      }));
+      try {
+        const recovery = await noteController.recoverNoteMutation(publication);
+        if (
+          !noteMutationCoordinator.isCurrent(coordinatorIntent, noteCreateActivationRef.current) ||
+          !isSamePublication(noteMutationSyncWarningRef.current)
+        ) {
+          throw new Error('这项笔记同步状态已被较新的结果替代。');
+        }
+        const recovered =
+          recovery.kind === 'update'
+            ? recovery.committed &&
+              recovery.updatedNote !== null &&
+              recovery.updatedNote.id === publication.intent.originalNote.id
+            : recovery.committed && recovery.confirmed;
+        if (!recovered) {
+          throw new Error(
+            publication.kind === 'update'
+              ? '重新读取后仍无法确认刚保存的笔记。请稍后再试；笔记已经保存，请不要再次保存。'
+              : '重新读取后仍无法确认已归档的笔记。请稍后再试；笔记已经归档，请不要再次归档。',
+          );
+        }
+        if (isSamePublication(noteMutationSyncWarningRef.current)) {
+          noteMutationSyncWarningRef.current = null;
+          setNoteMutationSyncWarningState(null);
+        }
+        return recovery;
+      } catch (error) {
+        updatePublication((current) => ({
+          ...current,
+          refreshing: false,
+          refreshError:
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : '重新读取笔记失败，请稍后再试。',
+        }));
+        throw error;
+      } finally {
+        noteMutationCoordinator.end(coordinatorIntent);
+        updatePublication((current) =>
+          current.refreshing ? { ...current, refreshing: false } : current,
+        );
+      }
+    },
+    [noteController, noteMutationCoordinator],
+  );
+  const invalidateNoteMutations = useCallback((): void => {
+    noteMutationCoordinator.invalidateAll();
+    noteCreateSyncWarningRef.current = null;
+    noteMutationSyncWarningRef.current = null;
+    setNoteCreateSyncWarningState(null);
+    setNoteMutationSyncWarningState(null);
+  }, [noteMutationCoordinator]);
   const handleRequestedInboxEntry = useCallback(() => {
     const expectedGeneration = inboxReveal?.generation;
     if (expectedGeneration === undefined) return;
@@ -1228,6 +1589,9 @@ export function App() {
   );
   const restoreBackupWithApproval = useCallback(
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
+      if (noteMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
+        throw new Error('笔记写入仍在确认，请稍候再恢复备份。');
+      }
       if (!confirmLeaveNoteDraft()) return null;
       dataReplacementApprovedRef.current = true;
       dataReplacementNoteDiscardApprovedRef.current = true;
@@ -1236,6 +1600,8 @@ export function App() {
         if (result.status === 'cancelled') {
           dataReplacementApprovedRef.current = false;
           dataReplacementNoteDiscardApprovedRef.current = false;
+        } else {
+          invalidateNoteMutations();
         }
         return result;
       } catch (error) {
@@ -1244,7 +1610,7 @@ export function App() {
         throw error;
       }
     },
-    [confirmLeaveNoteDraft, restoreBackup],
+    [confirmLeaveNoteDraft, invalidateNoteMutations, noteMutationCoordinator, restoreBackup],
   );
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
@@ -1313,6 +1679,7 @@ export function App() {
   const requestWorkspaceActivation = useCallback(
     (workspaceId: string) => {
       if (workspaceId === currentWorkspaceIdRef.current) return;
+      if (noteWorkspaceChangeIsBlocked()) return;
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
@@ -1334,8 +1701,27 @@ export function App() {
       taskCreateCoordinator,
       invalidateAutomationCreate,
       invalidateScheduleCreate,
+      noteWorkspaceChangeIsBlocked,
       workspaceController,
     ],
+  );
+  const createWorkspace = useCallback(
+    async (name: string, color: WorkspaceColor): Promise<void> => {
+      if (noteWorkspaceChangeIsBlocked()) {
+        throw new Error('笔记写入仍在确认，请先返回笔记页面完成重新读取，再新建工作区。');
+      }
+      await workspaceController.create(name, color);
+    },
+    [noteWorkspaceChangeIsBlocked, workspaceController],
+  );
+  const archiveWorkspace = useCallback(
+    async (workspaceId: string): Promise<void> => {
+      if (workspaceId === currentWorkspaceIdRef.current && noteWorkspaceChangeIsBlocked()) {
+        throw new Error('笔记写入仍在确认，请先返回笔记页面完成重新读取，再归档当前工作区。');
+      }
+      await workspaceController.archive(workspaceId);
+    },
+    [noteWorkspaceChangeIsBlocked, workspaceController],
   );
   const openQuickCapture = useCallback(() => {
     if (
@@ -2580,6 +2966,14 @@ export function App() {
       ) {
         throw new AssistantSavedNoteSupersededError();
       }
+      const noteActivation = noteCreateActivationRef.current;
+      if (
+        noteActivation.workspaceId !== activation.workspaceId ||
+        noteWriteIsBlocked(noteActivation) ||
+        noteMutationCoordinator.isPending(noteActivation.workspaceId)
+      ) {
+        throw new Error('这个工作区正在处理或确认另一项笔记写入，请稍候。');
+      }
       if (!assistantSavedNoteSaveGate.begin(responseKey)) {
         throw new Error('这个回答正在保存，请稍候。');
       }
@@ -2598,11 +2992,18 @@ export function App() {
         assistantSavedNoteSaveGate.end(responseKey);
       }
     },
-    [assistantSavedNoteSaveGate, createNote, rememberAssistantSavedNote],
+    [
+      assistantSavedNoteSaveGate,
+      createNote,
+      noteMutationCoordinator,
+      noteWriteIsBlocked,
+      rememberAssistantSavedNote,
+    ],
   );
 
   const openAssistantSavedNote = useCallback(
     async (target: AssistantSavedNoteTarget): Promise<void> => {
+      assertNoteOutputNavigationAvailable(target.workspaceId);
       automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
@@ -2635,6 +3036,7 @@ export function App() {
     },
     [
       assistantSavedNoteNavigation,
+      assertNoteOutputNavigationAvailable,
       automationCreateCoordinator,
       prepareNoteSnapshotRefresh,
       taskCreateCoordinator,
@@ -2752,12 +3154,26 @@ export function App() {
       if (inboxConversionSyncWarningRef.current !== null) {
         throw new Error('请先重新读取上一条已转换记录，再继续处理收件箱。');
       }
+      const noteActivation = noteCreateActivationRef.current;
+      if (noteWriteIsBlocked(noteActivation)) {
+        throw new Error('请先重新读取上一项已提交的笔记写入，再继续转换收件箱。');
+      }
+      const noteMutationIntent = noteMutationCoordinator.begin(
+        noteActivation,
+        'inbox-note-convert',
+      );
+      if (noteMutationIntent === null) {
+        throw new Error('这个工作区正在处理另一项笔记写入。');
+      }
       const intent = inboxConversionRequestCoordinator.begin(
         inboxConversionActivationRef.current,
         entry.id,
         'note',
       );
-      if (!intent) return;
+      if (!intent) {
+        noteMutationCoordinator.end(noteMutationIntent);
+        return;
+      }
       setPendingInboxConversionIntents((current) => {
         const workspaceId = intent.workspace.workspaceId!;
         const next = new Map(current);
@@ -2770,10 +3186,12 @@ export function App() {
       const inboxRequest = inboxController.reserveSnapshotRequest(intent.workspace.workspaceId!);
       if (!inboxRequest) {
         finishInboxConversionRequest(intent);
+        noteMutationCoordinator.end(noteMutationIntent);
         return;
       }
       const failureIsCurrent = () =>
-        inboxConversionRequestCoordinator.isCurrent(intent, inboxConversionActivationRef.current);
+        inboxConversionRequestCoordinator.isCurrent(intent, inboxConversionActivationRef.current) &&
+        noteMutationCoordinator.isCurrent(noteMutationIntent, noteCreateActivationRef.current);
       try {
         const conversion = await noteController.convertInbox(entry.id, failureIsCurrent);
         const workspaceId = intent.workspace.workspaceId!;
@@ -2836,6 +3254,7 @@ export function App() {
         throw error;
       } finally {
         finishInboxConversionRequest(intent);
+        noteMutationCoordinator.end(noteMutationIntent);
       }
     },
     [
@@ -2844,6 +3263,8 @@ export function App() {
       inboxConversionRequestCoordinator,
       finishInboxConversionRequest,
       noteController,
+      noteMutationCoordinator,
+      noteWriteIsBlocked,
       publishInboxConversionPublication,
       taskController,
     ],
@@ -2852,100 +3273,122 @@ export function App() {
   const refreshInboxConversionSyncWarning = useCallback(
     async (warning: InboxConversionSyncWarningState): Promise<void> => {
       const { feedback } = warning;
-      const isCurrent = () =>
+      const warningIsCurrent = () =>
         warning.activation === inboxConversionActivationRef.current &&
         warning === inboxConversionSyncWarningRef.current &&
         inboxConversionRequestCoordinator.isGenerationCurrent(
           feedback.requestGeneration,
           warning.activation,
         );
-      if (!isCurrent()) throw new InboxConversionSupersededError();
+      if (!warningIsCurrent()) throw new InboxConversionSupersededError();
 
-      const initialInbox = inboxController.isCommittedConversionSourceArchived(
-        feedback.workspaceId,
-        feedback.sourceEntryId,
-      );
-      const sharedReconciliationInput = {
-        initialInboxCommitted: initialInbox,
-        getCommittedInbox: () =>
-          inboxController.isCommittedConversionSourceArchived(
-            feedback.workspaceId,
-            feedback.sourceEntryId,
-          ),
-        prepareInboxSnapshotRefresh: inboxController.prepareSnapshotRefresh,
-        inboxSnapshotIsCommitted: (
-          snapshot: Parameters<typeof isInboxConversionSourceArchived>[2],
-        ) =>
-          isInboxConversionSourceArchived(feedback.workspaceId, feedback.sourceEntryId, snapshot),
-        isCurrent,
-      };
-
-      let outputTitle: string;
-      if (feedback.outputKind === 'task') {
-        const getCommittedOutput = () =>
-          taskController.getCommittedConvertedTask(
-            feedback.workspaceId,
-            feedback.sourceEntryId,
-            feedback.outputId,
-          );
-        const initialOutput = getCommittedOutput();
-        const reconciliation = await reconcileInboxConversionSnapshots({
-          ...sharedReconciliationInput,
-          initialOutputCommitted: initialOutput !== null,
-          getCommittedOutput,
-          prepareOutputSnapshotRefresh: taskController.prepareSnapshotRefresh,
-          outputFromSnapshot: (snapshot) =>
-            convertedTaskFromSnapshot(
-              feedback.workspaceId,
-              feedback.sourceEntryId,
-              feedback.outputId,
-              snapshot,
-            ),
-        });
-        if (!isCurrent() || !reconciliation.committed || reconciliation.output === null) {
-          throw new Error('The committed inbox task conversion could not be reconciled.');
-        }
-        outputTitle = reconciliation.output.title;
-      } else {
-        const getCommittedOutput = () =>
-          noteController.getCommittedConvertedNote(
-            feedback.workspaceId,
-            feedback.sourceEntryId,
-            feedback.outputId,
-          );
-        const initialOutput = getCommittedOutput();
-        const reconciliation = await reconcileInboxConversionSnapshots({
-          ...sharedReconciliationInput,
-          initialOutputCommitted: initialOutput !== null,
-          getCommittedOutput,
-          prepareOutputSnapshotRefresh: noteController.prepareSnapshotRefresh,
-          outputFromSnapshot: (snapshot) =>
-            convertedNoteFromSnapshot(
-              feedback.workspaceId,
-              feedback.sourceEntryId,
-              feedback.outputId,
-              snapshot,
-            ),
-        });
-        if (!isCurrent() || !reconciliation.committed || reconciliation.output === null) {
-          throw new Error('The committed inbox note conversion could not be reconciled.');
-        }
-        outputTitle = reconciliation.output.title;
+      const noteActivation = noteCreateActivationRef.current;
+      const noteRecoveryIntent: NoteMutationCoordinatorIntent | null =
+        feedback.outputKind === 'note'
+          ? noteMutationCoordinator.begin(noteActivation, 'recover')
+          : null;
+      if (
+        feedback.outputKind === 'note' &&
+        (noteActivation.workspaceId !== feedback.workspaceId || noteRecoveryIntent === null)
+      ) {
+        if (noteRecoveryIntent !== null) noteMutationCoordinator.end(noteRecoveryIntent);
+        throw new Error('这个工作区正在处理另一项笔记写入，请稍候。');
       }
+      const isCurrent = () =>
+        warningIsCurrent() &&
+        (noteRecoveryIntent === null ||
+          noteMutationCoordinator.isCurrent(noteRecoveryIntent, noteCreateActivationRef.current));
 
-      publishInboxConversionPublication({
-        kind: 'feedback',
-        activation: warning.activation,
-        feedback: Object.freeze({
-          ...feedback,
-          outputTitle,
-        }),
-      });
+      try {
+        const initialInbox = inboxController.isCommittedConversionSourceArchived(
+          feedback.workspaceId,
+          feedback.sourceEntryId,
+        );
+        const sharedReconciliationInput = {
+          initialInboxCommitted: initialInbox,
+          getCommittedInbox: () =>
+            inboxController.isCommittedConversionSourceArchived(
+              feedback.workspaceId,
+              feedback.sourceEntryId,
+            ),
+          prepareInboxSnapshotRefresh: inboxController.prepareSnapshotRefresh,
+          inboxSnapshotIsCommitted: (
+            snapshot: Parameters<typeof isInboxConversionSourceArchived>[2],
+          ) =>
+            isInboxConversionSourceArchived(feedback.workspaceId, feedback.sourceEntryId, snapshot),
+          isCurrent,
+        };
+
+        let outputTitle: string;
+        if (feedback.outputKind === 'task') {
+          const getCommittedOutput = () =>
+            taskController.getCommittedConvertedTask(
+              feedback.workspaceId,
+              feedback.sourceEntryId,
+              feedback.outputId,
+            );
+          const initialOutput = getCommittedOutput();
+          const reconciliation = await reconcileInboxConversionSnapshots({
+            ...sharedReconciliationInput,
+            initialOutputCommitted: initialOutput !== null,
+            getCommittedOutput,
+            prepareOutputSnapshotRefresh: taskController.prepareSnapshotRefresh,
+            outputFromSnapshot: (snapshot) =>
+              convertedTaskFromSnapshot(
+                feedback.workspaceId,
+                feedback.sourceEntryId,
+                feedback.outputId,
+                snapshot,
+              ),
+          });
+          if (!isCurrent() || !reconciliation.committed || reconciliation.output === null) {
+            throw new Error('The committed inbox task conversion could not be reconciled.');
+          }
+          outputTitle = reconciliation.output.title;
+        } else {
+          const getCommittedOutput = () =>
+            noteController.getCommittedConvertedNote(
+              feedback.workspaceId,
+              feedback.sourceEntryId,
+              feedback.outputId,
+            );
+          const initialOutput = getCommittedOutput();
+          const reconciliation = await reconcileInboxConversionSnapshots({
+            ...sharedReconciliationInput,
+            initialOutputCommitted: initialOutput !== null,
+            getCommittedOutput,
+            prepareOutputSnapshotRefresh: noteController.prepareSnapshotRefresh,
+            outputFromSnapshot: (snapshot) =>
+              convertedNoteFromSnapshot(
+                feedback.workspaceId,
+                feedback.sourceEntryId,
+                feedback.outputId,
+                snapshot,
+              ),
+          });
+          if (!isCurrent() || !reconciliation.committed || reconciliation.output === null) {
+            throw new Error('The committed inbox note conversion could not be reconciled.');
+          }
+          outputTitle = reconciliation.output.title;
+        }
+
+        publishInboxConversionPublication({
+          kind: 'feedback',
+          activation: warning.activation,
+          feedback: Object.freeze({
+            ...feedback,
+            outputTitle,
+          }),
+        });
+      } finally {
+        if (noteRecoveryIntent !== null) noteMutationCoordinator.end(noteRecoveryIntent);
+      }
     },
     [
       inboxController,
       inboxConversionRequestCoordinator,
       noteController,
+      noteMutationCoordinator,
       publishInboxConversionPublication,
       taskController,
     ],
@@ -2953,6 +3396,9 @@ export function App() {
 
   const openInboxConversionOutput = useCallback(
     async (feedback: InboxConversionFeedback): Promise<void> => {
+      if (feedback.outputKind === 'note') {
+        assertNoteOutputNavigationAvailable(feedback.workspaceId);
+      }
       automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
@@ -3003,6 +3449,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      assertNoteOutputNavigationAvailable,
       automationCreateCoordinator,
       inboxConversionNavigation,
       noteController.prepareSnapshotRefresh,
@@ -3045,8 +3492,23 @@ export function App() {
       if (currentPublication?.kind === 'warning') {
         throw new Error('上一次自动化已经运行，请先重新读取并确认输出，不要再次运行。');
       }
+      const noteActivation = noteCreateActivationRef.current;
+      const noteMutationIntent: NoteMutationCoordinatorIntent | null =
+        item.action.kind === 'create-note'
+          ? noteMutationCoordinator.begin(noteActivation, 'create')
+          : null;
+      if (
+        item.action.kind === 'create-note' &&
+        (noteActivation.workspaceId !== workspaceId ||
+          noteWriteIsBlocked(noteActivation) ||
+          noteMutationIntent === null)
+      ) {
+        if (noteMutationIntent !== null) noteMutationCoordinator.end(noteMutationIntent);
+        throw new Error('这个工作区正在处理或确认另一项笔记写入，请稍候。');
+      }
       const intent = automationRunReconciliationCoordinator.begin(activation, `run:${item.id}`);
       if (intent === null) {
+        if (noteMutationIntent !== null) noteMutationCoordinator.end(noteMutationIntent);
         throw new Error('这个工作区正在运行或确认另一条自动化，请稍候。');
       }
 
@@ -3060,7 +3522,12 @@ export function App() {
       let feedback: AutomationRunFeedback | null = null;
       try {
         feedback = await automationController.runNow(item);
-        if (!automationRunReconciliationCoordinator.isActive(intent)) return;
+        if (
+          !automationRunReconciliationCoordinator.isActive(intent) ||
+          (noteMutationIntent !== null && !noteMutationCoordinator.isActive(noteMutationIntent))
+        ) {
+          return;
+        }
         setAutomationRunActivity(workspaceId, {
           automationId: item.id,
           phase: 'confirming',
@@ -3070,7 +3537,9 @@ export function App() {
           automationRunReconciliationCoordinator.isCurrent(
             intent,
             automationOutputActivationRef.current,
-          );
+          ) &&
+          (noteMutationIntent === null ||
+            noteMutationCoordinator.isCurrent(noteMutationIntent, noteCreateActivationRef.current));
         const reconciliation = await reconcileAutomationRunFeedback(feedback, isCurrent);
         if (!automationRunReconciliationCoordinator.isActive(intent)) return;
 
@@ -3107,6 +3576,7 @@ export function App() {
         throw error;
       } finally {
         finishAutomationRunIntent(intent);
+        if (noteMutationIntent !== null) noteMutationCoordinator.end(noteMutationIntent);
       }
     },
     [
@@ -3114,6 +3584,8 @@ export function App() {
       automationOutputNavigation,
       automationRunReconciliationCoordinator,
       finishAutomationRunIntent,
+      noteMutationCoordinator,
+      noteWriteIsBlocked,
       reconcileAutomationRunFeedback,
       setAutomationRunActivity,
       setAutomationRunPublication,
@@ -3136,11 +3608,24 @@ export function App() {
         throw new Error('这条自动化运行恢复状态已经变化。');
       }
 
+      const noteActivation = noteCreateActivationRef.current;
+      const noteRecoveryIntent: NoteMutationCoordinatorIntent | null =
+        feedback.outputKind === 'note'
+          ? noteMutationCoordinator.begin(noteActivation, 'recover')
+          : null;
+      if (
+        feedback.outputKind === 'note' &&
+        (noteActivation.workspaceId !== workspaceId || noteRecoveryIntent === null)
+      ) {
+        if (noteRecoveryIntent !== null) noteMutationCoordinator.end(noteRecoveryIntent);
+        throw new Error('这个工作区正在处理另一项笔记写入，请稍候。');
+      }
       const intent = automationRunReconciliationCoordinator.begin(
         activation,
         `recover:${feedbackKey}`,
       );
       if (intent === null) {
+        if (noteRecoveryIntent !== null) noteMutationCoordinator.end(noteRecoveryIntent);
         throw new Error('这个工作区正在运行或确认另一条自动化，请稍候。');
       }
       setAutomationRunActivity(workspaceId, {
@@ -3160,6 +3645,11 @@ export function App() {
             intent,
             automationOutputActivationRef.current,
           ) &&
+          (noteRecoveryIntent === null ||
+            noteMutationCoordinator.isCurrent(
+              noteRecoveryIntent,
+              noteCreateActivationRef.current,
+            )) &&
           publication?.kind === 'warning' &&
           automationRunFeedbackKey(publication.feedback) === feedbackKey
         );
@@ -3193,11 +3683,13 @@ export function App() {
         throw error;
       } finally {
         finishAutomationRunIntent(intent);
+        if (noteRecoveryIntent !== null) noteMutationCoordinator.end(noteRecoveryIntent);
       }
     },
     [
       automationRunReconciliationCoordinator,
       finishAutomationRunIntent,
+      noteMutationCoordinator,
       reconcileAutomationRunFeedback,
       setAutomationRunActivity,
       setAutomationRunPublication,
@@ -3206,6 +3698,9 @@ export function App() {
 
   const openAutomationRunOutput = useCallback(
     async (feedback: AutomationRunFeedback): Promise<void> => {
+      if (feedback.outputKind === 'note') {
+        assertNoteOutputNavigationAvailable(feedback.workspaceId);
+      }
       automationCreateCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       try {
@@ -3256,6 +3751,7 @@ export function App() {
     },
     [
       activeWorkspace,
+      assertNoteOutputNavigationAvailable,
       automationCreateCoordinator,
       automationOutputNavigation,
       noteController.prepareSnapshotRefresh,
@@ -3318,6 +3814,7 @@ export function App() {
             invalidateInboxConversion();
             invalidateAutomationCreate();
             invalidateScheduleCreate();
+            invalidateNoteMutations();
           }
           return true;
         }
@@ -3335,6 +3832,7 @@ export function App() {
       invalidateAutomationRuns,
       invalidateInboxCapture,
       invalidateInboxConversion,
+      invalidateNoteMutations,
       invalidateScheduleCreate,
       isImportCommitInFlight,
     ],
@@ -3456,9 +3954,30 @@ export function App() {
   const selectSearchResult = useCallback(
     async (selectedResult: SearchResult): Promise<void> => {
       if (
+        selectedResult.workspaceId !== currentWorkspaceIdRef.current &&
+        noteWorkspaceChangeIsBlocked()
+      ) {
+        throw new Error(
+          '笔记写入仍在确认，请先返回当前工作区完成重新读取，再打开其他工作区的搜索结果。',
+        );
+      }
+      if (
         isNoteCreateNavigationBlocked(noteController.pendingCreate, visibleNoteCreateSyncWarning)
       ) {
         throw new Error('刚创建的笔记仍在确认，请先返回笔记页面完成重新读取，再打开搜索结果。');
+      }
+      const activeNoteMutationWarning = noteMutationSyncWarningForActivation(
+        noteCreateActivationRef.current,
+        noteMutationSyncWarningRef.current,
+      );
+      if (
+        isNoteMutationNavigationBlocked(
+          noteMutationCoordinator.isPending(currentWorkspaceIdRef.current) ||
+            noteController.pendingMutation,
+          activeNoteMutationWarning,
+        )
+      ) {
+        throw new Error('笔记写入仍在确认，请先返回笔记页面完成重新读取，再打开搜索结果。');
       }
       if (!confirmLeaveNoteDraft()) {
         throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
@@ -3623,6 +4142,9 @@ export function App() {
       inboxCaptureCoordinator,
       inboxConversionNavigation,
       noteController.pendingCreate,
+      noteController.pendingMutation,
+      noteMutationCoordinator,
+      noteWorkspaceChangeIsBlocked,
       searchNavigation,
       taskCreateCoordinator,
       updatePreferences,
@@ -3649,6 +4171,8 @@ export function App() {
         group: '工作区',
         icon: Layers3,
         keywords: `工作区 切换 ${workspace.name}`,
+        disabled: noteWorkspaceChangeBlocked,
+        disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
         action: () => {
           requestWorkspaceActivation(workspace.id);
         },
@@ -3726,7 +4250,10 @@ export function App() {
         group: '工作区',
         icon: FolderPlus,
         keywords: '工作区 新建 创建',
+        disabled: noteWorkspaceChangeBlocked,
+        disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
         action: () => {
+          if (noteWorkspaceChangeIsBlocked()) return;
           if (!confirmLeaveNoteDraft()) return;
           setWorkspaceDialog({
             mode: 'create',
@@ -3741,9 +4268,13 @@ export function App() {
         group: '工作区',
         icon: ArchiveRestore,
         keywords: '工作区 归档 恢复 restore archive',
-        disabled: workspaceController.pendingOperation !== null,
+        disabled: workspaceController.pendingOperation !== null || noteWorkspaceChangeBlocked,
         disabledReason:
-          workspaceController.pendingOperation !== null ? '另一项工作区操作正在进行' : undefined,
+          workspaceController.pendingOperation !== null
+            ? '另一项工作区操作正在进行'
+            : noteWorkspaceChangeBlocked
+              ? '请先确认当前笔记写入'
+              : undefined,
         action: workspaceController.openArchiveManager,
       },
       {
@@ -3752,6 +4283,8 @@ export function App() {
         description: activeWorkspace.name,
         group: '工作区',
         icon: Pencil,
+        disabled: noteWorkspaceChangeBlocked,
+        disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
         action: () => setWorkspaceDialog({ mode: 'rename', workspace: activeWorkspace }),
       },
       ...workspaceCommands,
@@ -3763,7 +4296,10 @@ export function App() {
               description: '保留数据并从活动列表隐藏',
               group: '工作区',
               icon: Archive,
+              disabled: noteWorkspaceChangeBlocked,
+              disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
               action: () => {
+                if (noteWorkspaceChangeIsBlocked()) return;
                 if (!confirmLeaveNoteDraft()) return;
                 setWorkspaceDialog({
                   mode: 'archive',
@@ -3877,6 +4413,8 @@ export function App() {
     openTerminalSettings,
     openTaskCreate,
     confirmLeaveNoteDraft,
+    noteWorkspaceChangeBlocked,
+    noteWorkspaceChangeIsBlocked,
     requestActiveView,
     requestWorkspaceActivation,
     snapshot,
@@ -4078,7 +4616,7 @@ export function App() {
             activeView={activeSurface}
             activeWorkspace={activeWorkspace}
             workspaces={snapshot.workspaces}
-            busy={workspaceController.pendingOperation !== null}
+            busy={workspaceController.pendingOperation !== null || noteWorkspaceChangeBlocked}
             pendingWorkspaceId={workspaceController.pendingWorkspaceId}
             saveError={workspaceController.saveError}
             saveStatus={workspaceController.saveStatus}
@@ -4089,6 +4627,7 @@ export function App() {
             onSelectView={requestActiveView}
             onSelectWorkspace={requestWorkspaceActivation}
             onCreateWorkspace={() => {
+              if (noteWorkspaceChangeIsBlocked()) return;
               if (!confirmLeaveNoteDraft()) return;
               setWorkspaceDialog({
                 mode: 'create',
@@ -4098,6 +4637,9 @@ export function App() {
             }}
             onRenameWorkspace={(workspace) => setWorkspaceDialog({ mode: 'rename', workspace })}
             onArchiveWorkspace={(workspace) => {
+              if (workspace.id === snapshot.currentWorkspaceId && noteWorkspaceChangeIsBlocked()) {
+                return;
+              }
               if (!confirmLeaveNoteDraft()) return;
               setWorkspaceDialog({
                 mode: 'archive',
@@ -4311,17 +4853,35 @@ export function App() {
                     operationError={noteController.operationError}
                     pendingNoteIds={noteController.pendingNoteIds}
                     pendingCreate={noteController.pendingCreate}
+                    pendingMutation={
+                      noteMutationCoordinator.isPending(snapshot.currentWorkspaceId) ||
+                      noteWriteIsBlocked(noteCreateActivation) ||
+                      noteController.pendingMutation ||
+                      pendingInboxConversionIntents.get(snapshot.currentWorkspaceId)?.outputKind ===
+                        'note'
+                    }
+                    pendingMutationMessage={externalNoteMutationBlockMessage}
                     requestedNoteId={requestedNoteId}
                     onRequestedNoteHandled={() => setRequestedNoteId(null)}
                     onDirtyChange={updateNoteDraftDirty}
                     onRetry={noteController.retry}
-                    onCreate={noteController.create}
+                    onCreate={createNote}
                     createSyncWarning={visibleNoteCreateSyncWarning}
                     onCreateSyncWarning={publishNoteCreateSyncWarning}
                     onCreateSyncResolved={resolveNoteCreateSyncWarning}
-                    onRefreshCreated={noteController.recoverCreatedNote}
-                    onUpdate={noteController.update}
-                    onArchive={noteController.archive}
+                    onRefreshCreated={recoverCreatedNote}
+                    mutationSyncWarning={visibleNoteMutationSyncWarning}
+                    mutationSyncWarningRefreshing={
+                      visibleNoteMutationSyncWarning?.refreshing ?? false
+                    }
+                    mutationSyncWarningError={visibleNoteMutationSyncWarning?.refreshError ?? null}
+                    focusMutationSyncWarningActionOnMount={
+                      visibleNoteMutationSyncWarning?.focusActionOnMount ?? false
+                    }
+                    onMutationSyncWarning={publishNoteMutationSyncWarning}
+                    onRefreshMutation={refreshNoteMutationSyncWarning}
+                    onUpdate={updateNote}
+                    onArchive={archiveNote}
                     onOpenLink={(url) => {
                       openUrlInWorkspace(snapshot.currentWorkspaceId, url);
                     }}
@@ -4584,9 +5144,9 @@ export function App() {
         <WorkspaceDialog
           state={workspaceDialog}
           onClose={() => setWorkspaceDialog(null)}
-          onCreate={workspaceController.create}
+          onCreate={createWorkspace}
           onRename={workspaceController.rename}
-          onArchive={workspaceController.archive}
+          onArchive={archiveWorkspace}
         />
       ) : null}
       {quickCaptureTarget ? (
@@ -4739,11 +5299,15 @@ export function App() {
           error={dataState.feedback?.tone === 'error' ? dataState.feedback.message : null}
           onCancel={cancelImport}
           onConfirm={async () => {
+            if (noteMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
+              throw new Error('笔记写入仍在确认，请稍候再导入数据。');
+            }
             if (!confirmLeaveNoteDraft()) return;
             dataReplacementApprovedRef.current = true;
             dataReplacementNoteDiscardApprovedRef.current = true;
             try {
               await commitImport();
+              invalidateNoteMutations();
             } catch (error) {
               dataReplacementApprovedRef.current = false;
               dataReplacementNoteDiscardApprovedRef.current = false;

@@ -4,6 +4,14 @@ import type {
   NoteCreateResult,
   NoteSnapshot,
 } from '../shared/contracts';
+import { normalizeInboxId } from '../shared/inbox-domain';
+import {
+  normalizeNoteBody,
+  normalizeNoteId,
+  normalizeNoteRevision,
+  normalizeNoteTitle,
+} from '../shared/note-domain';
+import { normalizeWorkspaceId } from '../shared/workspace-domain';
 
 export interface NoteWorkspaceIdentity {
   readonly workspaceId: string | null;
@@ -42,6 +50,108 @@ export interface NoteCreateSyncWarningState extends NoteCreateSyncWarningTarget 
   readonly activation: NoteWorkspaceIdentity;
 }
 
+export interface NoteMutationIdentity {
+  readonly expectedWorkspaceId: string;
+  readonly originalNote: Note;
+}
+
+export interface NoteUpdateMutationIntent extends NoteMutationIdentity {
+  readonly kind: 'update';
+  readonly title: string;
+  readonly body: string;
+  readonly contentChanged: boolean;
+  readonly expectedCommittedRevision: number;
+}
+
+export interface NoteArchiveMutationIntent extends NoteMutationIdentity {
+  readonly kind: 'archive';
+}
+
+export type NoteMutationIntent = NoteUpdateMutationIntent | NoteArchiveMutationIntent;
+
+export interface NoteMutationSnapshotRefresh {
+  readonly snapshot: NoteSnapshot;
+  readonly commit: () => boolean;
+}
+
+export interface NoteUpdateReconciliation {
+  readonly authoritativeNote: Note | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+export interface NoteArchiveReconciliation {
+  readonly confirmed: boolean;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+export interface NoteUpdateReconciliationInput {
+  readonly intent: NoteUpdateMutationIntent;
+  readonly resultSnapshot: NoteSnapshot;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedSnapshot: () => NoteSnapshot | null;
+  readonly prepareSnapshotRefresh: () => Promise<NoteMutationSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
+export interface NoteArchiveReconciliationInput {
+  readonly intent: NoteArchiveMutationIntent;
+  readonly resultSnapshot: NoteSnapshot;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedSnapshot: () => NoteSnapshot | null;
+  readonly prepareSnapshotRefresh: () => Promise<NoteMutationSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
+interface NoteUpdateMutationSyncWarningTarget {
+  readonly kind: 'update';
+  readonly intent: NoteUpdateMutationIntent;
+  readonly resultSnapshot: NoteSnapshot;
+  readonly title: string;
+  readonly message: string;
+}
+
+interface NoteArchiveMutationSyncWarningTarget {
+  readonly kind: 'archive';
+  readonly intent: NoteArchiveMutationIntent;
+  readonly resultSnapshot: NoteSnapshot;
+  readonly title: string;
+  readonly message: string;
+}
+
+export type NoteMutationSyncWarningTarget =
+  NoteUpdateMutationSyncWarningTarget | NoteArchiveMutationSyncWarningTarget;
+
+export type NoteMutationSyncWarningState = NoteMutationSyncWarningTarget & {
+  readonly activation: NoteWorkspaceIdentity;
+};
+
+export class NoteMutationSupersededError extends Error {
+  constructor() {
+    super('The note mutation reconciliation is no longer current.');
+    this.name = 'NoteMutationSupersededError';
+  }
+}
+
+export class NoteMutationResultUnavailableError extends Error {
+  constructor(kind: NoteMutationIntent['kind']) {
+    super(
+      kind === 'update'
+        ? 'The exact updated note was not returned by the authoritative snapshot.'
+        : 'The exact archived note is still present in the authoritative snapshot.',
+    );
+    this.name = 'NoteMutationResultUnavailableError';
+  }
+}
+
+export class NoteMutationSnapshotCommitError extends Error {
+  constructor() {
+    super('The authoritative note snapshot could not be committed.');
+    this.name = 'NoteMutationSnapshotCommitError';
+  }
+}
+
 interface NoteCreateReconciliationInput {
   readonly expectedWorkspaceId: string;
   readonly result: NoteCreateResult;
@@ -52,6 +162,7 @@ interface NoteCreateReconciliationInput {
 }
 
 const NOTE_CREATE_REFRESH_ATTEMPTS = 2;
+const NOTE_MUTATION_REFRESH_ATTEMPTS = 2;
 
 export function createNoteWorkspaceIdentity(workspaceId: string | null): NoteWorkspaceIdentity {
   return { workspaceId };
@@ -126,11 +237,25 @@ export function noteCreateSyncWarningForActivation(
   return state?.activation === activation ? state : null;
 }
 
+export function noteMutationSyncWarningForActivation(
+  activation: NoteWorkspaceIdentity,
+  state: NoteMutationSyncWarningState | null,
+): NoteMutationSyncWarningTarget | null {
+  return state?.activation === activation ? state : null;
+}
+
 export function isNoteCreateNavigationBlocked(
   pendingCreate: boolean,
   warning: NoteCreateSyncWarningTarget | null,
 ): boolean {
   return pendingCreate || warning !== null;
+}
+
+export function isNoteMutationNavigationBlocked(
+  pendingMutation: boolean,
+  warning: NoteMutationSyncWarningTarget | null,
+): boolean {
+  return pendingMutation || warning !== null;
 }
 
 export function beginPendingNoteCreate(
@@ -160,6 +285,129 @@ export function clearResolvedNoteCreateSyncWarning(
     state.result.createdNoteId === resolved.result.createdNoteId
     ? null
     : state;
+}
+
+export function clearResolvedNoteMutationSyncWarning(
+  state: NoteMutationSyncWarningState | null,
+  activation: NoteWorkspaceIdentity,
+  resolved: NoteMutationSyncWarningTarget,
+): NoteMutationSyncWarningState | null {
+  return state?.activation === activation && state === resolved ? null : state;
+}
+
+export function createNoteUpdateMutationIntent(
+  expectedWorkspaceId: string,
+  originalNote: Note,
+  title: string,
+  body: string,
+): NoteUpdateMutationIntent {
+  const normalizedOriginal = normalizeOriginalNote(originalNote);
+  const normalizedTitle = normalizeNoteTitle(title);
+  const normalizedBody = normalizeNoteBody(body);
+  const contentChanged =
+    normalizedTitle !== normalizedOriginal.title || normalizedBody !== normalizedOriginal.body;
+  if (contentChanged && normalizedOriginal.revision === Number.MAX_SAFE_INTEGER) {
+    throw new TypeError('Note revision cannot be incremented safely.');
+  }
+  return Object.freeze({
+    kind: 'update',
+    expectedWorkspaceId: normalizeWorkspaceId(expectedWorkspaceId),
+    originalNote: normalizedOriginal,
+    title: normalizedTitle,
+    body: normalizedBody,
+    contentChanged,
+    expectedCommittedRevision: normalizedOriginal.revision + (contentChanged ? 1 : 0),
+  });
+}
+
+export function createNoteArchiveMutationIntent(
+  expectedWorkspaceId: string,
+  originalNote: Note,
+): NoteArchiveMutationIntent {
+  const normalizedOriginal = normalizeOriginalNote(originalNote);
+  if (normalizedOriginal.revision === Number.MAX_SAFE_INTEGER) {
+    throw new TypeError('Note revision cannot be incremented safely.');
+  }
+  return Object.freeze({
+    kind: 'archive',
+    expectedWorkspaceId: normalizeWorkspaceId(expectedWorkspaceId),
+    originalNote: normalizedOriginal,
+  });
+}
+
+export function updatedNoteFromSnapshot(
+  intent: NoteUpdateMutationIntent,
+  snapshot: NoteSnapshot,
+): Note | null {
+  if (snapshot.workspaceId !== intent.expectedWorkspaceId) return null;
+  const matches = snapshot.notes.filter(({ id }) => id === intent.originalNote.id);
+  if (matches.length !== 1) return null;
+  const candidate = matches[0]!;
+  if (
+    candidate.title !== intent.title ||
+    candidate.body !== intent.body ||
+    candidate.revision !== intent.expectedCommittedRevision ||
+    candidate.sourceInboxEntryId !== intent.originalNote.sourceInboxEntryId ||
+    candidate.createdAt !== intent.originalNote.createdAt
+  ) {
+    return null;
+  }
+  if (
+    intent.contentChanged
+      ? !isIsoTimestampAtLeast(candidate.updatedAt, intent.originalNote.updatedAt)
+      : candidate.updatedAt !== intent.originalNote.updatedAt
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+export function archivedNoteIsAbsent(
+  intent: NoteArchiveMutationIntent,
+  snapshot: NoteSnapshot,
+): boolean {
+  return (
+    snapshot.workspaceId === intent.expectedWorkspaceId &&
+    !snapshot.notes.some(({ id }) => id === intent.originalNote.id)
+  );
+}
+
+export async function reconcileNoteUpdateResult(
+  input: NoteUpdateReconciliationInput,
+): Promise<NoteUpdateReconciliation> {
+  const result = await reconcileNoteMutation({
+    kind: input.intent.kind,
+    resultSnapshot: input.resultSnapshot,
+    commitResultSnapshot: input.commitResultSnapshot,
+    getCommittedSnapshot: input.getCommittedSnapshot,
+    prepareSnapshotRefresh: input.prepareSnapshotRefresh,
+    isCurrent: input.isCurrent,
+    valueFromSnapshot: (snapshot) => updatedNoteFromSnapshot(input.intent, snapshot),
+  });
+  return {
+    authoritativeNote: result.value,
+    committed: result.committed,
+    error: result.error,
+  };
+}
+
+export async function reconcileNoteArchiveResult(
+  input: NoteArchiveReconciliationInput,
+): Promise<NoteArchiveReconciliation> {
+  const result = await reconcileNoteMutation({
+    kind: input.intent.kind,
+    resultSnapshot: input.resultSnapshot,
+    commitResultSnapshot: input.commitResultSnapshot,
+    getCommittedSnapshot: input.getCommittedSnapshot,
+    prepareSnapshotRefresh: input.prepareSnapshotRefresh,
+    isCurrent: input.isCurrent,
+    valueFromSnapshot: (snapshot) => (archivedNoteIsAbsent(input.intent, snapshot) ? true : null),
+  });
+  return {
+    confirmed: result.value === true && result.committed,
+    committed: result.committed,
+    error: result.error,
+  };
 }
 
 export function createdNoteFromResult(
@@ -261,6 +509,144 @@ export function convertedNoteFromSnapshot(
   const matches = snapshot.notes.filter(({ id }) => id === expectedCreatedNoteId);
   const note = matches.length === 1 ? matches[0]! : null;
   return note?.sourceInboxEntryId === expectedSourceEntryId ? note : null;
+}
+
+interface NoteMutationReconciliationInput<Value> {
+  readonly kind: NoteMutationIntent['kind'];
+  readonly resultSnapshot: NoteSnapshot;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedSnapshot: () => NoteSnapshot | null;
+  readonly prepareSnapshotRefresh: () => Promise<NoteMutationSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+  readonly valueFromSnapshot: (snapshot: NoteSnapshot) => Value | null;
+}
+
+interface NoteMutationReconciliation<Value> {
+  readonly value: Value | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+async function reconcileNoteMutation<Value>(
+  input: NoteMutationReconciliationInput<Value>,
+): Promise<NoteMutationReconciliation<Value>> {
+  let error: unknown;
+
+  const superseded = (): NoteMutationReconciliation<Value> => ({
+    value: null,
+    committed: false,
+    error: new NoteMutationSupersededError(),
+  });
+  const unavailable = (): NoteMutationResultUnavailableError =>
+    new NoteMutationResultUnavailableError(input.kind);
+  const committedValue = (): NoteMutationReconciliation<Value> | null => {
+    if (!input.isCurrent()) return superseded();
+    try {
+      const snapshot = input.getCommittedSnapshot();
+      if (!input.isCurrent()) return superseded();
+      if (snapshot === null) return null;
+      const value = input.valueFromSnapshot(snapshot);
+      if (value === null) {
+        error = unavailable();
+        return null;
+      }
+      return { value, committed: true, error };
+    } catch (caughtError) {
+      error = caughtError;
+      return input.isCurrent() ? null : superseded();
+    }
+  };
+
+  if (!input.isCurrent()) return superseded();
+
+  let responseValue: Value | null = null;
+  try {
+    responseValue = input.valueFromSnapshot(input.resultSnapshot);
+  } catch (caughtError) {
+    error = caughtError;
+  }
+  if (responseValue === null) {
+    error ??= unavailable();
+  } else {
+    if (!input.isCurrent()) return superseded();
+    try {
+      const committed = input.commitResultSnapshot();
+      if (!input.isCurrent()) return superseded();
+      if (committed) return { value: responseValue, committed: true, error };
+      error = new NoteMutationSnapshotCommitError();
+    } catch (caughtError) {
+      error = caughtError;
+      if (!input.isCurrent()) return superseded();
+    }
+  }
+
+  const currentValue = committedValue();
+  if (currentValue !== null) return currentValue;
+
+  for (let attempt = 0; attempt < NOTE_MUTATION_REFRESH_ATTEMPTS; attempt += 1) {
+    if (!input.isCurrent()) return superseded();
+    try {
+      const refresh = await input.prepareSnapshotRefresh();
+      if (!input.isCurrent()) return superseded();
+      const value = input.valueFromSnapshot(refresh.snapshot);
+      if (value === null) {
+        error = unavailable();
+        continue;
+      }
+      if (!input.isCurrent()) return superseded();
+      const committed = refresh.commit();
+      if (!input.isCurrent()) return superseded();
+      if (committed) return { value, committed: true, error };
+      error = new NoteMutationSnapshotCommitError();
+    } catch (caughtError) {
+      error = caughtError;
+      if (!input.isCurrent()) return superseded();
+    }
+  }
+
+  if (!input.isCurrent()) return superseded();
+  const finalValue = committedValue();
+  if (finalValue !== null) return finalValue;
+
+  return {
+    value: null,
+    committed: false,
+    error: error ?? unavailable(),
+  };
+}
+
+function normalizeOriginalNote(note: Note): Note {
+  const normalizedTitle = normalizeNoteTitle(note.title);
+  const normalizedBody = normalizeNoteBody(note.body);
+  const sourceInboxEntryId =
+    note.sourceInboxEntryId === null ? null : normalizeInboxId(note.sourceInboxEntryId);
+  if (normalizedTitle !== note.title || normalizedBody !== note.body) {
+    throw new TypeError('Original note text must already be normalized.');
+  }
+  if (
+    !isIsoTimestampAtLeast(note.updatedAt, note.createdAt) ||
+    !isExactIsoTimestamp(note.createdAt)
+  ) {
+    throw new TypeError('Original note timestamps are invalid.');
+  }
+  return Object.freeze({
+    id: normalizeNoteId(note.id),
+    title: normalizedTitle,
+    body: normalizedBody,
+    revision: normalizeNoteRevision(note.revision),
+    sourceInboxEntryId,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+  });
+}
+
+function isExactIsoTimestamp(value: string): boolean {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function isIsoTimestampAtLeast(value: string, lowerBound: string): boolean {
+  return isExactIsoTimestamp(value) && isExactIsoTimestamp(lowerBound) && value >= lowerBound;
 }
 
 export function filterNotes(notes: readonly Note[], query: string): readonly Note[] {

@@ -125,6 +125,7 @@ describe('automation renderer components', () => {
         operationError: null,
         pendingNoteIds: new Set<string>(),
         pendingCreate: false,
+        pendingMutation: false,
         requestedNoteId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
         onRequestedNoteHandled: () => undefined,
         onDirtyChange: () => undefined,
@@ -136,10 +137,20 @@ describe('automation renderer components', () => {
         onCreateSyncWarning: () => undefined,
         onCreateSyncResolved: () => undefined,
         onRefreshCreated: async () => null,
+        mutationSyncWarning: null,
+        mutationSyncWarningRefreshing: false,
+        mutationSyncWarningError: null,
+        focusMutationSyncWarningActionOnMount: false,
+        onMutationSyncWarning: () => undefined,
+        onRefreshMutation: async () => {
+          throw new Error('not used');
+        },
         onUpdate: async () => {
           throw new Error('not used');
         },
-        onArchive: async () => undefined,
+        onArchive: async () => {
+          throw new Error('not used');
+        },
         onOpenLink: () => undefined,
         onOpenAssistant: () => undefined,
       }),

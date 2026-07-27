@@ -182,7 +182,7 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 - 转换为任务或笔记时，在单一事务中创建目标、写入唯一来源关系并归档收件箱条目；失败时整体回滚。已转换或已归档条目不能重复转换。
 - 既有转换响应分别携带 Main 在该事务中实际插入的 `createdTaskId` 或 `createdNoteId`，以及事务后的任务/笔记与收件箱快照；这只扩展已有通道的返回契约，不新增 IPC 通道、schema 或 migration。
 - Renderer 把目标与来源归档视为一个不可拆分的提交结果。事务响应若只提交了一侧，会最多再做两轮权威读取；目标必须在当前工作区按 created ID 唯一存在且仍绑定原始 `sourceInboxEntryId`，来源条目也必须已经归档。任一侧无法确认时都不会发布普通成功反馈，而是保留 exact ID 与来源 ID 的独立警告，要求重新读取且不要重复转换。
-- 同一工作区的所有转任务与转笔记共用单飞身份，任一转换完成双侧对账前不会让第二个来源进入 Main；工作区切换、A→B→A、真正获批的数据恢复/导入以及每个 read/apply 之后的 generation 变化都会淘汰旧恢复或发布。用户取消备份恢复或导入提交失败时数据库未替换，现有警告与 exact ID 也不会提前失效。转任务警告在模态关闭后发布；直接转笔记只会在来源按钮移除导致焦点落到页面本身时接管恢复动作焦点。
+- 同一工作区的所有转任务与转笔记共用单飞身份，任一转换完成双侧对账前不会让第二个来源进入 Main。转笔记确认或警告存在时还会阻止竞争笔记写入、工作区切换和跨工作区搜索，恢复读取期间重新持有笔记协调器；转任务警告仍可由工作区切换或 A→B→A 淘汰。真正获批的数据恢复/导入以及每个 read/apply 之后的 generation 变化会淘汰对应旧恢复或发布；用户取消备份恢复或导入提交失败时数据库未替换，现有警告与 exact ID 也不会提前失效。转任务警告在模态关闭后发布；直接转笔记只会在来源按钮移除导致焦点落到页面本身时接管恢复动作焦点。
 - 转换成功后 Renderer 仍停留在 Inbox，并显示显式打开入口。用户点击后必须 fresh-read 对应快照，同时精确匹配创建 ID 与原始 `sourceInboxEntryId`，并在快照 commit 成功后才导航；不会仅凭标题、时间、来源关系或列表位置猜测目标。
 - 转换反馈与导航 intent 都绑定当前 Inbox 页面、反馈身份和工作区 activation 对象。切页、较新转换、工作区切换、A→B→A 或迟到 read/commit/finally 会淘汰旧意图；打开失败仍留在 Inbox，不会回退到其他任务或笔记。
 
@@ -207,7 +207,10 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 
 - 笔记 ID、时间戳、revision 和收件箱来源只由 Main 生成或推进。
 - 创建响应携带 Main 实际插入的 `createdNoteId` 与同一事务后的完整笔记快照；Renderer 只按该 ID 取得新建对象，不能根据标题、正文、时间或调用前后的 ID 差集猜测。Renderer 的笔记快照、加载、错误和 pending 操作同时绑定每次工作区 activation 对象，A→B→A 后旧 A 的迟到成功、失败或 cleanup 不能进入新的 A 页面。
-- 手动创建只有在事务快照或最多两次权威 fresh-read 中唯一找到 `createdNoteId`，且对应快照真正提交到当前 activation 后，才清除草稿并把编辑器交接到新笔记。Main 已提交但 Renderer 仍无法同步时，App 按 workspace/page generation activation 保存精确 ID 与已提交内容；Notes 组件即使因同工作区切页而卸载，返回后也会重建不可再次保存的内容和独立重新读取警告。创建 pending 或该警告存在时，全局搜索拒绝启动会缓存旧草稿丢弃决定的异步导航。工作区切换、数据替换或精确恢复会使旧状态失效；真正的 IPC 创建失败才保留可编辑、可重试的草稿。缺失 selection 不会静默回退到列表第一篇笔记。
+- 手动创建只有在事务快照或最多两次权威 fresh-read 中唯一找到 `createdNoteId`，且对应快照真正提交到当前 activation 后，才清除草稿并把编辑器交接到新笔记。Main 已提交但 Renderer 仍无法同步时，App 按 workspace/page generation activation 保存精确 ID 与已提交内容；Notes 组件即使因同工作区切页而卸载，返回后也会重建不可再次保存的内容和独立重新读取警告。创建 pending 或该警告存在时会阻止工作区切换、新建或归档当前工作区以及跨工作区搜索；只有精确恢复或真正获批并提交的数据替换才使旧状态失效。真正的 IPC 创建失败才保留可编辑、可重试的草稿。缺失 selection 不会静默回退到列表第一篇笔记。
+- `note:update` 成功响应必须在当前工作区唯一匹配原 opaque ID、规范化标题/正文、预期 revision、`sourceInboxEntryId` 与 `createdAt`；实质更新的 `updatedAt` 不得回拨，无内容变化则 revision 与 `updatedAt` 必须保持不变。`note:archive` 只有在同一工作区已提交的活动快照中找不到该 ID 时才确认。Renderer 会依次尝试事务响应、最新已提交 ref、最多两次 fresh-read 和最终 ref 复查，并在每次 await 与 commit 前后验证原 intent 仍有效；`commit=false` 不能清草稿或 selection。
+- Main 已成功但上述确认仍失败时，App 持有精确 update/archive intent、事务快照和只读展示内容；Notes 重挂载仍显示“已保存/已归档，等待同步”，且恢复 busy/error 不落回组件局部状态。保存或归档按钮失焦时才把焦点交给“重新读取”；更新恢复后进入精确笔记，归档恢复后回到 Notes 标题。整个工作区在手动创建、编辑、归档、收件箱转笔记、AI 保存与立即运行笔记动作的写入/对账周期内保持 single-flight；精确笔记警告未恢复时继续阻断竞争写入、工作区变更和跨工作区搜索，恢复读取重新持有同一协调器。
+- 数据恢复或导入只有在 Main 真正批准并提交替换后才使 note mutation coordinator 与警告失效；用户取消、原生确认取消或提交失败都保留原数据库对应的精确恢复态。这个 Renderer 协调层不新增 IPC、schema 或 migration。
 - 标题最多 200 个 Unicode code point；Markdown 正文最多 100,000 个 code point。Main 会把 CRLF/CR 统一为 LF，保留 Markdown、代码和普通换行，同时拒绝 NUL、畸形 Unicode 和不支持的控制字符。
 - 编辑与归档必须提交 `expectedRevision`。数据库中的 revision 已变化时拒绝旧写入，Renderer 需要基于最新快照重新处理，不能让迟到自动保存覆盖新内容。
 - 归档是软归档。归档工作区中的笔记继续进入备份，但 Service 与 Trigger 都拒绝修改或删除。
