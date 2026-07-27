@@ -204,6 +204,7 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 
 - 笔记 ID、时间戳、revision 和收件箱来源只由 Main 生成或推进。
 - 创建响应携带 Main 实际插入的 `createdNoteId` 与同一事务后的完整笔记快照；Renderer 只按该 ID 取得新建对象，不能根据标题、正文、时间或调用前后的 ID 差集猜测。Renderer 的笔记快照、加载、错误和 pending 操作同时绑定每次工作区 activation 对象，A→B→A 后旧 A 的迟到成功、失败或 cleanup 不能进入新的 A 页面。
+- 手动创建只有在事务快照或最多两次权威 fresh-read 中唯一找到 `createdNoteId`，且对应快照真正提交到当前 activation 后，才清除草稿并把编辑器交接到新笔记。Main 已提交但 Renderer 仍无法同步时，App 按 workspace/page generation activation 保存精确 ID 与已提交内容；Notes 组件即使因同工作区切页而卸载，返回后也会重建不可再次保存的内容和独立重新读取警告。创建 pending 或该警告存在时，全局搜索拒绝启动会缓存旧草稿丢弃决定的异步导航。工作区切换、数据替换或精确恢复会使旧状态失效；真正的 IPC 创建失败才保留可编辑、可重试的草稿。缺失 selection 不会静默回退到列表第一篇笔记。
 - 标题最多 200 个 Unicode code point；Markdown 正文最多 100,000 个 code point。Main 会把 CRLF/CR 统一为 LF，保留 Markdown、代码和普通换行，同时拒绝 NUL、畸形 Unicode 和不支持的控制字符。
 - 编辑与归档必须提交 `expectedRevision`。数据库中的 revision 已变化时拒绝旧写入，Renderer 需要基于最新快照重新处理，不能让迟到自动保存覆盖新内容。
 - 归档是软归档。归档工作区中的笔记继续进入备份，但 Service 与 Trigger 都拒绝修改或删除。

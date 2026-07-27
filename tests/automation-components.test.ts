@@ -123,6 +123,10 @@ describe('automation renderer components', () => {
         onCreate: async () => {
           throw new Error('not used');
         },
+        createSyncWarning: null,
+        onCreateSyncWarning: () => undefined,
+        onCreateSyncResolved: () => undefined,
+        onRefreshCreated: async () => null,
         onUpdate: async () => {
           throw new Error('not used');
         },

@@ -18,10 +18,17 @@ import {
   useState,
   type FormEvent,
 } from 'react';
-import type { Note } from '../../shared/contracts';
+import type { Note, NoteCreateResult } from '../../shared/contracts';
 import { NOTE_BODY_MAX_LENGTH, NOTE_TITLE_MAX_LENGTH } from '../../shared/note-domain';
-import { filterNotes, isNoteDraftDirty, noteExcerpt } from '../note-state';
+import type { NoteCreateCommit } from '../hooks/useNoteController';
+import {
+  filterNotes,
+  isNoteDraftDirty,
+  noteExcerpt,
+  type NoteCreateSyncWarningTarget,
+} from '../note-state';
 import { MarkdownPreview } from './MarkdownPreview';
+import { NoteCreateSyncWarning } from './NoteCreateSyncWarning';
 
 interface NoteEditorState {
   readonly key: string;
@@ -45,7 +52,11 @@ interface NotePageProps {
   onRequestedNoteHandled: () => void;
   onDirtyChange: (dirty: boolean) => void;
   onRetry: () => void;
-  onCreate: (title: string, body: string) => Promise<Note>;
+  onCreate: (title: string, body: string) => Promise<NoteCreateCommit>;
+  createSyncWarning: NoteCreateSyncWarningTarget | null;
+  onCreateSyncWarning: (warning: NoteCreateSyncWarningTarget) => void;
+  onCreateSyncResolved: (warning: NoteCreateSyncWarningTarget) => void;
+  onRefreshCreated: (result: NoteCreateResult) => Promise<Note | null>;
   onUpdate: (note: Note, title: string, body: string) => Promise<Note>;
   onArchive: (note: Note) => Promise<void>;
   onOpenLink: (url: string) => void;
@@ -65,6 +76,10 @@ export function NotePage({
   onDirtyChange,
   onRetry,
   onCreate,
+  createSyncWarning,
+  onCreateSyncWarning,
+  onCreateSyncResolved,
+  onRefreshCreated,
   onUpdate,
   onArchive,
   onOpenLink,
@@ -75,12 +90,31 @@ export function NotePage({
   const [draft, setDraft] = useState<NoteEditorState | null>(null);
   const [editorMode, setEditorMode] = useState<'edit' | 'preview'>('edit');
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [focusCreateSyncWarningAction, setFocusCreateSyncWarningAction] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const saveButtonRef = useRef<HTMLButtonElement>(null);
+  const saveInFlightRef = useRef(false);
+  const createRecoveryPendingRef = useRef(createSyncWarning !== null);
   const visibleNotes = useMemo(() => filterNotes(notes, query), [notes, query]);
   const requestedNoteUnavailable =
-    requestedNoteId !== null && !notes.some(({ id }) => id === requestedNoteId);
+    createSyncWarning === null &&
+    requestedNoteId !== null &&
+    !notes.some(({ id }) => id === requestedNoteId);
+  const selectedNoteUnavailable =
+    createSyncWarning === null &&
+    requestedNoteId === null &&
+    selection?.kind === 'note' &&
+    !notes.some(({ id }) => id === selection.noteId);
   const editor = useMemo<NoteEditorState | null>(() => {
+    if (createSyncWarning) {
+      return {
+        key: 'new',
+        note: null,
+        title: createSyncWarning.title,
+        body: createSyncWarning.body,
+      };
+    }
     const requestedNote = requestedNoteId
       ? (notes.find(({ id }) => id === requestedNoteId) ?? null)
       : null;
@@ -89,7 +123,11 @@ export function NotePage({
     const activeNote =
       requestedNoteId !== null
         ? requestedNote
-        : (selectedNote ?? (selection?.kind === 'new' ? null : (notes[0] ?? null)));
+        : selection?.kind === 'note'
+          ? selectedNote
+          : selection?.kind === 'new'
+            ? null
+            : (notes[0] ?? null);
     const editorKey =
       requestedNoteId !== null
         ? (activeNote?.id ?? null)
@@ -116,21 +154,26 @@ export function NotePage({
       };
     }
     return { key: 'new', note: null, title: '', body: '' };
-  }, [draft, notes, requestedNoteId, selection]);
+  }, [createSyncWarning, draft, notes, requestedNoteId, selection]);
   const dirty = editor ? isNoteDraftDirty(editor.note, editor.title, editor.body) : false;
   const titleLength = Array.from(editor?.title.trim() ?? '').length;
   const bodyLength = Array.from(editor?.body ?? '').length;
   const titleInvalid = titleLength < 1 || titleLength > NOTE_TITLE_MAX_LENGTH;
   const bodyInvalid = bodyLength > NOTE_BODY_MAX_LENGTH;
   const saving = editor?.note ? pendingNoteIds.has(editor.note.id) : pendingCreate;
+  const createRecoveryPending = createSyncWarning !== null;
+  const unsavedDirty = dirty && !createRecoveryPending;
+  const createNavigationLocked = pendingCreate || createRecoveryPending;
+  const editorLocked = saving || createNavigationLocked;
 
   const confirmDiscard = useCallback(
-    () => !dirty || window.confirm('这篇笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
-    [dirty],
+    () => !unsavedDirty || window.confirm('这篇笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
+    [unsavedDirty],
   );
 
   const openNote = useCallback(
     (note: Note) => {
+      if (createNavigationLocked || createRecoveryPendingRef.current) return;
       if (!confirmDiscard()) return;
       onRequestedNoteHandled();
       setSelection({ kind: 'note', noteId: note.id });
@@ -138,10 +181,11 @@ export function NotePage({
       setEditorMode('edit');
       setSaveError(null);
     },
-    [confirmDiscard, onRequestedNoteHandled],
+    [confirmDiscard, createNavigationLocked, onRequestedNoteHandled],
   );
 
   const openNew = useCallback(() => {
+    if (createNavigationLocked || createRecoveryPendingRef.current) return;
     if (!confirmDiscard()) return;
     onRequestedNoteHandled();
     setSelection({ kind: 'new' });
@@ -149,11 +193,11 @@ export function NotePage({
     setEditorMode('edit');
     setSaveError(null);
     window.requestAnimationFrame(() => titleInputRef.current?.focus());
-  }, [confirmDiscard, onRequestedNoteHandled]);
+  }, [confirmDiscard, createNavigationLocked, onRequestedNoteHandled]);
 
   useLayoutEffect(() => {
-    onDirtyChange(dirty);
-  }, [dirty, onDirtyChange]);
+    onDirtyChange(unsavedDirty);
+  }, [onDirtyChange, unsavedDirty]);
 
   useLayoutEffect(() => {
     if (!requestedNoteId || editor?.note?.id !== requestedNoteId) return;
@@ -168,20 +212,105 @@ export function NotePage({
     [onDirtyChange],
   );
 
+  const selectCreatedNote = useCallback(
+    (note: Note, focusTitle: boolean, resetEditorMode: boolean): void => {
+      onRequestedNoteHandled();
+      setSelection({ kind: 'note', noteId: note.id });
+      setDraft(null);
+      if (resetEditorMode) setEditorMode('edit');
+      setSaveError(null);
+      setFocusCreateSyncWarningAction(false);
+      createRecoveryPendingRef.current = false;
+      if (focusTitle) {
+        window.requestAnimationFrame(() => titleInputRef.current?.focus({ preventScroll: true }));
+      }
+    },
+    [onRequestedNoteHandled],
+  );
+
   const save = useCallback(async () => {
-    if (!editor || saving || titleInvalid || bodyInvalid) return;
+    if (
+      !editor ||
+      editorLocked ||
+      saveInFlightRef.current ||
+      createRecoveryPendingRef.current ||
+      titleInvalid ||
+      bodyInvalid
+    ) {
+      return;
+    }
+    saveInFlightRef.current = true;
+    let releaseAfterRender = false;
+    const saveStartedFromButton = document.activeElement === saveButtonRef.current;
     setSaveError(null);
     try {
-      const saved = editor.note
-        ? await onUpdate(editor.note, editor.title, editor.body)
-        : await onCreate(editor.title, editor.body);
-      onRequestedNoteHandled();
-      setSelection({ kind: 'note', noteId: saved.id });
-      setDraft(null);
+      if (editor.note) {
+        const saved = await onUpdate(editor.note, editor.title, editor.body);
+        releaseAfterRender = true;
+        selectCreatedNote(saved, false, false);
+        return;
+      }
+
+      const commit = await onCreate(editor.title, editor.body);
+      const createdNote =
+        commit.committed &&
+        commit.createdNote !== null &&
+        commit.createdNote.id === commit.result.createdNoteId
+          ? commit.createdNote
+          : null;
+      if (createdNote) {
+        releaseAfterRender = true;
+        selectCreatedNote(createdNote, false, true);
+        return;
+      }
+
+      createRecoveryPendingRef.current = true;
+      releaseAfterRender = true;
+      onCreateSyncWarning({
+        result: commit.result,
+        title: editor.title,
+        body: editor.body,
+        message:
+          commit.reconciliationWarning ??
+          '笔记已创建，但当前笔记列表未能同步。请重新读取后查看，避免重复创建。',
+      });
+      setFocusCreateSyncWarningAction(
+        saveStartedFromButton &&
+          (document.activeElement === saveButtonRef.current ||
+            document.activeElement === document.body),
+      );
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : '笔记保存失败，请重试。');
+    } finally {
+      if (releaseAfterRender) {
+        window.requestAnimationFrame(() => {
+          saveInFlightRef.current = false;
+        });
+      } else {
+        saveInFlightRef.current = false;
+      }
     }
-  }, [bodyInvalid, editor, onCreate, onRequestedNoteHandled, onUpdate, saving, titleInvalid]);
+  }, [
+    bodyInvalid,
+    editor,
+    editorLocked,
+    onCreate,
+    onCreateSyncWarning,
+    onUpdate,
+    selectCreatedNote,
+    titleInvalid,
+  ]);
+
+  const refreshCreatedNote = useCallback(async (): Promise<void> => {
+    const warning = createSyncWarning;
+    if (!warning) return;
+    const createdNote = await onRefreshCreated(warning.result);
+    if (!createdNote || createdNote.id !== warning.result.createdNoteId) {
+      throw new Error('The exact created note could not be confirmed.');
+    }
+    onCreateSyncResolved(warning);
+    selectCreatedNote(createdNote, true, true);
+  }, [createSyncWarning, onCreateSyncResolved, onRefreshCreated, selectCreatedNote]);
 
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -206,7 +335,7 @@ export function NotePage({
 
   const archiveCurrent = async () => {
     const note = editor?.note;
-    if (!note || saving || archiving) return;
+    if (!note || editorLocked || archiving) return;
     if (dirty && !confirmDiscard()) return;
     if (!window.confirm(`归档“${note.title}”？内容仍会保留在本地备份中。`)) return;
     setArchiving(true);
@@ -242,7 +371,7 @@ export function NotePage({
             </p>
           </div>
         </div>
-        <button type="button" className="primary-button" onClick={openNew} disabled={saving}>
+        <button type="button" className="primary-button" onClick={openNew} disabled={editorLocked}>
           <Plus size={15} aria-hidden="true" /> 新建笔记
         </button>
       </header>
@@ -268,6 +397,14 @@ export function NotePage({
             <p className="note-operation-error" role="alert">
               {operationError}
             </p>
+          ) : null}
+          {createSyncWarning ? (
+            <NoteCreateSyncWarning
+              title={createSyncWarning.title}
+              message={createSyncWarning.message}
+              focusActionOnMount={focusCreateSyncWarningAction}
+              onRefresh={refreshCreatedNote}
+            />
           ) : null}
           <section className="note-workspace">
             <aside className="note-library" aria-label="笔记列表">
@@ -295,6 +432,7 @@ export function NotePage({
                     className={editor?.note?.id === note.id ? 'is-active' : ''}
                     key={note.id}
                     onClick={() => openNote(note)}
+                    disabled={createNavigationLocked}
                   >
                     <span>
                       <FileText size={14} aria-hidden="true" />
@@ -309,7 +447,7 @@ export function NotePage({
                     <Search size={18} />
                     <span>{notes.length === 0 ? '还没有笔记' : '没有匹配的笔记'}</span>
                     {notes.length === 0 ? (
-                      <button type="button" onClick={openNew}>
+                      <button type="button" onClick={openNew} disabled={createNavigationLocked}>
                         创建第一篇
                       </button>
                     ) : null}
@@ -319,7 +457,7 @@ export function NotePage({
             </aside>
 
             <div className="note-editor-shell">
-              {requestedNoteUnavailable ? (
+              {requestedNoteUnavailable || selectedNoteUnavailable ? (
                 <div className="note-editor-empty" role="alert">
                   <NotebookPen size={25} />
                   <h2>要打开的笔记已不可用</h2>
@@ -330,6 +468,7 @@ export function NotePage({
                     onClick={() => {
                       onRequestedNoteHandled();
                       setSelection(null);
+                      setDraft(null);
                     }}
                   >
                     返回笔记列表
@@ -345,6 +484,7 @@ export function NotePage({
                         aria-selected={editorMode === 'edit'}
                         className={editorMode === 'edit' ? 'is-active' : ''}
                         onClick={() => setEditorMode('edit')}
+                        disabled={createNavigationLocked}
                       >
                         <PencilLine size={13} /> 编辑
                       </button>
@@ -354,6 +494,7 @@ export function NotePage({
                         aria-selected={editorMode === 'preview'}
                         className={editorMode === 'preview' ? 'is-active' : ''}
                         onClick={() => setEditorMode('preview')}
+                        disabled={createNavigationLocked}
                       >
                         <FileText size={13} /> 预览
                       </button>
@@ -362,15 +503,19 @@ export function NotePage({
                       className={`note-editor__status${saveError ? ' is-error' : ''}`}
                       role="status"
                     >
-                      {saveError
-                        ? '保存失败'
-                        : saving
-                          ? '保存中…'
-                          : dirty
-                            ? '未保存'
-                            : editor.note
-                              ? `已保存 · 修订 ${editor.note.revision}`
-                              : '新笔记'}
+                      {createRecoveryPending
+                        ? '已创建 · 等待同步'
+                        : pendingCreate
+                          ? '正在确认新笔记…'
+                          : saveError
+                            ? '保存失败'
+                            : saving
+                              ? '保存中…'
+                              : dirty
+                                ? '未保存'
+                                : editor.note
+                                  ? `已保存 · 修订 ${editor.note.revision}`
+                                  : '新笔记'}
                     </span>
                     {editor.note ? (
                       <button
@@ -379,7 +524,7 @@ export function NotePage({
                         onClick={() => {
                           if (editor.note) onOpenAssistant(editor.note);
                         }}
-                        disabled={dirty || saving || archiving}
+                        disabled={dirty || editorLocked || archiving}
                         aria-describedby={dirty ? 'note-assistant-disabled-reason' : undefined}
                       >
                         <MessageSquareText size={14} />
@@ -396,7 +541,7 @@ export function NotePage({
                         type="button"
                         className="note-editor__archive"
                         onClick={() => void archiveCurrent()}
-                        disabled={saving || archiving}
+                        disabled={editorLocked || archiving}
                       >
                         {archiving ? (
                           <LoaderCircle className="is-spinning" size={14} />
@@ -407,16 +552,17 @@ export function NotePage({
                       </button>
                     ) : null}
                     <button
+                      ref={saveButtonRef}
                       type="submit"
                       className="note-editor__save"
-                      disabled={!dirty || saving || titleInvalid || bodyInvalid}
+                      disabled={!dirty || editorLocked || titleInvalid || bodyInvalid}
                     >
-                      {saving ? (
+                      {saving || pendingCreate ? (
                         <LoaderCircle className="is-spinning" size={14} />
                       ) : (
                         <Check size={14} />
                       )}
-                      {saving ? '保存中…' : '保存'}
+                      {pendingCreate ? '创建中…' : saving ? '保存中…' : '保存'}
                     </button>
                   </header>
 
@@ -428,8 +574,13 @@ export function NotePage({
                       onChange={(event) => setDraft({ ...editor, title: event.target.value })}
                       placeholder="笔记标题"
                       disabled={saving}
+                      readOnly={createNavigationLocked}
                       aria-invalid={titleInvalid}
-                      aria-describedby="note-title-count"
+                      aria-describedby={
+                        createRecoveryPending
+                          ? 'note-title-count note-create-sync-warning-message'
+                          : 'note-title-count'
+                      }
                     />
                     <small id="note-title-count" className={titleInvalid ? 'is-error' : undefined}>
                       {titleLength} / {NOTE_TITLE_MAX_LENGTH}
@@ -444,8 +595,13 @@ export function NotePage({
                         onChange={(event) => setDraft({ ...editor, body: event.target.value })}
                         placeholder={'使用 Markdown 记录内容…\n\n# 标题\n- 清单\n- `代码`'}
                         disabled={saving}
+                        readOnly={createNavigationLocked}
                         aria-invalid={bodyInvalid}
-                        aria-describedby="note-body-count"
+                        aria-describedby={
+                          createRecoveryPending
+                            ? 'note-body-count note-create-sync-warning-message'
+                            : 'note-body-count'
+                        }
                         spellCheck
                       />
                     </label>
@@ -474,7 +630,12 @@ export function NotePage({
                   <NotebookPen size={25} />
                   <h2>{notes.length === 0 ? '创建第一篇笔记' : '选择一篇笔记'}</h2>
                   <p>在编辑与安全预览之间切换，确认后显式保存到当前工作区。</p>
-                  <button type="button" className="secondary-button" onClick={openNew}>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={openNew}
+                    disabled={createNavigationLocked}
+                  >
                     <Plus size={14} /> 新建笔记
                   </button>
                 </div>

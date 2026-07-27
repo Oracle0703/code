@@ -102,6 +102,14 @@ import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
 import {
+  clearResolvedNoteCreateSyncWarning,
+  createNoteWorkspaceIdentity,
+  isNoteCreateNavigationBlocked,
+  noteCreateSyncWarningForActivation,
+  type NoteCreateSyncWarningState,
+  type NoteCreateSyncWarningTarget,
+} from './note-state';
+import {
   AssistantSavedNoteNavigationCoordinator,
   AssistantSavedNoteSaveGate,
   AssistantSavedNoteSupersededError,
@@ -345,6 +353,8 @@ export function App() {
   const [focusTaskCompletionAction, setFocusTaskCompletionAction] =
     useState<FocusTaskCompletionActionState | null>(null);
   const [noteDraftDirty, setNoteDraftDirty] = useState(false);
+  const [noteCreateSyncWarningState, setNoteCreateSyncWarningState] =
+    useState<NoteCreateSyncWarningState | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [assistantSurfaceOpen, setAssistantSurfaceOpen] = useState(false);
   const [assistantEntry, setAssistantEntry] = useState<{
@@ -469,6 +479,7 @@ export function App() {
   const focusTaskCompletionNoticeRef = useRef<FocusTaskCompletionNotice | null>(null);
   const focusTaskCompletionSurfaceRef = useRef<AppSurfaceId>('today');
   const noteDraftDirtyRef = useRef(false);
+  const noteCreateActivationRef = useRef(createNoteWorkspaceIdentity(null));
   const dataReplacementApprovedRef = useRef(false);
   const dataReplacementNoteDiscardApprovedRef = useRef(false);
   const snapshot = workspaceController.snapshot;
@@ -484,6 +495,13 @@ export function App() {
   const assistantSavedNoteActivation = useMemo(
     () => createAssistantWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
+  );
+  const noteCreateActivation = useMemo(
+    () => ({
+      ...createNoteWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+      pageGeneration: notePageGeneration,
+    }),
+    [notePageGeneration, snapshot?.currentWorkspaceId],
   );
   const inboxCaptureActivation = useMemo(
     () => createInboxCaptureWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
@@ -501,6 +519,9 @@ export function App() {
     () => createAutomationCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
+  useLayoutEffect(() => {
+    noteCreateActivationRef.current = noteCreateActivation;
+  }, [noteCreateActivation]);
   useEffect(() => {
     currentWorkspaceIdRef.current = snapshot?.currentWorkspaceId ?? null;
   }, [snapshot?.currentWorkspaceId]);
@@ -555,6 +576,10 @@ export function App() {
     inboxConversionFeedbackState?.activation === inboxController.activation
       ? inboxConversionFeedbackState.feedback
       : null;
+  const visibleNoteCreateSyncWarning = noteCreateSyncWarningForActivation(
+    noteCreateActivation,
+    noteCreateSyncWarningState,
+  );
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
   const createNote = noteController.create;
@@ -934,6 +959,25 @@ export function App() {
   const updateNoteDraftDirty = useCallback(
     (dirty: boolean) => synchronizeDirtyDraft(noteDraftDirtyRef, setNoteDraftDirty, dirty),
     [],
+  );
+  const publishNoteCreateSyncWarning = useCallback(
+    (warning: NoteCreateSyncWarningTarget): void => {
+      const activation = noteCreateActivation;
+      if (noteCreateActivationRef.current !== activation) return;
+      updateNoteDraftDirty(false);
+      setNoteCreateSyncWarningState({ activation, ...warning });
+    },
+    [noteCreateActivation, updateNoteDraftDirty],
+  );
+  const resolveNoteCreateSyncWarning = useCallback(
+    (warning: NoteCreateSyncWarningTarget): void => {
+      const activation = noteCreateActivation;
+      if (noteCreateActivationRef.current !== activation) return;
+      setNoteCreateSyncWarningState((current) =>
+        clearResolvedNoteCreateSyncWarning(current, activation, warning),
+      );
+    },
+    [noteCreateActivation],
   );
   const handleRequestedInboxEntry = useCallback(() => {
     const expectedGeneration = inboxReveal?.generation;
@@ -2344,15 +2388,13 @@ export function App() {
         throw new Error('这个回答正在保存，请稍候。');
       }
       try {
-        const note = await createNote(
-          `AI 助手回复 · ${new Intl.DateTimeFormat('zh-CN').format(new Date())}`,
-          response,
-        );
+        const noteTitle = `AI 助手回复 · ${new Intl.DateTimeFormat('zh-CN').format(new Date())}`;
+        const commit = await createNote(noteTitle, response);
         const target: AssistantSavedNoteTarget = {
           responseKey,
           workspaceId: activation.workspaceId,
-          noteId: note.id,
-          noteTitle: note.title,
+          noteId: commit.result.createdNoteId,
+          noteTitle: commit.createdNote?.title ?? noteTitle,
         };
         rememberAssistantSavedNote(target);
         return target;
@@ -2806,6 +2848,11 @@ export function App() {
 
   const selectSearchResult = useCallback(
     async (selectedResult: SearchResult): Promise<void> => {
+      if (
+        isNoteCreateNavigationBlocked(noteController.pendingCreate, visibleNoteCreateSyncWarning)
+      ) {
+        throw new Error('刚创建的笔记仍在确认，请先返回笔记页面完成重新读取，再打开搜索结果。');
+      }
       if (!confirmLeaveNoteDraft()) {
         throw new Error('已取消打开搜索结果；当前笔记仍保留未保存的更改。');
       }
@@ -2970,9 +3017,11 @@ export function App() {
       inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
+      noteController.pendingCreate,
       searchNavigation,
       taskCreateCoordinator,
       updatePreferences,
+      visibleNoteCreateSyncWarning,
       workspaceController,
     ],
   );
@@ -3648,6 +3697,10 @@ export function App() {
                     onDirtyChange={updateNoteDraftDirty}
                     onRetry={noteController.retry}
                     onCreate={noteController.create}
+                    createSyncWarning={visibleNoteCreateSyncWarning}
+                    onCreateSyncWarning={publishNoteCreateSyncWarning}
+                    onCreateSyncResolved={resolveNoteCreateSyncWarning}
+                    onRefreshCreated={noteController.recoverCreatedNote}
                     onUpdate={noteController.update}
                     onArchive={noteController.archive}
                     onOpenLink={(url) => {

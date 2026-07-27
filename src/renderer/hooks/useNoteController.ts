@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { Note, NoteConversionResult, NoteSnapshot } from '../../shared/contracts';
+import type {
+  Note,
+  NoteConversionResult,
+  NoteCreateResult,
+  NoteSnapshot,
+} from '../../shared/contracts';
 import {
+  beginPendingNoteCreate,
   convertedNoteFromResult,
   createdNoteFromResult,
   createNoteRequestIdentity,
   createNoteWorkspaceIdentity,
+  endPendingNoteCreate,
   isNoteRequestCurrent,
   isNoteRequestLatest,
   noteSnapshotForActivation,
+  reconcileNoteCreateResult,
   shouldApplyNoteSnapshot,
   type NoteRequestIdentity,
   type NoteSnapshotState,
@@ -29,6 +37,8 @@ interface NoteOperationError {
 
 const EMPTY_NOTES: readonly Note[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createNoteWorkspaceIdentity(null));
+const NOTE_CREATE_RECONCILIATION_ERROR =
+  '笔记已创建，但当前笔记列表未能同步。请重新读取后查看，避免重复创建。';
 
 export interface NoteInboxConversionCommit {
   readonly result: NoteConversionResult;
@@ -36,10 +46,18 @@ export interface NoteInboxConversionCommit {
   readonly committed: boolean;
 }
 
+export interface NoteCreateCommit {
+  readonly result: NoteCreateResult;
+  readonly createdNote: Note | null;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
+}
+
 export function useNoteController(workspaceId: string | null) {
   const activation = useMemo(() => createNoteWorkspaceIdentity(workspaceId), [workspaceId]);
   const activeActivationRef = useRef<NoteWorkspaceIdentity>(activation);
   const [storedSnapshot, setStoredSnapshot] = useState<NoteSnapshotState | null>(null);
+  const storedSnapshotRef = useRef<NoteSnapshotState | null>(null);
   const [loadState, setLoadState] = useState<NoteLoadState>({
     activation,
     status: 'loading',
@@ -49,9 +67,9 @@ export function useNoteController(workspaceId: string | null) {
   const [pendingNoteOperations, setPendingNoteOperations] = useState<
     ReadonlyMap<string, NoteWorkspaceIdentity>
   >(() => new Map());
-  const [pendingCreateActivations, setPendingCreateActivations] = useState<
-    ReadonlySet<NoteWorkspaceIdentity>
-  >(() => new Set());
+  const [pendingCreateWorkspaceIds, setPendingCreateWorkspaceIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [pendingConversionOperations, setPendingConversionOperations] = useState<
     ReadonlyMap<string, NoteWorkspaceIdentity>
   >(() => new Map());
@@ -59,8 +77,13 @@ export function useNoteController(workspaceId: string | null) {
   const latestRequestSequenceRef = useRef(-1);
   const appliedSequenceRef = useRef(-1);
   const pendingNoteOperationsRef = useRef(new Map<string, NoteWorkspaceIdentity>());
-  const pendingCreateActivationsRef = useRef(new Set<NoteWorkspaceIdentity>());
+  const pendingCreateWorkspaceIdsRef = useRef(new Set<string>());
   const pendingConversionOperationsRef = useRef(new Map<string, NoteWorkspaceIdentity>());
+
+  const setStored = useCallback((value: NoteSnapshotState | null) => {
+    storedSnapshotRef.current = value;
+    setStoredSnapshot(value);
+  }, []);
 
   const beginRequest = useCallback((target: NoteWorkspaceIdentity): NoteRequestIdentity | null => {
     if (target.workspaceId === null) return null;
@@ -88,7 +111,7 @@ export function useNoteController(workspaceId: string | null) {
         return false;
       }
       appliedSequenceRef.current = request.sequence;
-      setStoredSnapshot({ activation: request.workspace, snapshot });
+      setStored({ activation: request.workspace, snapshot });
       setLoadState({
         activation: request.workspace,
         status: 'ready',
@@ -96,7 +119,7 @@ export function useNoteController(workspaceId: string | null) {
       });
       return true;
     },
-    [],
+    [setStored],
   );
 
   const load = useCallback(
@@ -120,7 +143,7 @@ export function useNoteController(workspaceId: string | null) {
           requestIsCurrent(request) &&
           isNoteRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
-          setStoredSnapshot(null);
+          setStored(null);
           setLoadState({
             activation: request.workspace,
             status: 'error',
@@ -130,7 +153,7 @@ export function useNoteController(workspaceId: string | null) {
         throw error;
       }
     },
-    [applySnapshot, beginRequest, requestIsCurrent],
+    [applySnapshot, beginRequest, requestIsCurrent, setStored],
   );
 
   const prepareSnapshotRefresh = useCallback(async () => {
@@ -182,17 +205,18 @@ export function useNoteController(workspaceId: string | null) {
   }, []);
 
   const beginPendingCreate = useCallback((target: NoteWorkspaceIdentity): boolean => {
-    if (pendingCreateActivationsRef.current.has(target)) return false;
-    pendingCreateActivationsRef.current = new Set(pendingCreateActivationsRef.current).add(target);
-    setPendingCreateActivations(pendingCreateActivationsRef.current);
+    const next = beginPendingNoteCreate(pendingCreateWorkspaceIdsRef.current, target.workspaceId);
+    if (next === null) return false;
+    pendingCreateWorkspaceIdsRef.current = new Set(next);
+    setPendingCreateWorkspaceIds(next);
     return true;
   }, []);
 
   const endPendingCreate = useCallback((target: NoteWorkspaceIdentity): void => {
-    const next = new Set(pendingCreateActivationsRef.current);
-    next.delete(target);
-    pendingCreateActivationsRef.current = next;
-    setPendingCreateActivations(next);
+    const next = endPendingNoteCreate(pendingCreateWorkspaceIdsRef.current, target.workspaceId);
+    if (next === pendingCreateWorkspaceIdsRef.current) return;
+    pendingCreateWorkspaceIdsRef.current = new Set(next);
+    setPendingCreateWorkspaceIds(next);
   }, []);
 
   const beginPendingConversion = useCallback(
@@ -236,7 +260,7 @@ export function useNoteController(workspaceId: string | null) {
   );
 
   const create = useCallback(
-    async (title: string, body: string): Promise<Note> => {
+    async (title: string, body: string): Promise<NoteCreateCommit> => {
       const target = activeActivationRef.current;
       if (target.workspaceId === null || !beginPendingCreate(target)) {
         throw new Error('这个工作区正在创建另一篇笔记。');
@@ -248,22 +272,94 @@ export function useNoteController(workspaceId: string | null) {
       }
       setOperationErrorState(null);
       try {
-        const result = await window.workbench.note.create({
-          workspaceId: request.workspaceId,
-          title,
-          body,
+        let result: NoteCreateResult;
+        try {
+          result = await window.workbench.note.create({
+            workspaceId: request.workspaceId,
+            title,
+            body,
+          });
+        } catch (error) {
+          throw operationFailure(error, request.workspace, '笔记创建失败，请重试。');
+        }
+
+        const reconciliation = await reconcileNoteCreateResult({
+          expectedWorkspaceId: request.workspaceId,
+          result,
+          commitResultSnapshot: () => applySnapshot(result.noteSnapshot, request),
+          getCommittedNote: () => {
+            const currentSnapshot = noteSnapshotForActivation(
+              request.workspace,
+              storedSnapshotRef.current,
+            );
+            return currentSnapshot
+              ? createdNoteFromResult(request.workspaceId, {
+                  noteSnapshot: currentSnapshot,
+                  createdNoteId: result.createdNoteId,
+                })
+              : null;
+          },
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
         });
-        applySnapshot(result.noteSnapshot, request);
-        const created = createdNoteFromResult(request.workspaceId, result);
-        if (!created) throw new Error('The created note was not returned.');
-        return created;
-      } catch (error) {
-        throw operationFailure(error, request.workspace, '笔记创建失败，请重试。');
+
+        return {
+          result,
+          createdNote: reconciliation.createdNote,
+          committed: reconciliation.committed,
+          reconciliationWarning:
+            !reconciliation.committed && requestIsCurrent(request)
+              ? NOTE_CREATE_RECONCILIATION_ERROR
+              : null,
+        };
       } finally {
         endPendingCreate(request.workspace);
       }
     },
-    [applySnapshot, beginPendingCreate, beginRequest, endPendingCreate, operationFailure],
+    [
+      applySnapshot,
+      beginPendingCreate,
+      beginRequest,
+      endPendingCreate,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
+  );
+
+  const recoverCreatedNote = useCallback(
+    async (result: NoteCreateResult): Promise<Note | null> => {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || result.noteSnapshot.workspaceId !== target.workspaceId) {
+        return null;
+      }
+
+      try {
+        const refresh = await prepareSnapshotRefresh();
+        if (
+          activeActivationRef.current !== target ||
+          refresh.snapshot.workspaceId !== target.workspaceId
+        ) {
+          return null;
+        }
+        const createdNote = createdNoteFromResult(target.workspaceId, {
+          noteSnapshot: refresh.snapshot,
+          createdNoteId: result.createdNoteId,
+        });
+        if (!createdNote || !refresh.commit()) return null;
+
+        const committedSnapshot = noteSnapshotForActivation(target, storedSnapshotRef.current);
+        return committedSnapshot
+          ? createdNoteFromResult(target.workspaceId, {
+              noteSnapshot: committedSnapshot,
+              createdNoteId: result.createdNoteId,
+            })
+          : null;
+      } catch {
+        return null;
+      }
+    },
+    [prepareSnapshotRefresh],
   );
 
   const update = useCallback(
@@ -405,7 +501,8 @@ export function useNoteController(workspaceId: string | null) {
     loadError: visibleLoadState.error,
     operationError: operationErrorMessage,
     pendingNoteIds,
-    pendingCreate: pendingCreateActivations.has(activation),
+    pendingCreate:
+      activation.workspaceId !== null && pendingCreateWorkspaceIds.has(activation.workspaceId),
     pendingConversionEntryIds,
     retry: () => {
       const current = activeActivationRef.current;
@@ -419,6 +516,7 @@ export function useNoteController(workspaceId: string | null) {
     clearOperationError: () =>
       setOperationErrorState((current) => (current?.activation === activation ? null : current)),
     create,
+    recoverCreatedNote,
     update,
     archive,
     convertInbox,
