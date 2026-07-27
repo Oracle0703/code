@@ -9,20 +9,18 @@ import type {
 } from '../../shared/contracts';
 import {
   automationSnapshotForActivation,
-  automationRunFeedbackForActivation,
-  automationRunFeedbackForCurrentWorkspace,
+  automationRunFeedbackAfterMainSuccess,
   createdAutomationFromResult,
   createAutomationRequestIdentity,
   createAutomationRunRequestIdentity,
   createAutomationWorkspaceIdentity,
   isAutomationRequestLatest,
   isAutomationRequestCurrent,
-  isAutomationRunRequestCurrent,
   reconcileAutomationCreateResult,
   shouldApplyAutomationSnapshot,
   sortAutomationItems,
   type AutomationRequestIdentity,
-  type AutomationRunFeedbackState,
+  type AutomationRunFeedback,
   type AutomationSnapshotState,
   type AutomationWorkspaceIdentity,
 } from '../automation-state';
@@ -64,30 +62,25 @@ export function useAutomationController(
   } | null>(null);
   const [pendingItemIds, setPendingItemIds] = useState<ReadonlySet<string>>(() => new Set());
   const [runningItemIds, setRunningItemIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [runFeedbackState, setRunFeedbackState] = useState<AutomationRunFeedbackState | null>(null);
   const [pendingCreateActivations, setPendingCreateActivations] = useState<
     ReadonlySet<AutomationWorkspaceIdentity>
   >(() => new Set());
-  const activeWorkspaceRef = useRef(workspaceId);
   const activeWorkspaceIdentity = useMemo(
     () => createAutomationWorkspaceIdentity(workspaceId),
     [workspaceId],
   );
   const activeWorkspaceIdentityRef = useRef(activeWorkspaceIdentity);
   useLayoutEffect(() => {
-    activeWorkspaceRef.current = workspaceId;
     activeWorkspaceIdentityRef.current = activeWorkspaceIdentity;
     return () => {
       if (activeWorkspaceIdentityRef.current === activeWorkspaceIdentity) {
-        activeWorkspaceRef.current = null;
         activeWorkspaceIdentityRef.current = INACTIVE_ACTIVATION;
       }
     };
-  }, [activeWorkspaceIdentity, workspaceId]);
+  }, [activeWorkspaceIdentity]);
   const onRunOutputRef = useRef(onRunOutput);
   const requestSequenceRef = useRef(0);
   const runRequestSequenceRef = useRef(0);
-  const latestRunRequestSequenceRef = useRef(0);
   const latestRequestSequenceRef = useRef(-1);
   const appliedSequenceRef = useRef(-1);
   const pendingItemIdsRef = useRef(new Set<string>());
@@ -406,10 +399,9 @@ export function useAutomationController(
   );
 
   const runNow = useCallback(
-    async (item: AutomationItem): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
+    async (item: AutomationItem): Promise<AutomationRunFeedback> => {
       const workspaceIdentity = activeWorkspaceIdentityRef.current;
-      if (!targetWorkspaceId || workspaceIdentity.workspaceId !== targetWorkspaceId) {
+      if (workspaceIdentity.workspaceId === null) {
         throw new Error('当前工作区正在切换，无法立即运行自动化。');
       }
       if (!beginPendingItem(item.id)) {
@@ -424,44 +416,26 @@ export function useAutomationController(
         endPendingItem(item.id);
         throw new Error('当前工作区不可用，无法立即运行自动化。');
       }
-      latestRunRequestSequenceRef.current = request.sequence;
-      const requestIsCurrent = () =>
-        isAutomationRunRequestCurrent(
-          activeWorkspaceIdentityRef.current,
-          latestRunRequestSequenceRef.current,
-          request,
-        );
       beginRunningItem(item.id);
       setOperationErrorState(null);
-      setRunFeedbackState(null);
       try {
-        const result = await window.workbench.automation.runNow({
-          workspaceId: targetWorkspaceId,
-          automationId: item.id,
-          expectedRevision: item.revision,
-        });
-        if (!requestIsCurrent()) return;
-        const feedback = automationRunFeedbackForCurrentWorkspace(
-          activeWorkspaceRef.current,
-          targetWorkspaceId,
-          item,
-          result,
-        );
-        if (feedback === null) {
-          throw new Error('自动化立即运行返回了不匹配的结果。');
+        let result;
+        try {
+          result = await window.workbench.automation.runNow({
+            workspaceId: request.workspaceId,
+            automationId: request.automationId,
+            expectedRevision: item.revision,
+          });
+        } catch (error) {
+          throw operationFailure(error, request.workspace, '自动化立即运行失败，请重试。');
         }
-        setRunFeedbackState({ workspace: request.workspace, feedback });
-      } catch (error) {
-        if (!requestIsCurrent()) return;
-        const message = toMessage(error, '自动化立即运行失败，请重试。');
-        setOperationErrorState({ activation: workspaceIdentity, message });
-        throw new Error(message, { cause: error });
+        return automationRunFeedbackAfterMainSuccess(request, item, result);
       } finally {
         endRunningItem(item.id);
         endPendingItem(item.id);
       }
     },
-    [beginPendingItem, beginRunningItem, endPendingItem, endRunningItem],
+    [beginPendingItem, beginRunningItem, endPendingItem, endRunningItem, operationFailure],
   );
 
   const snapshot = automationSnapshotForActivation(activeWorkspaceIdentity, storedSnapshot);
@@ -484,7 +458,6 @@ export function useAutomationController(
       operationErrorState?.activation === activeWorkspaceIdentity
         ? operationErrorState.message
         : null,
-    runFeedback: automationRunFeedbackForActivation(activeWorkspaceIdentity, runFeedbackState),
     pendingItemIds,
     runningItemIds,
     pendingCreate:

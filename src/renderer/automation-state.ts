@@ -28,6 +28,11 @@ export interface AutomationRunFeedback {
   readonly message: string;
 }
 
+export interface AutomationRunActivity {
+  readonly automationId: string;
+  readonly phase: 'running' | 'confirming' | 'recovering';
+}
+
 export interface AutomationWorkspaceIdentity {
   readonly workspaceId: string | null;
 }
@@ -68,11 +73,6 @@ export interface AutomationRunRequestIdentity {
   readonly workspaceId: string;
   readonly automationId: string;
   readonly sequence: number;
-}
-
-export interface AutomationRunFeedbackState {
-  readonly workspace: AutomationWorkspaceIdentity;
-  readonly feedback: AutomationRunFeedback;
 }
 
 export type AutomationRunNowConfirmation = (message: string) => boolean;
@@ -270,17 +270,6 @@ export function isAutomationRunRequestCurrent(
   );
 }
 
-export function automationRunFeedbackForActivation(
-  currentWorkspace: AutomationWorkspaceIdentity,
-  state: AutomationRunFeedbackState | null,
-): AutomationRunFeedback | null {
-  return state !== null &&
-    state.workspace === currentWorkspace &&
-    state.workspace.workspaceId === state.feedback.workspaceId
-    ? state.feedback
-    : null;
-}
-
 export function sortAutomationItems(items: readonly AutomationItem[]): readonly AutomationItem[] {
   return [...items].sort(
     (left, right) =>
@@ -338,17 +327,22 @@ export async function requestAutomationRunNow(
   return true;
 }
 
-export function automationRunFeedbackForCurrentWorkspace(
-  activeWorkspaceId: string | null,
-  targetWorkspaceId: string,
+export function automationRunFeedbackForRequest(
+  request: AutomationRunRequestIdentity,
   item: AutomationItem,
   result: AutomationRunNowResult,
 ): AutomationRunFeedback | null {
-  const expectedOutputKind = item.action.kind === 'create-today-task' ? 'task' : 'note';
+  const expectedOutputKind =
+    item.action.kind === 'create-today-task'
+      ? 'task'
+      : item.action.kind === 'create-note'
+        ? 'note'
+        : null;
   if (
-    activeWorkspaceId !== targetWorkspaceId ||
-    result.workspaceId !== targetWorkspaceId ||
-    result.automationId !== item.id ||
+    item.id !== request.automationId ||
+    expectedOutputKind === null ||
+    result.workspaceId !== request.workspaceId ||
+    result.automationId !== request.automationId ||
     result.outputKind !== expectedOutputKind ||
     typeof result.outputId !== 'string' ||
     result.outputId.trim().length === 0
@@ -363,6 +357,28 @@ export function automationRunFeedbackForCurrentWorkspace(
     outputTitle: item.action.title,
     message:
       result.outputKind === 'task'
+        ? `已立即创建今日任务：${item.action.title}`
+        : `已立即创建笔记：${item.action.title}`,
+  };
+}
+
+export function automationRunFeedbackAfterMainSuccess(
+  request: AutomationRunRequestIdentity,
+  item: AutomationItem,
+  result: AutomationRunNowResult,
+): AutomationRunFeedback {
+  const confirmed = automationRunFeedbackForRequest(request, item, result);
+  if (confirmed !== null) return confirmed;
+
+  const outputKind = item.action.kind === 'create-today-task' ? 'task' : 'note';
+  return {
+    workspaceId: request.workspaceId,
+    automationId: request.automationId,
+    outputKind,
+    outputId: `__unconfirmed_automation_output__:${request.sequence}`,
+    outputTitle: item.action.title,
+    message:
+      outputKind === 'task'
         ? `已立即创建今日任务：${item.action.title}`
         : `已立即创建笔记：${item.action.title}`,
   };

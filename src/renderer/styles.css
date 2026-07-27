@@ -3905,6 +3905,85 @@ textarea:focus-visible,
   cursor: default;
   opacity: 0.6;
 }
+.automation-run-sync-warning {
+  display: grid;
+  align-items: center;
+  margin: 12px 0 0;
+  padding: 10px 11px;
+  gap: 7px 9px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border-default));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.automation-run-sync-warning > svg {
+  align-self: start;
+  margin-top: 2px;
+  color: var(--warning);
+}
+.automation-run-sync-warning > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.automation-run-sync-warning strong {
+  color: var(--text-primary);
+  font-size: 10px;
+}
+.automation-run-sync-warning span {
+  overflow: hidden;
+  color: var(--warning);
+  font-size: 9px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.automation-run-sync-warning p {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: 9px;
+  line-height: 1.45;
+}
+.automation-run-sync-warning__action {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border-default));
+  border-radius: 6px;
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, var(--bg-card));
+  font-size: 8.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.automation-run-sync-warning__action:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border-default));
+  background: color-mix(in srgb, var(--warning) 16%, var(--bg-card));
+}
+.automation-run-sync-warning__action:focus-visible,
+.automation-run-sync-warning__error:focus-visible {
+  outline: 1px solid var(--warning);
+  outline-offset: 2px;
+  box-shadow: var(--focus-ring);
+}
+.automation-run-sync-warning__action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.automation-run-sync-warning .automation-run-sync-warning__error {
+  padding: 7px 8px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  grid-column: 1 / -1;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border-radius: 7px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  user-select: text;
+}
 .automation-state {
   display: grid;
   min-height: 190px;
@@ -9090,6 +9169,13 @@ textarea:focus-visible,
     grid-column: 2;
     grid-row: 3;
     justify-self: start;
+  }
+  .automation-run-sync-warning {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+  .automation-run-sync-warning__action {
+    width: 100%;
+    grid-column: 1 / -1;
   }
   .automation-switch {
     grid-column: 3;

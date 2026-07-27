@@ -488,6 +488,12 @@ export function useNoteController(workspaceId: string | null) {
     [],
   );
 
+  const getCommittedSnapshot = useCallback((expectedWorkspaceId: string): NoteSnapshot | null => {
+    const current = activeActivationRef.current;
+    if (current.workspaceId !== expectedWorkspaceId) return null;
+    return noteSnapshotForActivation(current, storedSnapshotRef.current);
+  }, []);
+
   const snapshot = noteSnapshotForActivation(activation, storedSnapshot);
   const visibleLoadState =
     loadState.activation === activation && !(loadState.status === 'ready' && snapshot === null)
@@ -537,6 +543,7 @@ export function useNoteController(workspaceId: string | null) {
       if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
+    getCommittedSnapshot,
     getCommittedConvertedNote,
     clearOperationError: () =>
       setOperationErrorState((current) => (current?.activation === activation ? null : current)),

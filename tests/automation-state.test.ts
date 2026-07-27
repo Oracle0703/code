@@ -1,11 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import type { AutomationItem, AutomationSnapshot } from '../src/shared/contracts';
 import {
   automationSnapshotForActivation,
-  automationRunFeedbackForActivation,
   automationRunFeedbackKey,
   automationRunOutputLabel,
-  automationRunFeedbackForCurrentWorkspace,
+  automationRunFeedbackForRequest,
+  automationRunFeedbackAfterMainSuccess,
   automationRunNowConfirmation,
   createdAutomationFromResult,
   createAutomationRequestIdentity,
@@ -31,7 +32,7 @@ const WORKSPACE_A = '11111111-1111-4111-8111-111111111111';
 const WORKSPACE_B = '22222222-2222-4222-8222-222222222222';
 
 describe('automation renderer state', () => {
-  it('binds immediate-run responses to one workspace activation and the latest request', () => {
+  it('keeps request-sequence activation guards available for snapshot-era compatibility', () => {
     const firstWorkspaceA = createAutomationWorkspaceIdentity(WORKSPACE_A);
     const request = createAutomationRunRequestIdentity(
       firstWorkspaceA,
@@ -58,23 +59,6 @@ describe('automation renderer state', () => {
         request.automationId,
         5,
       ),
-    ).toBeNull();
-
-    const currentFeedback = {
-      workspaceId: WORKSPACE_A,
-      automationId: request.automationId,
-      outputKind: 'task' as const,
-      outputId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
-      outputTitle: '检查备份',
-      message: '已立即创建今日任务：检查备份',
-    };
-    const state = { workspace: firstWorkspaceA, feedback: currentFeedback };
-    expect(automationRunFeedbackForActivation(firstWorkspaceA, state)).toBe(currentFeedback);
-    expect(
-      automationRunFeedbackForActivation(createAutomationWorkspaceIdentity(WORKSPACE_A), state),
-    ).toBeNull();
-    expect(
-      automationRunFeedbackForActivation(createAutomationWorkspaceIdentity(WORKSPACE_B), state),
     ).toBeNull();
   });
 
@@ -323,8 +307,15 @@ describe('automation renderer state', () => {
     );
   });
 
-  it('creates feedback only for a matching result that still belongs to the active workspace', () => {
+  it('creates feedback from the initiating request without consulting the current workspace', () => {
     const automation = item('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-07-22T00:00:00.000Z');
+    const request = createAutomationRunRequestIdentity(
+      createAutomationWorkspaceIdentity(WORKSPACE_A),
+      automation.id,
+      1,
+    );
+    expect(request).not.toBeNull();
+    if (!request) return;
     const result = {
       workspaceId: WORKSPACE_A,
       automationId: automation.id,
@@ -332,9 +323,7 @@ describe('automation renderer state', () => {
       outputId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     };
 
-    expect(
-      automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, automation, result),
-    ).toMatchObject({
+    expect(automationRunFeedbackForRequest(request, automation, result)).toMatchObject({
       workspaceId: WORKSPACE_A,
       automationId: automation.id,
       outputKind: 'task',
@@ -342,19 +331,11 @@ describe('automation renderer state', () => {
       outputTitle: '检查备份',
       message: '已立即创建今日任务：检查备份',
     });
-    const taskFeedback = automationRunFeedbackForCurrentWorkspace(
-      WORKSPACE_A,
-      WORKSPACE_A,
-      automation,
-      result,
-    );
+    const taskFeedback = automationRunFeedbackForRequest(request, automation, result);
     expect(taskFeedback && automationRunOutputLabel(taskFeedback)).toBe('打开任务');
     expect(taskFeedback && automationRunFeedbackKey(taskFeedback)).toBe(
       JSON.stringify([WORKSPACE_A, automation.id, 'task', result.outputId]),
     );
-    expect(
-      automationRunFeedbackForCurrentWorkspace(WORKSPACE_B, WORKSPACE_A, automation, result),
-    ).toBeNull();
     const note = {
       ...automation,
       action: {
@@ -363,8 +344,15 @@ describe('automation renderer state', () => {
         body: '# 本周',
       },
     };
+    const noteRequest = createAutomationRunRequestIdentity(
+      createAutomationWorkspaceIdentity(WORKSPACE_A),
+      note.id,
+      2,
+    );
+    expect(noteRequest).not.toBeNull();
+    if (!noteRequest) return;
     expect(
-      automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, note, {
+      automationRunFeedbackForRequest(noteRequest, note, {
         ...result,
         outputKind: 'note',
       }),
@@ -373,23 +361,95 @@ describe('automation renderer state', () => {
       outputTitle: '每周回顾',
       message: '已立即创建笔记：每周回顾',
     });
-    const noteFeedback = automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, note, {
+    const noteFeedback = automationRunFeedbackForRequest(noteRequest, note, {
       ...result,
       outputKind: 'note',
     });
     expect(noteFeedback && automationRunOutputLabel(noteFeedback)).toBe('打开笔记');
     expect(
-      automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, automation, {
+      automationRunFeedbackForRequest(request, automation, {
         ...result,
         automationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
       }),
     ).toBeNull();
     expect(
-      automationRunFeedbackForCurrentWorkspace(WORKSPACE_A, WORKSPACE_A, automation, {
+      automationRunFeedbackForRequest(request, automation, {
         ...result,
         outputId: '   ',
       }),
     ).toBeNull();
+    expect(
+      automationRunFeedbackForRequest(
+        createAutomationRunRequestIdentity(
+          createAutomationWorkspaceIdentity(WORKSPACE_B),
+          automation.id,
+          3,
+        )!,
+        automation,
+        result,
+      ),
+    ).toBeNull();
+    expect(
+      automationRunFeedbackForRequest(
+        createAutomationRunRequestIdentity(
+          createAutomationWorkspaceIdentity(WORKSPACE_A),
+          'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          4,
+        )!,
+        automation,
+        result,
+      ),
+    ).toBeNull();
+    expect(
+      automationRunFeedbackForRequest(request, automation, {
+        ...result,
+        outputKind: 'note',
+      }),
+    ).toBeNull();
+    expect(
+      automationRunFeedbackAfterMainSuccess(request, automation, {
+        ...result,
+        automationId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      }),
+    ).toMatchObject({
+      workspaceId: WORKSPACE_A,
+      automationId: automation.id,
+      outputKind: 'task',
+      outputId: '__unconfirmed_automation_output__:1',
+    });
+    expect(
+      automationRunFeedbackAfterMainSuccess(request, automation, {
+        ...result,
+        outputId: '   ',
+      }).outputId,
+    ).toBe('__unconfirmed_automation_output__:1');
+  });
+
+  it('returns validated immediate-run feedback after Main settles without a current-view gate', () => {
+    const source = readFileSync(
+      new URL('../src/renderer/hooks/useAutomationController.ts', import.meta.url),
+      'utf8',
+    );
+    const start = source.indexOf('  const runNow = useCallback(');
+    const end = source.indexOf('\n  const snapshot =', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const runNowSource = source.slice(start, end);
+
+    expect(runNowSource).toContain('async (item: AutomationItem): Promise<AutomationRunFeedback>');
+    expect(runNowSource).toContain('return automationRunFeedbackAfterMainSuccess(');
+    expect(runNowSource.match(/自动化立即运行失败，请重试。/gu)).toHaveLength(1);
+    expect(runNowSource).not.toContain('isAutomationRunRequestCurrent');
+    expect(runNowSource).not.toContain('requestIsCurrent');
+    expect(runNowSource).toContain(
+      [
+        'finally {',
+        '        endRunningItem(item.id);',
+        '        endPendingItem(item.id);',
+        '      }',
+      ].join('\n'),
+    );
+    expect(source).not.toContain('setRunFeedbackState');
   });
 });
 

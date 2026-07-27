@@ -520,6 +520,12 @@ export function useTaskController(workspaceId: string | null) {
     [],
   );
 
+  const getCommittedSnapshot = useCallback((expectedWorkspaceId: string): TaskSnapshot | null => {
+    const current = activeActivationRef.current;
+    if (current.workspaceId !== expectedWorkspaceId) return null;
+    return taskSnapshotForActivation(current, storedSnapshotRef.current, new Date());
+  }, []);
+
   const snapshot = taskSnapshotForActivation(activation, storedSnapshot, new Date());
   const visibleLoadState =
     loadState.activation === activation && !(loadState.status === 'ready' && snapshot === null)
@@ -572,6 +578,7 @@ export function useTaskController(workspaceId: string | null) {
       if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
+    getCommittedSnapshot,
     getCommittedConvertedTask,
     retry: () => {
       const current = activeActivationRef.current;

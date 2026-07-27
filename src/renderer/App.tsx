@@ -166,9 +166,16 @@ import {
 import { isInboxConversionSourceArchived } from './inbox-state';
 import {
   createAutomationWorkspaceIdentity,
+  automationRunFeedbackKey,
+  type AutomationRunActivity,
   type AutomationRunFeedback,
   type AutomationWorkspaceIdentity,
 } from './automation-state';
+import {
+  AutomationRunReconciliationCoordinator,
+  reconcileAutomationRunOutput,
+  type AutomationRunReconciliationIntent,
+} from './automation-run-reconciliation';
 import type { AppSurfaceId } from './model';
 import {
   createScheduleCreateWorkspaceIdentity,
@@ -337,6 +344,19 @@ type ScheduleCreatePublication =
       readonly warning: ScheduleCreateSyncWarningState;
     };
 
+type AutomationRunPublication =
+  | {
+      readonly kind: 'feedback';
+      readonly feedback: AutomationRunFeedback;
+    }
+  | {
+      readonly kind: 'warning';
+      readonly feedback: AutomationRunFeedback;
+      readonly focusActionOnMount: boolean;
+      readonly refreshing: boolean;
+      readonly refreshError: string | null;
+    };
+
 function focusAutomationActivityRailAnchor(): void {
   document
     .querySelector<HTMLButtonElement>('.activity-rail button[aria-label="自动化"]')
@@ -426,6 +446,12 @@ export function App() {
   } | null>(null);
   const [automationCreateSyncWarningState, setAutomationCreateSyncWarningState] =
     useState<AutomationCreateSyncWarningState | null>(null);
+  const [automationRunPublications, setAutomationRunPublications] = useState<
+    ReadonlyMap<string, AutomationRunPublication>
+  >(() => new Map());
+  const [automationRunActivities, setAutomationRunActivities] = useState<
+    ReadonlyMap<string, AutomationRunActivity>
+  >(() => new Map());
   const [inboxConversionFeedbackState, setInboxConversionFeedbackState] = useState<{
     readonly activation: InboxConversionWorkspaceIdentity;
     readonly feedback: InboxConversionFeedback;
@@ -450,6 +476,9 @@ export function App() {
     () => new ScheduleCreatePublicationGate<ScheduleCreatePublication>(),
   );
   const [automationCreateCoordinator] = useState(() => new AutomationCreateCoordinator());
+  const [automationRunReconciliationCoordinator] = useState(
+    () => new AutomationRunReconciliationCoordinator(),
+  );
   const [inboxConversionRequestCoordinator] = useState(
     () => new InboxConversionRequestCoordinator(),
   );
@@ -480,6 +509,10 @@ export function App() {
     createAutomationWorkspaceIdentity(null),
   );
   const automationRunFeedbackRef = useRef<AutomationRunFeedback | null>(null);
+  const automationRunPublicationsRef = useRef<ReadonlyMap<string, AutomationRunPublication>>(
+    new Map(),
+  );
+  const automationRunActivitiesRef = useRef<ReadonlyMap<string, AutomationRunActivity>>(new Map());
   const inboxCaptureActivationRef = useRef<InboxCaptureWorkspaceIdentity>(
     createInboxCaptureWorkspaceIdentity(null),
   );
@@ -620,6 +653,9 @@ export function App() {
   );
   const taskController = useTaskController(snapshot?.currentWorkspaceId ?? null);
   const noteController = useNoteController(snapshot?.currentWorkspaceId ?? null);
+  const getCommittedTaskSnapshot = taskController.getCommittedSnapshot;
+  const getCommittedNoteSnapshot = noteController.getCommittedSnapshot;
+  const prepareTaskSnapshotRefresh = taskController.prepareSnapshotRefresh;
   const createNote = noteController.create;
   const prepareNoteSnapshotRefresh = noteController.prepareSnapshotRefresh;
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
@@ -643,6 +679,74 @@ export function App() {
       }
     },
   });
+  const currentAutomationRunPublication =
+    snapshot?.currentWorkspaceId === undefined
+      ? null
+      : (automationRunPublications.get(snapshot.currentWorkspaceId) ?? null);
+  const visibleAutomationRunFeedback =
+    currentAutomationRunPublication?.kind === 'feedback'
+      ? currentAutomationRunPublication.feedback
+      : null;
+  const visibleAutomationRunSyncWarning =
+    currentAutomationRunPublication?.kind === 'warning'
+      ? currentAutomationRunPublication.feedback
+      : null;
+  const visibleAutomationRunSyncWarningRefreshing =
+    currentAutomationRunPublication?.kind === 'warning'
+      ? currentAutomationRunPublication.refreshing
+      : false;
+  const visibleAutomationRunSyncWarningError =
+    currentAutomationRunPublication?.kind === 'warning'
+      ? currentAutomationRunPublication.refreshError
+      : null;
+  const visibleAutomationRunActivity =
+    snapshot?.currentWorkspaceId === undefined
+      ? null
+      : (automationRunActivities.get(snapshot.currentWorkspaceId) ?? null);
+  const automationRunBlocked =
+    snapshot?.currentWorkspaceId !== undefined &&
+    (visibleAutomationRunActivity !== null || visibleAutomationRunSyncWarning !== null);
+  const setAutomationRunPublication = useCallback(
+    (workspaceId: string, publication: AutomationRunPublication | null): void => {
+      const next = new Map(automationRunPublicationsRef.current);
+      if (publication === null) {
+        next.delete(workspaceId);
+      } else {
+        next.set(workspaceId, publication);
+      }
+      automationRunPublicationsRef.current = next;
+      setAutomationRunPublications(next);
+    },
+    [],
+  );
+  const setAutomationRunActivity = useCallback(
+    (workspaceId: string, activity: AutomationRunActivity | null): void => {
+      const next = new Map(automationRunActivitiesRef.current);
+      if (activity === null) {
+        next.delete(workspaceId);
+      } else {
+        next.set(workspaceId, activity);
+      }
+      automationRunActivitiesRef.current = next;
+      setAutomationRunActivities(next);
+    },
+    [],
+  );
+  const finishAutomationRunIntent = useCallback(
+    (intent: AutomationRunReconciliationIntent): void => {
+      automationRunReconciliationCoordinator.end(intent);
+      if (automationRunReconciliationCoordinator.isPending(intent.workspaceId)) return;
+      setAutomationRunActivity(intent.workspaceId, null);
+    },
+    [automationRunReconciliationCoordinator, setAutomationRunActivity],
+  );
+  const invalidateAutomationRuns = useCallback((): void => {
+    automationRunReconciliationCoordinator.invalidateAll();
+    automationRunPublicationsRef.current = new Map();
+    automationRunActivitiesRef.current = new Map();
+    setAutomationRunPublications(new Map());
+    setAutomationRunActivities(new Map());
+  }, [automationRunReconciliationCoordinator]);
   const assistantController = useAssistantController(snapshot?.currentWorkspaceId ?? null);
   const startAssistant = assistantController.start;
   const currentAssistantResponseKey = assistantResponseKey(assistantController.snapshot);
@@ -736,7 +840,8 @@ export function App() {
     (statusbarErrorSource === 'task' &&
       (activeSurface === 'today' || activeSurface === 'tasks' || taskDialog !== null)) ||
     (statusbarErrorSource === 'note' &&
-      (activeSurface === 'notes' || activeSurface === 'assistant' || activeSurface === 'inbox'));
+      (activeSurface === 'notes' || activeSurface === 'assistant' || activeSurface === 'inbox')) ||
+    (statusbarErrorSource === 'automation' && activeSurface === 'automations');
   const focusDialogOpen =
     focusDialog !== null &&
     isFocusDialogActivationCurrent(
@@ -927,15 +1032,15 @@ export function App() {
   }, [scheduleCreateCoordinator, scheduleCreatePublicationGate]);
   useLayoutEffect(() => {
     automationOutputActivationRef.current = automationOutputActivation;
-    automationRunFeedbackRef.current = automationController.runFeedback;
+    automationRunFeedbackRef.current = visibleAutomationRunFeedback;
     currentSurfaceRef.current = activeSurface;
     automationOutputNavigation.invalidate();
   }, [
     activeSurface,
     automationOutputActivation,
     automationOutputNavigation,
-    automationController.runFeedback,
     overlayOpen,
+    visibleAutomationRunFeedback,
   ]);
   useLayoutEffect(() => {
     const previousActivation = inboxCaptureActivationRef.current;
@@ -2907,6 +3012,198 @@ export function App() {
     ],
   );
 
+  const reconcileAutomationRunFeedback = useCallback(
+    (feedback: AutomationRunFeedback, isCurrent: () => boolean) =>
+      reconcileAutomationRunOutput({
+        feedback,
+        getCommittedTaskSnapshot: () => getCommittedTaskSnapshot(feedback.workspaceId),
+        getCommittedNoteSnapshot: () => getCommittedNoteSnapshot(feedback.workspaceId),
+        prepareTaskSnapshotRefresh,
+        prepareNoteSnapshotRefresh,
+        isCurrent,
+      }),
+    [
+      getCommittedNoteSnapshot,
+      getCommittedTaskSnapshot,
+      prepareNoteSnapshotRefresh,
+      prepareTaskSnapshotRefresh,
+    ],
+  );
+
+  const runAutomationNow = useCallback(
+    async (item: AutomationItem): Promise<void> => {
+      const activation = automationOutputActivationRef.current;
+      const workspaceId = activation.workspaceId;
+      if (
+        workspaceId === null ||
+        currentWorkspaceIdRef.current !== workspaceId ||
+        currentSurfaceRef.current !== 'automations'
+      ) {
+        throw new Error('当前工作区或页面已经变化，请重新确认后运行自动化。');
+      }
+      const currentPublication = automationRunPublicationsRef.current.get(workspaceId);
+      if (currentPublication?.kind === 'warning') {
+        throw new Error('上一次自动化已经运行，请先重新读取并确认输出，不要再次运行。');
+      }
+      const intent = automationRunReconciliationCoordinator.begin(activation, `run:${item.id}`);
+      if (intent === null) {
+        throw new Error('这个工作区正在运行或确认另一条自动化，请稍候。');
+      }
+
+      setAutomationRunActivity(workspaceId, {
+        automationId: item.id,
+        phase: 'running',
+      });
+      automationRunFeedbackRef.current = null;
+      automationOutputNavigation.invalidate();
+      setAutomationRunPublication(workspaceId, null);
+      let feedback: AutomationRunFeedback | null = null;
+      try {
+        feedback = await automationController.runNow(item);
+        if (!automationRunReconciliationCoordinator.isActive(intent)) return;
+        setAutomationRunActivity(workspaceId, {
+          automationId: item.id,
+          phase: 'confirming',
+        });
+
+        const isCurrent = () =>
+          automationRunReconciliationCoordinator.isCurrent(
+            intent,
+            automationOutputActivationRef.current,
+          );
+        const reconciliation = await reconcileAutomationRunFeedback(feedback, isCurrent);
+        if (!automationRunReconciliationCoordinator.isActive(intent)) return;
+
+        if (reconciliation.committed && isCurrent()) {
+          setAutomationRunPublication(workspaceId, {
+            kind: 'feedback',
+            feedback,
+          });
+          return;
+        }
+
+        setAutomationRunPublication(workspaceId, {
+          kind: 'warning',
+          feedback,
+          focusActionOnMount:
+            currentWorkspaceIdRef.current === workspaceId &&
+            currentSurfaceRef.current === 'automations',
+          refreshing: false,
+          refreshError: null,
+        });
+      } catch (error) {
+        if (feedback !== null && automationRunReconciliationCoordinator.isActive(intent)) {
+          setAutomationRunPublication(workspaceId, {
+            kind: 'warning',
+            feedback,
+            focusActionOnMount:
+              currentWorkspaceIdRef.current === workspaceId &&
+              currentSurfaceRef.current === 'automations',
+            refreshing: false,
+            refreshError: null,
+          });
+          return;
+        }
+        throw error;
+      } finally {
+        finishAutomationRunIntent(intent);
+      }
+    },
+    [
+      automationController,
+      automationOutputNavigation,
+      automationRunReconciliationCoordinator,
+      finishAutomationRunIntent,
+      reconcileAutomationRunFeedback,
+      setAutomationRunActivity,
+      setAutomationRunPublication,
+    ],
+  );
+
+  const refreshAutomationRunSyncWarning = useCallback(
+    async (feedback: AutomationRunFeedback): Promise<void> => {
+      const activation = automationOutputActivationRef.current;
+      const workspaceId = activation.workspaceId;
+      const feedbackKey = automationRunFeedbackKey(feedback);
+      const currentPublication =
+        workspaceId === null ? null : automationRunPublicationsRef.current.get(workspaceId);
+      if (
+        workspaceId === null ||
+        workspaceId !== feedback.workspaceId ||
+        currentPublication?.kind !== 'warning' ||
+        automationRunFeedbackKey(currentPublication.feedback) !== feedbackKey
+      ) {
+        throw new Error('这条自动化运行恢复状态已经变化。');
+      }
+
+      const intent = automationRunReconciliationCoordinator.begin(
+        activation,
+        `recover:${feedbackKey}`,
+      );
+      if (intent === null) {
+        throw new Error('这个工作区正在运行或确认另一条自动化，请稍候。');
+      }
+      setAutomationRunActivity(workspaceId, {
+        automationId: feedback.automationId,
+        phase: 'recovering',
+      });
+      setAutomationRunPublication(workspaceId, {
+        ...currentPublication,
+        refreshing: true,
+        refreshError: null,
+      });
+
+      const isCurrent = () => {
+        const publication = automationRunPublicationsRef.current.get(workspaceId);
+        return (
+          automationRunReconciliationCoordinator.isCurrent(
+            intent,
+            automationOutputActivationRef.current,
+          ) &&
+          publication?.kind === 'warning' &&
+          automationRunFeedbackKey(publication.feedback) === feedbackKey
+        );
+      };
+
+      try {
+        const reconciliation = await reconcileAutomationRunFeedback(feedback, isCurrent);
+        if (!automationRunReconciliationCoordinator.isActive(intent)) return;
+        if (!reconciliation.committed || !isCurrent()) {
+          throw new Error('The exact automation output could not be reconciled.');
+        }
+        setAutomationRunPublication(workspaceId, {
+          kind: 'feedback',
+          feedback,
+        });
+      } catch (error) {
+        if (automationRunReconciliationCoordinator.isActive(intent)) {
+          const publication = automationRunPublicationsRef.current.get(workspaceId);
+          if (
+            publication?.kind === 'warning' &&
+            automationRunFeedbackKey(publication.feedback) === feedbackKey
+          ) {
+            const outputLabel = feedback.outputKind === 'task' ? '任务' : '笔记';
+            setAutomationRunPublication(workspaceId, {
+              ...publication,
+              refreshing: false,
+              refreshError: `重新读取后仍无法确认刚创建的${outputLabel}。请稍后再试；自动化已经运行，请不要再次运行。`,
+            });
+          }
+        }
+        throw error;
+      } finally {
+        finishAutomationRunIntent(intent);
+      }
+    },
+    [
+      automationRunReconciliationCoordinator,
+      finishAutomationRunIntent,
+      reconcileAutomationRunFeedback,
+      setAutomationRunActivity,
+      setAutomationRunPublication,
+    ],
+  );
+
   const openAutomationRunOutput = useCallback(
     async (feedback: AutomationRunFeedback): Promise<void> => {
       automationCreateCoordinator.cancelOpen();
@@ -3016,6 +3313,7 @@ export function App() {
         if (decision === 'reject') return false;
         if (decision === 'approve') {
           if (dataReplacementCloseApproved(request.reason, decision)) {
+            invalidateAutomationRuns();
             invalidateInboxCapture();
             invalidateInboxConversion();
             invalidateAutomationCreate();
@@ -3034,6 +3332,7 @@ export function App() {
       cancelImport,
       currentImportPreview,
       invalidateAutomationCreate,
+      invalidateAutomationRuns,
       invalidateInboxCapture,
       invalidateInboxConversion,
       invalidateScheduleCreate,
@@ -4102,7 +4401,17 @@ export function App() {
                     status={automationController.status}
                     loadError={automationController.loadError}
                     operationError={automationController.operationError}
-                    runFeedback={automationController.runFeedback}
+                    runFeedback={visibleAutomationRunFeedback}
+                    runSyncWarning={visibleAutomationRunSyncWarning}
+                    runBlocked={automationRunBlocked}
+                    runActivity={visibleAutomationRunActivity}
+                    runSyncWarningRefreshing={visibleAutomationRunSyncWarningRefreshing}
+                    runSyncWarningError={visibleAutomationRunSyncWarningError}
+                    runSyncWarningFocusBlocked={overlayOpen}
+                    focusRunSyncWarningAction={
+                      currentAutomationRunPublication?.kind === 'warning' &&
+                      currentAutomationRunPublication.focusActionOnMount
+                    }
                     pendingItemIds={automationController.pendingItemIds}
                     runningItemIds={automationController.runningItemIds}
                     pendingCreate={automationController.pendingCreate}
@@ -4110,8 +4419,9 @@ export function App() {
                     onOpenCreate={openAutomationCreate}
                     onOpenEdit={openAutomationEdit}
                     onSetEnabled={automationController.setEnabled}
-                    onRunNow={automationController.runNow}
+                    onRunNow={runAutomationNow}
                     onOpenRunOutput={openAutomationRunOutput}
+                    onRefreshRunSyncWarning={refreshAutomationRunSyncWarning}
                   />
                 )}
               </div>
