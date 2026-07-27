@@ -20,15 +20,22 @@ import {
 } from 'react';
 import type { Note, NoteCreateResult } from '../../shared/contracts';
 import { NOTE_BODY_MAX_LENGTH, NOTE_TITLE_MAX_LENGTH } from '../../shared/note-domain';
-import type { NoteCreateCommit } from '../hooks/useNoteController';
+import type {
+  NoteArchiveCommit,
+  NoteCreateCommit,
+  NoteMutationRecovery,
+  NoteUpdateCommit,
+} from '../hooks/useNoteController';
 import {
   filterNotes,
   isNoteDraftDirty,
   noteExcerpt,
   type NoteCreateSyncWarningTarget,
+  type NoteMutationSyncWarningTarget,
 } from '../note-state';
 import { MarkdownPreview } from './MarkdownPreview';
 import { NoteCreateSyncWarning } from './NoteCreateSyncWarning';
+import { NoteMutationSyncWarning } from './NoteMutationSyncWarning';
 
 interface NoteEditorState {
   readonly key: string;
@@ -48,6 +55,8 @@ interface NotePageProps {
   operationError: string | null;
   pendingNoteIds: ReadonlySet<string>;
   pendingCreate: boolean;
+  pendingMutation: boolean;
+  pendingMutationMessage?: string | null;
   requestedNoteId: string | null;
   onRequestedNoteHandled: () => void;
   onDirtyChange: (dirty: boolean) => void;
@@ -57,8 +66,17 @@ interface NotePageProps {
   onCreateSyncWarning: (warning: NoteCreateSyncWarningTarget) => void;
   onCreateSyncResolved: (warning: NoteCreateSyncWarningTarget) => void;
   onRefreshCreated: (result: NoteCreateResult) => Promise<Note | null>;
-  onUpdate: (note: Note, title: string, body: string) => Promise<Note>;
-  onArchive: (note: Note) => Promise<void>;
+  mutationSyncWarning: NoteMutationSyncWarningTarget | null;
+  mutationSyncWarningRefreshing: boolean;
+  mutationSyncWarningError: string | null;
+  focusMutationSyncWarningActionOnMount: boolean;
+  onMutationSyncWarning: (
+    warning: NoteMutationSyncWarningTarget,
+    focusActionOnMount: boolean,
+  ) => void;
+  onRefreshMutation: (warning: NoteMutationSyncWarningTarget) => Promise<NoteMutationRecovery>;
+  onUpdate: (note: Note, title: string, body: string) => Promise<NoteUpdateCommit>;
+  onArchive: (note: Note) => Promise<NoteArchiveCommit>;
   onOpenLink: (url: string) => void;
   onOpenAssistant: (note: Note) => void;
 }
@@ -71,6 +89,8 @@ export function NotePage({
   operationError,
   pendingNoteIds,
   pendingCreate,
+  pendingMutation = false,
+  pendingMutationMessage = null,
   requestedNoteId,
   onRequestedNoteHandled,
   onDirtyChange,
@@ -80,6 +100,12 @@ export function NotePage({
   onCreateSyncWarning,
   onCreateSyncResolved,
   onRefreshCreated,
+  mutationSyncWarning = null,
+  mutationSyncWarningRefreshing = false,
+  mutationSyncWarningError = null,
+  focusMutationSyncWarningActionOnMount = false,
+  onMutationSyncWarning,
+  onRefreshMutation,
   onUpdate,
   onArchive,
   onOpenLink,
@@ -91,18 +117,24 @@ export function NotePage({
   const [editorMode, setEditorMode] = useState<'edit' | 'preview'>('edit');
   const [saveError, setSaveError] = useState<string | null>(null);
   const [focusCreateSyncWarningAction, setFocusCreateSyncWarningAction] = useState(false);
+  const [focusMutationSyncWarningAction, setFocusMutationSyncWarningAction] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const saveButtonRef = useRef<HTMLButtonElement>(null);
+  const archiveButtonRef = useRef<HTMLButtonElement>(null);
   const saveInFlightRef = useRef(false);
   const createRecoveryPendingRef = useRef(createSyncWarning !== null);
+  const mutationRecoveryPendingRef = useRef(mutationSyncWarning !== null);
   const visibleNotes = useMemo(() => filterNotes(notes, query), [notes, query]);
   const requestedNoteUnavailable =
     createSyncWarning === null &&
+    mutationSyncWarning === null &&
     requestedNoteId !== null &&
     !notes.some(({ id }) => id === requestedNoteId);
   const selectedNoteUnavailable =
     createSyncWarning === null &&
+    mutationSyncWarning === null &&
     requestedNoteId === null &&
     selection?.kind === 'note' &&
     !notes.some(({ id }) => id === selection.noteId);
@@ -113,6 +145,24 @@ export function NotePage({
         note: null,
         title: createSyncWarning.title,
         body: createSyncWarning.body,
+      };
+    }
+    if (mutationSyncWarning) {
+      const original = mutationSyncWarning.intent.originalNote;
+      const committedNote =
+        mutationSyncWarning.kind === 'update'
+          ? {
+              ...original,
+              title: mutationSyncWarning.intent.title,
+              body: mutationSyncWarning.intent.body,
+              revision: mutationSyncWarning.intent.expectedCommittedRevision,
+            }
+          : original;
+      return {
+        key: original.id,
+        note: committedNote,
+        title: committedNote.title,
+        body: committedNote.body,
       };
     }
     const requestedNote = requestedNoteId
@@ -154,7 +204,7 @@ export function NotePage({
       };
     }
     return { key: 'new', note: null, title: '', body: '' };
-  }, [createSyncWarning, draft, notes, requestedNoteId, selection]);
+  }, [createSyncWarning, draft, mutationSyncWarning, notes, requestedNoteId, selection]);
   const dirty = editor ? isNoteDraftDirty(editor.note, editor.title, editor.body) : false;
   const titleLength = Array.from(editor?.title.trim() ?? '').length;
   const bodyLength = Array.from(editor?.body ?? '').length;
@@ -162,9 +212,11 @@ export function NotePage({
   const bodyInvalid = bodyLength > NOTE_BODY_MAX_LENGTH;
   const saving = editor?.note ? pendingNoteIds.has(editor.note.id) : pendingCreate;
   const createRecoveryPending = createSyncWarning !== null;
-  const unsavedDirty = dirty && !createRecoveryPending;
-  const createNavigationLocked = pendingCreate || createRecoveryPending;
-  const editorLocked = saving || createNavigationLocked;
+  const mutationRecoveryPending = mutationSyncWarning !== null;
+  const unsavedDirty = dirty && !createRecoveryPending && !mutationRecoveryPending;
+  const noteNavigationLocked =
+    pendingCreate || pendingMutation || createRecoveryPending || mutationRecoveryPending;
+  const editorLocked = saving || noteNavigationLocked;
 
   const confirmDiscard = useCallback(
     () => !unsavedDirty || window.confirm('这篇笔记有尚未保存的更改。要放弃这些更改并继续吗？'),
@@ -173,7 +225,13 @@ export function NotePage({
 
   const openNote = useCallback(
     (note: Note) => {
-      if (createNavigationLocked || createRecoveryPendingRef.current) return;
+      if (
+        noteNavigationLocked ||
+        createRecoveryPendingRef.current ||
+        mutationRecoveryPendingRef.current
+      ) {
+        return;
+      }
       if (!confirmDiscard()) return;
       onRequestedNoteHandled();
       setSelection({ kind: 'note', noteId: note.id });
@@ -181,11 +239,17 @@ export function NotePage({
       setEditorMode('edit');
       setSaveError(null);
     },
-    [confirmDiscard, createNavigationLocked, onRequestedNoteHandled],
+    [confirmDiscard, noteNavigationLocked, onRequestedNoteHandled],
   );
 
   const openNew = useCallback(() => {
-    if (createNavigationLocked || createRecoveryPendingRef.current) return;
+    if (
+      noteNavigationLocked ||
+      createRecoveryPendingRef.current ||
+      mutationRecoveryPendingRef.current
+    ) {
+      return;
+    }
     if (!confirmDiscard()) return;
     onRequestedNoteHandled();
     setSelection({ kind: 'new' });
@@ -193,7 +257,12 @@ export function NotePage({
     setEditorMode('edit');
     setSaveError(null);
     window.requestAnimationFrame(() => titleInputRef.current?.focus());
-  }, [confirmDiscard, createNavigationLocked, onRequestedNoteHandled]);
+  }, [confirmDiscard, noteNavigationLocked, onRequestedNoteHandled]);
+
+  useLayoutEffect(() => {
+    createRecoveryPendingRef.current = createRecoveryPending;
+    mutationRecoveryPendingRef.current = mutationRecoveryPending;
+  }, [createRecoveryPending, mutationRecoveryPending]);
 
   useLayoutEffect(() => {
     onDirtyChange(unsavedDirty);
@@ -220,7 +289,9 @@ export function NotePage({
       if (resetEditorMode) setEditorMode('edit');
       setSaveError(null);
       setFocusCreateSyncWarningAction(false);
+      setFocusMutationSyncWarningAction(false);
       createRecoveryPendingRef.current = false;
+      mutationRecoveryPendingRef.current = false;
       if (focusTitle) {
         window.requestAnimationFrame(() => titleInputRef.current?.focus({ preventScroll: true }));
       }
@@ -234,6 +305,7 @@ export function NotePage({
       editorLocked ||
       saveInFlightRef.current ||
       createRecoveryPendingRef.current ||
+      mutationRecoveryPendingRef.current ||
       titleInvalid ||
       bodyInvalid
     ) {
@@ -245,9 +317,32 @@ export function NotePage({
     setSaveError(null);
     try {
       if (editor.note) {
-        const saved = await onUpdate(editor.note, editor.title, editor.body);
+        const commit = await onUpdate(editor.note, editor.title, editor.body);
+        const saved =
+          commit.committed &&
+          commit.updatedNote !== null &&
+          commit.updatedNote.id === commit.intent.originalNote.id
+            ? commit.updatedNote
+            : null;
+        if (saved) {
+          releaseAfterRender = true;
+          selectCreatedNote(saved, false, false);
+          return;
+        }
+
+        mutationRecoveryPendingRef.current = true;
         releaseAfterRender = true;
-        selectCreatedNote(saved, false, false);
+        onMutationSyncWarning(
+          noteUpdateWarning(commit),
+          saveStartedFromButton &&
+            (document.activeElement === saveButtonRef.current ||
+              document.activeElement === document.body),
+        );
+        setFocusMutationSyncWarningAction(
+          saveStartedFromButton &&
+            (document.activeElement === saveButtonRef.current ||
+              document.activeElement === document.body),
+        );
         return;
       }
 
@@ -296,6 +391,7 @@ export function NotePage({
     editorLocked,
     onCreate,
     onCreateSyncWarning,
+    onMutationSyncWarning,
     onUpdate,
     selectCreatedNote,
     titleInvalid,
@@ -311,6 +407,34 @@ export function NotePage({
     onCreateSyncResolved(warning);
     selectCreatedNote(createdNote, true, true);
   }, [createSyncWarning, onCreateSyncResolved, onRefreshCreated, selectCreatedNote]);
+
+  const refreshMutatedNote = useCallback(async (): Promise<void> => {
+    const warning = mutationSyncWarning;
+    if (!warning) return;
+    const recovery = await onRefreshMutation(warning);
+    if (warning.kind === 'update') {
+      if (
+        recovery.kind !== 'update' ||
+        !recovery.committed ||
+        recovery.updatedNote === null ||
+        recovery.updatedNote.id !== warning.intent.originalNote.id
+      ) {
+        throw new Error('The exact updated note could not be confirmed.');
+      }
+      selectCreatedNote(recovery.updatedNote, true, false);
+      return;
+    }
+    if (recovery.kind !== 'archive' || !recovery.committed || !recovery.confirmed) {
+      throw new Error('The exact archived note could not be confirmed.');
+    }
+    onRequestedNoteHandled();
+    setSelection(null);
+    setDraft(null);
+    setSaveError(null);
+    setFocusMutationSyncWarningAction(false);
+    mutationRecoveryPendingRef.current = false;
+    window.requestAnimationFrame(() => pageHeadingRef.current?.focus({ preventScroll: true }));
+  }, [mutationSyncWarning, onRefreshMutation, onRequestedNoteHandled, selectCreatedNote]);
 
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
@@ -338,10 +462,21 @@ export function NotePage({
     if (!note || editorLocked || archiving) return;
     if (dirty && !confirmDiscard()) return;
     if (!window.confirm(`归档“${note.title}”？内容仍会保留在本地备份中。`)) return;
+    const archiveStartedFromButton = document.activeElement === archiveButtonRef.current;
     setArchiving(true);
     setSaveError(null);
     try {
-      await onArchive(note);
+      const commit = await onArchive(note);
+      if (!commit.committed || !commit.confirmed) {
+        mutationRecoveryPendingRef.current = true;
+        const focusWarning =
+          archiveStartedFromButton &&
+          (document.activeElement === archiveButtonRef.current ||
+            document.activeElement === document.body);
+        onMutationSyncWarning(noteArchiveWarning(commit), focusWarning);
+        setFocusMutationSyncWarningAction(focusWarning);
+        return;
+      }
       onRequestedNoteHandled();
       setSelection(null);
       setDraft(null);
@@ -365,7 +500,9 @@ export function NotePage({
             <NotebookPen size={20} aria-hidden="true" />
           </span>
           <div>
-            <h1 tabIndex={-1}>笔记</h1>
+            <h1 ref={pageHeadingRef} tabIndex={-1}>
+              笔记
+            </h1>
             <p>
               {status === 'ready' ? `${notes.length} 篇 Markdown 笔记` : '保存当前工作区的上下文。'}
             </p>
@@ -406,6 +543,19 @@ export function NotePage({
               onRefresh={refreshCreatedNote}
             />
           ) : null}
+          {mutationSyncWarning && createSyncWarning === null ? (
+            <NoteMutationSyncWarning
+              kind={mutationSyncWarning.kind}
+              title={mutationSyncWarning.title}
+              message={mutationSyncWarning.message}
+              focusActionOnMount={
+                focusMutationSyncWarningAction || focusMutationSyncWarningActionOnMount
+              }
+              refreshing={mutationSyncWarningRefreshing}
+              refreshError={mutationSyncWarningError}
+              onRefresh={refreshMutatedNote}
+            />
+          ) : null}
           <section className="note-workspace">
             <aside className="note-library" aria-label="笔记列表">
               <label className="note-library__search">
@@ -432,7 +582,7 @@ export function NotePage({
                     className={editor?.note?.id === note.id ? 'is-active' : ''}
                     key={note.id}
                     onClick={() => openNote(note)}
-                    disabled={createNavigationLocked}
+                    disabled={noteNavigationLocked}
                   >
                     <span>
                       <FileText size={14} aria-hidden="true" />
@@ -447,7 +597,7 @@ export function NotePage({
                     <Search size={18} />
                     <span>{notes.length === 0 ? '还没有笔记' : '没有匹配的笔记'}</span>
                     {notes.length === 0 ? (
-                      <button type="button" onClick={openNew} disabled={createNavigationLocked}>
+                      <button type="button" onClick={openNew} disabled={noteNavigationLocked}>
                         创建第一篇
                       </button>
                     ) : null}
@@ -484,7 +634,7 @@ export function NotePage({
                         aria-selected={editorMode === 'edit'}
                         className={editorMode === 'edit' ? 'is-active' : ''}
                         onClick={() => setEditorMode('edit')}
-                        disabled={createNavigationLocked}
+                        disabled={noteNavigationLocked}
                       >
                         <PencilLine size={13} /> 编辑
                       </button>
@@ -494,28 +644,34 @@ export function NotePage({
                         aria-selected={editorMode === 'preview'}
                         className={editorMode === 'preview' ? 'is-active' : ''}
                         onClick={() => setEditorMode('preview')}
-                        disabled={createNavigationLocked}
+                        disabled={noteNavigationLocked}
                       >
                         <FileText size={13} /> 预览
                       </button>
                     </div>
                     <span
                       className={`note-editor__status${saveError ? ' is-error' : ''}`}
-                      role="status"
+                      role={createRecoveryPending || mutationRecoveryPending ? undefined : 'status'}
                     >
                       {createRecoveryPending
                         ? '已创建 · 等待同步'
-                        : pendingCreate
-                          ? '正在确认新笔记…'
-                          : saveError
-                            ? '保存失败'
-                            : saving
-                              ? '保存中…'
-                              : dirty
-                                ? '未保存'
-                                : editor.note
-                                  ? `已保存 · 修订 ${editor.note.revision}`
-                                  : '新笔记'}
+                        : mutationRecoveryPending
+                          ? mutationSyncWarning?.kind === 'archive'
+                            ? '已归档 · 等待同步'
+                            : '已保存 · 等待同步'
+                          : pendingCreate
+                            ? '正在确认新笔记…'
+                            : pendingMutation
+                              ? (pendingMutationMessage ?? '正在确认笔记写入…')
+                              : saveError
+                                ? '保存失败'
+                                : saving
+                                  ? '保存中…'
+                                  : dirty
+                                    ? '未保存'
+                                    : editor.note
+                                      ? `已保存 · 修订 ${editor.note.revision}`
+                                      : '新笔记'}
                     </span>
                     {editor.note ? (
                       <button
@@ -538,6 +694,7 @@ export function NotePage({
                     ) : null}
                     {editor.note ? (
                       <button
+                        ref={archiveButtonRef}
                         type="button"
                         className="note-editor__archive"
                         onClick={() => void archiveCurrent()}
@@ -574,12 +731,14 @@ export function NotePage({
                       onChange={(event) => setDraft({ ...editor, title: event.target.value })}
                       placeholder="笔记标题"
                       disabled={saving}
-                      readOnly={createNavigationLocked}
+                      readOnly={noteNavigationLocked}
                       aria-invalid={titleInvalid}
                       aria-describedby={
                         createRecoveryPending
                           ? 'note-title-count note-create-sync-warning-message'
-                          : 'note-title-count'
+                          : mutationRecoveryPending
+                            ? `note-title-count note-${mutationSyncWarning?.kind ?? 'update'}-sync-warning-message`
+                            : 'note-title-count'
                       }
                     />
                     <small id="note-title-count" className={titleInvalid ? 'is-error' : undefined}>
@@ -595,12 +754,14 @@ export function NotePage({
                         onChange={(event) => setDraft({ ...editor, body: event.target.value })}
                         placeholder={'使用 Markdown 记录内容…\n\n# 标题\n- 清单\n- `代码`'}
                         disabled={saving}
-                        readOnly={createNavigationLocked}
+                        readOnly={noteNavigationLocked}
                         aria-invalid={bodyInvalid}
                         aria-describedby={
                           createRecoveryPending
                             ? 'note-body-count note-create-sync-warning-message'
-                            : 'note-body-count'
+                            : mutationRecoveryPending
+                              ? `note-body-count note-${mutationSyncWarning?.kind ?? 'update'}-sync-warning-message`
+                              : 'note-body-count'
                         }
                         spellCheck
                       />
@@ -634,7 +795,7 @@ export function NotePage({
                     type="button"
                     className="secondary-button"
                     onClick={openNew}
-                    disabled={createNavigationLocked}
+                    disabled={noteNavigationLocked}
                   >
                     <Plus size={14} /> 新建笔记
                   </button>
@@ -657,4 +818,28 @@ function formatUpdatedAt(value: string): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+}
+
+function noteUpdateWarning(commit: NoteUpdateCommit): NoteMutationSyncWarningTarget {
+  return {
+    kind: 'update',
+    intent: commit.intent,
+    resultSnapshot: commit.result,
+    title: commit.intent.title,
+    message:
+      commit.reconciliationWarning ??
+      '笔记已保存，但当前笔记列表未能同步。请重新读取后查看，避免重复保存。',
+  };
+}
+
+function noteArchiveWarning(commit: NoteArchiveCommit): NoteMutationSyncWarningTarget {
+  return {
+    kind: 'archive',
+    intent: commit.intent,
+    resultSnapshot: commit.result,
+    title: commit.intent.originalNote.title,
+    message:
+      commit.reconciliationWarning ??
+      '笔记已归档，但当前笔记列表未能同步。请重新读取后确认，避免重复归档。',
+  };
 }

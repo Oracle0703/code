@@ -57,8 +57,10 @@ describe('note create renderer components', () => {
     expect(pageSource).toContain('saveStartedFromButton &&');
     expect(pageSource).toContain('document.activeElement === saveButtonRef.current');
     expect(pageSource).toContain('document.activeElement === document.body');
-    expect(pageSource.match(/readOnly=\{createNavigationLocked\}/gu)).toHaveLength(2);
-    expect(pageSource).toContain('const unsavedDirty = dirty && !createRecoveryPending;');
+    expect(pageSource.match(/readOnly=\{noteNavigationLocked\}/gu)).toHaveLength(2);
+    expect(pageSource).toContain(
+      'const unsavedDirty = dirty && !createRecoveryPending && !mutationRecoveryPending;',
+    );
     expect(pageSource).toContain(
       'disabled={!dirty || editorLocked || titleInvalid || bodyInvalid}',
     );
@@ -77,6 +79,7 @@ describe('note create renderer components', () => {
         operationError: null,
         pendingNoteIds: new Set<string>(),
         pendingCreate: false,
+        pendingMutation: false,
         requestedNoteId: null,
         onRequestedNoteHandled: () => undefined,
         onDirtyChange: () => undefined,
@@ -96,10 +99,20 @@ describe('note create renderer components', () => {
         onCreateSyncWarning: () => undefined,
         onCreateSyncResolved: () => undefined,
         onRefreshCreated: async () => null,
+        mutationSyncWarning: null,
+        mutationSyncWarningRefreshing: false,
+        mutationSyncWarningError: null,
+        focusMutationSyncWarningActionOnMount: false,
+        onMutationSyncWarning: () => undefined,
+        onRefreshMutation: async () => {
+          throw new Error('not used');
+        },
         onUpdate: async () => {
           throw new Error('not used');
         },
-        onArchive: async () => undefined,
+        onArchive: async () => {
+          throw new Error('not used');
+        },
         onOpenLink: () => undefined,
         onOpenAssistant: () => undefined,
       }),
@@ -132,6 +145,7 @@ describe('note create renderer components', () => {
         operationError: null,
         pendingNoteIds: new Set<string>(),
         pendingCreate: true,
+        pendingMutation: false,
         requestedNoteId: null,
         onRequestedNoteHandled: () => undefined,
         onDirtyChange: () => undefined,
@@ -143,10 +157,20 @@ describe('note create renderer components', () => {
         onCreateSyncWarning: () => undefined,
         onCreateSyncResolved: () => undefined,
         onRefreshCreated: async () => null,
+        mutationSyncWarning: null,
+        mutationSyncWarningRefreshing: false,
+        mutationSyncWarningError: null,
+        focusMutationSyncWarningActionOnMount: false,
+        onMutationSyncWarning: () => undefined,
+        onRefreshMutation: async () => {
+          throw new Error('not used');
+        },
         onUpdate: async () => {
           throw new Error('not used');
         },
-        onArchive: async () => undefined,
+        onArchive: async () => {
+          throw new Error('not used');
+        },
         onOpenLink: () => undefined,
         onOpenAssistant: () => undefined,
       }),

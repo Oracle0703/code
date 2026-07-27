@@ -483,6 +483,7 @@ describe('assistant renderer surfaces', () => {
         operationError: null,
         pendingNoteIds: new Set<string>(),
         pendingCreate: false,
+        pendingMutation: false,
         requestedNoteId: null,
         onRequestedNoteHandled: () => undefined,
         onDirtyChange: () => undefined,
@@ -494,10 +495,20 @@ describe('assistant renderer surfaces', () => {
         onCreateSyncWarning: () => undefined,
         onCreateSyncResolved: () => undefined,
         onRefreshCreated: async () => null,
+        mutationSyncWarning: null,
+        mutationSyncWarningRefreshing: false,
+        mutationSyncWarningError: null,
+        focusMutationSyncWarningActionOnMount: false,
+        onMutationSyncWarning: () => undefined,
+        onRefreshMutation: async () => {
+          throw new Error('not called');
+        },
         onUpdate: async () => {
           throw new Error('not called');
         },
-        onArchive: async () => undefined,
+        onArchive: async () => {
+          throw new Error('not called');
+        },
         onOpenLink: () => undefined,
         onOpenAssistant: () => undefined,
       }),
