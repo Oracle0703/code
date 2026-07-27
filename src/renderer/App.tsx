@@ -103,6 +103,7 @@ import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
 import {
   clearResolvedNoteCreateSyncWarning,
+  convertedNoteFromSnapshot,
   createNoteWorkspaceIdentity,
   isNoteCreateNavigationBlocked,
   noteCreateSyncWarningForActivation,
@@ -152,13 +153,17 @@ import {
 import {
   createInboxConversionWorkspaceIdentity,
   InboxConversionNavigationCoordinator,
+  InboxConversionPublicationGate,
   InboxConversionRequestCoordinator,
   InboxConversionSupersededError,
   inboxConversionNavigationError,
+  reconcileInboxConversionSnapshots,
   resolveInboxConversionNavigationTarget,
   type InboxConversionFeedback,
+  type InboxConversionRequestIntent,
   type InboxConversionWorkspaceIdentity,
 } from './inbox-conversion-navigation';
+import { isInboxConversionSourceArchived } from './inbox-state';
 import {
   createAutomationWorkspaceIdentity,
   type AutomationRunFeedback,
@@ -219,7 +224,9 @@ import {
   type TaskCreateFeedback,
   type TaskCreateWorkspaceIdentity,
 } from './task-create-navigation';
+import { convertedTaskFromSnapshot } from './task-state';
 import {
+  dataReplacementCloseApproved,
   evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
   synchronizeDirtyDraft,
@@ -289,6 +296,13 @@ interface InboxCaptureSyncWarningState {
   readonly message: string;
 }
 
+interface InboxConversionSyncWarningState {
+  readonly activation: InboxConversionWorkspaceIdentity;
+  readonly feedback: InboxConversionFeedback;
+  readonly focusActionOnMount: boolean;
+  readonly message: string;
+}
+
 type InboxCapturePublication =
   | {
       readonly kind: 'feedback';
@@ -298,6 +312,17 @@ type InboxCapturePublication =
   | {
       readonly kind: 'warning';
       readonly warning: InboxCaptureSyncWarningState;
+    };
+
+type InboxConversionPublication =
+  | {
+      readonly kind: 'feedback';
+      readonly activation: InboxConversionWorkspaceIdentity;
+      readonly feedback: InboxConversionFeedback;
+    }
+  | {
+      readonly kind: 'warning';
+      readonly warning: InboxConversionSyncWarningState;
     };
 
 type ScheduleCreatePublication =
@@ -405,6 +430,11 @@ export function App() {
     readonly activation: InboxConversionWorkspaceIdentity;
     readonly feedback: InboxConversionFeedback;
   } | null>(null);
+  const [inboxConversionSyncWarningState, setInboxConversionSyncWarningState] =
+    useState<InboxConversionSyncWarningState | null>(null);
+  const [pendingInboxConversionIntents, setPendingInboxConversionIntents] = useState<
+    ReadonlyMap<string, InboxConversionRequestIntent>
+  >(() => new Map());
   const [focusedInboxConversionFeedbackKey, setFocusedInboxConversionFeedbackKey] = useState<
     string | null
   >(null);
@@ -422,6 +452,9 @@ export function App() {
   const [automationCreateCoordinator] = useState(() => new AutomationCreateCoordinator());
   const [inboxConversionRequestCoordinator] = useState(
     () => new InboxConversionRequestCoordinator(),
+  );
+  const [inboxConversionPublicationGate] = useState(
+    () => new InboxConversionPublicationGate<InboxConversionPublication>(),
   );
   const [inboxConversionNavigation] = useState(() => new InboxConversionNavigationCoordinator());
   const [assistantSavedNoteNavigation] = useState(
@@ -472,6 +505,7 @@ export function App() {
     createInboxConversionWorkspaceIdentity(null),
   );
   const inboxConversionFeedbackRef = useRef<InboxConversionFeedback | null>(null);
+  const inboxConversionSyncWarningRef = useRef<InboxConversionSyncWarningState | null>(null);
   const inboxConversionSurfaceRef = useRef<AppSurfaceId>('today');
   const focusTaskCompletionActivationRef = useRef<FocusWorkspaceIdentity>(
     createFocusWorkspaceIdentity(null),
@@ -575,6 +609,10 @@ export function App() {
   const visibleInboxConversionFeedback =
     inboxConversionFeedbackState?.activation === inboxController.activation
       ? inboxConversionFeedbackState.feedback
+      : null;
+  const visibleInboxConversionSyncWarning =
+    inboxConversionSyncWarningState?.activation === inboxController.activation
+      ? inboxConversionSyncWarningState
       : null;
   const visibleNoteCreateSyncWarning = noteCreateSyncWarningForActivation(
     noteCreateActivation,
@@ -723,6 +761,81 @@ export function App() {
     setInboxCaptureFeedbackState(null);
     setInboxCaptureSyncWarningState(null);
   }, [inboxCaptureCoordinator, inboxCapturePublicationGate]);
+  const invalidateInboxConversion = useCallback((): void => {
+    inboxConversionNavigation.invalidate();
+    inboxConversionRequestCoordinator.invalidate();
+    inboxConversionPublicationGate.clear();
+    inboxConversionFeedbackRef.current = null;
+    inboxConversionSyncWarningRef.current = null;
+    setInboxConversionFeedbackState(null);
+    setInboxConversionSyncWarningState(null);
+  }, [
+    inboxConversionNavigation,
+    inboxConversionPublicationGate,
+    inboxConversionRequestCoordinator,
+  ]);
+  const finishInboxConversionRequest = useCallback(
+    (intent: InboxConversionRequestIntent): void => {
+      inboxConversionRequestCoordinator.end(intent);
+      const workspaceId = intent.workspace.workspaceId;
+      if (workspaceId === null) return;
+      setPendingInboxConversionIntents((current) => {
+        if (current.get(workspaceId) !== intent) return current;
+        const next = new Map(current);
+        next.delete(workspaceId);
+        return next;
+      });
+    },
+    [inboxConversionRequestCoordinator],
+  );
+  const publishInboxConversionPublication = useCallback(
+    (publication: InboxConversionPublication): void => {
+      const activation =
+        publication.kind === 'feedback' ? publication.activation : publication.warning.activation;
+      const feedback =
+        publication.kind === 'feedback' ? publication.feedback : publication.warning.feedback;
+      if (
+        activation !== inboxConversionActivationRef.current ||
+        !inboxConversionRequestCoordinator.isGenerationCurrent(
+          feedback.requestGeneration,
+          activation,
+        )
+      ) {
+        return;
+      }
+
+      if (publication.kind === 'feedback') {
+        inboxConversionFeedbackRef.current = publication.feedback;
+        inboxConversionSyncWarningRef.current = null;
+        setInboxConversionSyncWarningState(null);
+        setInboxConversionFeedbackState({
+          activation,
+          feedback: publication.feedback,
+        });
+        return;
+      }
+
+      inboxConversionFeedbackRef.current = null;
+      inboxConversionSyncWarningRef.current = publication.warning;
+      setInboxConversionFeedbackState(null);
+      setInboxConversionSyncWarningState(publication.warning);
+    },
+    [inboxConversionRequestCoordinator],
+  );
+  const closeTaskDialog = useCallback((): void => {
+    if (taskDialog?.mode === 'convert') taskController.clearOperationError();
+    setTaskDialog(null);
+    const publication = inboxConversionPublicationGate.take(
+      false,
+      inboxConversionActivationRef.current,
+    );
+    if (publication !== null) publishInboxConversionPublication(publication);
+  }, [
+    inboxConversionPublicationGate,
+    publishInboxConversionPublication,
+    taskController,
+    taskDialog,
+  ]);
   const publishInboxCapturePublication = useCallback(
     (publication: InboxCapturePublication): void => {
       const activation =
@@ -904,22 +1017,21 @@ export function App() {
   ]);
   useLayoutEffect(() => {
     const previousActivation = inboxConversionActivationRef.current;
-    const previousSurface = inboxConversionSurfaceRef.current;
     inboxConversionActivationRef.current = inboxController.activation;
     inboxConversionFeedbackRef.current = visibleInboxConversionFeedback;
+    inboxConversionSyncWarningRef.current = visibleInboxConversionSyncWarning;
     inboxConversionSurfaceRef.current = activeSurface;
     currentSurfaceRef.current = activeSurface;
     inboxConversionNavigation.invalidate();
-    if (previousActivation !== inboxController.activation || previousSurface !== activeSurface) {
-      inboxConversionRequestCoordinator.invalidate();
-    }
+    if (previousActivation !== inboxController.activation) invalidateInboxConversion();
   }, [
     activeSurface,
     inboxController.activation,
+    invalidateInboxConversion,
     inboxConversionNavigation,
-    inboxConversionRequestCoordinator,
     overlayOpen,
     visibleInboxConversionFeedback,
+    visibleInboxConversionSyncWarning,
   ]);
   useLayoutEffect(() => {
     assistantSavedNotesRef.current = assistantSavedNotes;
@@ -1012,9 +1124,6 @@ export function App() {
   const restoreBackupWithApproval = useCallback(
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
       if (!confirmLeaveNoteDraft()) return null;
-      invalidateInboxCapture();
-      invalidateAutomationCreate();
-      invalidateScheduleCreate();
       dataReplacementApprovedRef.current = true;
       dataReplacementNoteDiscardApprovedRef.current = true;
       try {
@@ -1030,13 +1139,7 @@ export function App() {
         throw error;
       }
     },
-    [
-      confirmLeaveNoteDraft,
-      invalidateAutomationCreate,
-      invalidateInboxCapture,
-      invalidateScheduleCreate,
-      restoreBackup,
-    ],
+    [confirmLeaveNoteDraft, restoreBackup],
   );
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
@@ -1048,7 +1151,6 @@ export function App() {
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
       if (view === 'assistant') {
         setAssistantSurfaceOpen(true);
       } else {
@@ -1067,7 +1169,6 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
       scheduleCreateCoordinator,
       taskCreateCoordinator,
       updatePreferences,
@@ -1080,7 +1181,6 @@ export function App() {
       scheduleCreateCoordinator.cancelOpen();
       inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
       setAssistantEntry((current) => ({
         workspaceId: activeWorkspace.id,
         context,
@@ -1094,7 +1194,6 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
       scheduleCreateCoordinator,
     ],
   );
@@ -1117,8 +1216,7 @@ export function App() {
       assistantSavedNoteNavigation.invalidate();
       invalidateInboxCapture();
       taskCreateCoordinator.invalidate();
-      inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
+      invalidateInboxConversion();
       void workspaceController.activate(workspaceId).catch(() => undefined);
     },
     [
@@ -1126,8 +1224,7 @@ export function App() {
       automationOutputNavigation,
       confirmLeaveNoteDraft,
       invalidateInboxCapture,
-      inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
+      invalidateInboxConversion,
       searchNavigation,
       taskCreateCoordinator,
       invalidateAutomationCreate,
@@ -1445,7 +1542,6 @@ export function App() {
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
       try {
         const intent = taskCreateCoordinator.beginOpen(taskCreateActivationRef.current, feedback);
         const assertCurrent = () =>
@@ -1504,7 +1600,6 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
       searchNavigation,
       taskController.prepareSnapshotRefresh,
       taskCreateCoordinator,
@@ -1724,7 +1819,6 @@ export function App() {
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
       try {
         const intent = scheduleCreateCoordinator.beginOpen(
           scheduleCreateActivationRef.current,
@@ -1795,7 +1889,6 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
       scheduleController.prepareSnapshotRefresh,
       scheduleCreateCoordinator,
       searchNavigation,
@@ -1982,7 +2075,6 @@ export function App() {
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
       try {
         const intent = automationCreateCoordinator.beginOpen(
           automationCreateActivationRef.current,
@@ -2050,7 +2142,6 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
       searchNavigation,
       taskCreateCoordinator,
       updatePreferences,
@@ -2449,52 +2540,102 @@ export function App() {
   const convertInboxToTask = useCallback(
     async (entry: InboxEntry, planning: TaskPlanning): Promise<void> => {
       inboxConversionNavigation.invalidate();
+      if (inboxConversionSyncWarningRef.current !== null) {
+        throw new Error('请先重新读取上一条已转换记录，再继续处理收件箱。');
+      }
+      inboxConversionPublicationGate.clear();
       const intent = inboxConversionRequestCoordinator.begin(
         inboxConversionActivationRef.current,
         entry.id,
         'task',
       );
       if (!intent) return;
+      setPendingInboxConversionIntents((current) => {
+        const workspaceId = intent.workspace.workspaceId!;
+        const next = new Map(current);
+        next.set(workspaceId, intent);
+        return next;
+      });
       inboxController.clearOperationError();
       taskController.clearOperationError();
       noteController.clearOperationError();
       const inboxRequest = inboxController.reserveSnapshotRequest(intent.workspace.workspaceId!);
       if (!inboxRequest) {
-        inboxConversionRequestCoordinator.end(intent);
+        finishInboxConversionRequest(intent);
         return;
       }
       const failureIsCurrent = () =>
         inboxConversionRequestCoordinator.isCurrent(intent, inboxConversionActivationRef.current);
       try {
         const conversion = await taskController.convertInbox(entry.id, planning, failureIsCurrent);
-        const inboxCommitted = inboxController.applyReservedSnapshot(
-          conversion.result.inboxSnapshot,
-          inboxRequest,
-        );
-        if (!conversion.committed || !inboxCommitted) return;
+        const workspaceId = intent.workspace.workspaceId!;
+        const inboxCommitted =
+          isInboxConversionSourceArchived(workspaceId, entry.id, conversion.result.inboxSnapshot) &&
+          inboxController.applyReservedSnapshot(conversion.result.inboxSnapshot, inboxRequest);
+        const reconciliation = await reconcileInboxConversionSnapshots({
+          initialOutputCommitted: conversion.committed,
+          initialInboxCommitted: inboxCommitted,
+          getCommittedOutput: () =>
+            taskController.getCommittedConvertedTask(
+              workspaceId,
+              entry.id,
+              conversion.result.createdTaskId,
+            ),
+          getCommittedInbox: () =>
+            inboxController.isCommittedConversionSourceArchived(workspaceId, entry.id),
+          prepareOutputSnapshotRefresh: taskController.prepareSnapshotRefresh,
+          prepareInboxSnapshotRefresh: inboxController.prepareSnapshotRefresh,
+          outputFromSnapshot: (snapshot) =>
+            convertedTaskFromSnapshot(
+              workspaceId,
+              entry.id,
+              conversion.result.createdTaskId,
+              snapshot,
+            ),
+          inboxSnapshotIsCommitted: (snapshot) =>
+            isInboxConversionSourceArchived(workspaceId, entry.id, snapshot),
+          isCurrent: failureIsCurrent,
+        });
+        if (!failureIsCurrent()) return;
+        const output = reconciliation.output ?? conversion.createdTask;
         const feedback = inboxConversionRequestCoordinator.createFeedback(
           intent,
           inboxConversionActivationRef.current,
           {
-            outputId: conversion.createdTask.id,
-            outputTitle: conversion.createdTask.title,
+            outputId: conversion.result.createdTaskId,
+            outputTitle: output?.title ?? entry.content,
           },
         );
-        setInboxConversionFeedbackState({
-          activation: intent.workspace,
-          feedback,
-        });
+        const publication: InboxConversionPublication =
+          reconciliation.committed && output !== null
+            ? {
+                kind: 'feedback',
+                activation: intent.workspace,
+                feedback,
+              }
+            : {
+                kind: 'warning',
+                warning: {
+                  activation: intent.workspace,
+                  feedback,
+                  focusActionOnMount: true,
+                  message: '任务已经创建、来源也已经归档，但当前任务或收件箱列表未能安全同步。',
+                },
+              };
+        inboxConversionPublicationGate.stage(intent.workspace, publication);
       } catch (error) {
         if (!failureIsCurrent() || error instanceof InboxConversionSupersededError) return;
         throw error;
       } finally {
-        inboxConversionRequestCoordinator.end(intent);
+        finishInboxConversionRequest(intent);
       }
     },
     [
       inboxController,
       inboxConversionNavigation,
+      inboxConversionPublicationGate,
       inboxConversionRequestCoordinator,
+      finishInboxConversionRequest,
       noteController,
       taskController,
     ],
@@ -2503,53 +2644,204 @@ export function App() {
   const convertInboxToNote = useCallback(
     async (entry: InboxEntry): Promise<void> => {
       inboxConversionNavigation.invalidate();
+      if (inboxConversionSyncWarningRef.current !== null) {
+        throw new Error('请先重新读取上一条已转换记录，再继续处理收件箱。');
+      }
       const intent = inboxConversionRequestCoordinator.begin(
         inboxConversionActivationRef.current,
         entry.id,
         'note',
       );
       if (!intent) return;
+      setPendingInboxConversionIntents((current) => {
+        const workspaceId = intent.workspace.workspaceId!;
+        const next = new Map(current);
+        next.set(workspaceId, intent);
+        return next;
+      });
       inboxController.clearOperationError();
       taskController.clearOperationError();
       noteController.clearOperationError();
       const inboxRequest = inboxController.reserveSnapshotRequest(intent.workspace.workspaceId!);
       if (!inboxRequest) {
-        inboxConversionRequestCoordinator.end(intent);
+        finishInboxConversionRequest(intent);
         return;
       }
       const failureIsCurrent = () =>
         inboxConversionRequestCoordinator.isCurrent(intent, inboxConversionActivationRef.current);
       try {
         const conversion = await noteController.convertInbox(entry.id, failureIsCurrent);
-        const inboxCommitted = inboxController.applyReservedSnapshot(
-          conversion.result.inboxSnapshot,
-          inboxRequest,
-        );
-        if (!conversion.committed || !inboxCommitted) return;
+        const workspaceId = intent.workspace.workspaceId!;
+        const inboxCommitted =
+          isInboxConversionSourceArchived(workspaceId, entry.id, conversion.result.inboxSnapshot) &&
+          inboxController.applyReservedSnapshot(conversion.result.inboxSnapshot, inboxRequest);
+        const reconciliation = await reconcileInboxConversionSnapshots({
+          initialOutputCommitted: conversion.committed,
+          initialInboxCommitted: inboxCommitted,
+          getCommittedOutput: () =>
+            noteController.getCommittedConvertedNote(
+              workspaceId,
+              entry.id,
+              conversion.result.createdNoteId,
+            ),
+          getCommittedInbox: () =>
+            inboxController.isCommittedConversionSourceArchived(workspaceId, entry.id),
+          prepareOutputSnapshotRefresh: noteController.prepareSnapshotRefresh,
+          prepareInboxSnapshotRefresh: inboxController.prepareSnapshotRefresh,
+          outputFromSnapshot: (snapshot) =>
+            convertedNoteFromSnapshot(
+              workspaceId,
+              entry.id,
+              conversion.result.createdNoteId,
+              snapshot,
+            ),
+          inboxSnapshotIsCommitted: (snapshot) =>
+            isInboxConversionSourceArchived(workspaceId, entry.id, snapshot),
+          isCurrent: failureIsCurrent,
+        });
+        if (!failureIsCurrent()) return;
+        const output = reconciliation.output ?? conversion.createdNote;
         const feedback = inboxConversionRequestCoordinator.createFeedback(
           intent,
           inboxConversionActivationRef.current,
           {
-            outputId: conversion.createdNote.id,
-            outputTitle: conversion.createdNote.title,
+            outputId: conversion.result.createdNoteId,
+            outputTitle: output?.title ?? entry.content,
           },
         );
-        setInboxConversionFeedbackState({
-          activation: intent.workspace,
-          feedback,
-        });
+        publishInboxConversionPublication(
+          reconciliation.committed && output !== null
+            ? {
+                kind: 'feedback',
+                activation: intent.workspace,
+                feedback,
+              }
+            : {
+                kind: 'warning',
+                warning: {
+                  activation: intent.workspace,
+                  feedback,
+                  focusActionOnMount: false,
+                  message: '笔记已经创建、来源也已经归档，但当前笔记或收件箱列表未能安全同步。',
+                },
+              },
+        );
       } catch (error) {
         if (!failureIsCurrent() || error instanceof InboxConversionSupersededError) return;
         throw error;
       } finally {
-        inboxConversionRequestCoordinator.end(intent);
+        finishInboxConversionRequest(intent);
       }
     },
     [
       inboxController,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
+      finishInboxConversionRequest,
       noteController,
+      publishInboxConversionPublication,
+      taskController,
+    ],
+  );
+
+  const refreshInboxConversionSyncWarning = useCallback(
+    async (warning: InboxConversionSyncWarningState): Promise<void> => {
+      const { feedback } = warning;
+      const isCurrent = () =>
+        warning.activation === inboxConversionActivationRef.current &&
+        warning === inboxConversionSyncWarningRef.current &&
+        inboxConversionRequestCoordinator.isGenerationCurrent(
+          feedback.requestGeneration,
+          warning.activation,
+        );
+      if (!isCurrent()) throw new InboxConversionSupersededError();
+
+      const initialInbox = inboxController.isCommittedConversionSourceArchived(
+        feedback.workspaceId,
+        feedback.sourceEntryId,
+      );
+      const sharedReconciliationInput = {
+        initialInboxCommitted: initialInbox,
+        getCommittedInbox: () =>
+          inboxController.isCommittedConversionSourceArchived(
+            feedback.workspaceId,
+            feedback.sourceEntryId,
+          ),
+        prepareInboxSnapshotRefresh: inboxController.prepareSnapshotRefresh,
+        inboxSnapshotIsCommitted: (
+          snapshot: Parameters<typeof isInboxConversionSourceArchived>[2],
+        ) =>
+          isInboxConversionSourceArchived(feedback.workspaceId, feedback.sourceEntryId, snapshot),
+        isCurrent,
+      };
+
+      let outputTitle: string;
+      if (feedback.outputKind === 'task') {
+        const getCommittedOutput = () =>
+          taskController.getCommittedConvertedTask(
+            feedback.workspaceId,
+            feedback.sourceEntryId,
+            feedback.outputId,
+          );
+        const initialOutput = getCommittedOutput();
+        const reconciliation = await reconcileInboxConversionSnapshots({
+          ...sharedReconciliationInput,
+          initialOutputCommitted: initialOutput !== null,
+          getCommittedOutput,
+          prepareOutputSnapshotRefresh: taskController.prepareSnapshotRefresh,
+          outputFromSnapshot: (snapshot) =>
+            convertedTaskFromSnapshot(
+              feedback.workspaceId,
+              feedback.sourceEntryId,
+              feedback.outputId,
+              snapshot,
+            ),
+        });
+        if (!isCurrent() || !reconciliation.committed || reconciliation.output === null) {
+          throw new Error('The committed inbox task conversion could not be reconciled.');
+        }
+        outputTitle = reconciliation.output.title;
+      } else {
+        const getCommittedOutput = () =>
+          noteController.getCommittedConvertedNote(
+            feedback.workspaceId,
+            feedback.sourceEntryId,
+            feedback.outputId,
+          );
+        const initialOutput = getCommittedOutput();
+        const reconciliation = await reconcileInboxConversionSnapshots({
+          ...sharedReconciliationInput,
+          initialOutputCommitted: initialOutput !== null,
+          getCommittedOutput,
+          prepareOutputSnapshotRefresh: noteController.prepareSnapshotRefresh,
+          outputFromSnapshot: (snapshot) =>
+            convertedNoteFromSnapshot(
+              feedback.workspaceId,
+              feedback.sourceEntryId,
+              feedback.outputId,
+              snapshot,
+            ),
+        });
+        if (!isCurrent() || !reconciliation.committed || reconciliation.output === null) {
+          throw new Error('The committed inbox note conversion could not be reconciled.');
+        }
+        outputTitle = reconciliation.output.title;
+      }
+
+      publishInboxConversionPublication({
+        kind: 'feedback',
+        activation: warning.activation,
+        feedback: Object.freeze({
+          ...feedback,
+          outputTitle,
+        }),
+      });
+    },
+    [
+      inboxController,
+      inboxConversionRequestCoordinator,
+      noteController,
+      publishInboxConversionPublication,
       taskController,
     ],
   );
@@ -2722,7 +3014,15 @@ export function App() {
             ),
         );
         if (decision === 'reject') return false;
-        if (decision === 'approve') return true;
+        if (decision === 'approve') {
+          if (dataReplacementCloseApproved(request.reason, decision)) {
+            invalidateInboxCapture();
+            invalidateInboxConversion();
+            invalidateAutomationCreate();
+            invalidateScheduleCreate();
+          }
+          return true;
+        }
         try {
           await cancelImport();
           return currentImportPreview() === null;
@@ -2730,7 +3030,15 @@ export function App() {
           return false;
         }
       }),
-    [cancelImport, currentImportPreview, isImportCommitInFlight],
+    [
+      cancelImport,
+      currentImportPreview,
+      invalidateAutomationCreate,
+      invalidateInboxCapture,
+      invalidateInboxConversion,
+      invalidateScheduleCreate,
+      isImportCommitInFlight,
+    ],
   );
 
   useEffect(() => {
@@ -2861,7 +3169,6 @@ export function App() {
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
-      inboxConversionRequestCoordinator.invalidate();
       const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
       const intent = searchNavigation.begin(selectedResult);
       if (workspaceController.pendingOperation !== null) {
@@ -3016,7 +3323,6 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
-      inboxConversionRequestCoordinator,
       noteController.pendingCreate,
       searchNavigation,
       taskCreateCoordinator,
@@ -3616,11 +3922,15 @@ export function App() {
                     loadError={inboxController.loadError}
                     operationError={inboxController.operationError ?? noteController.operationError}
                     conversionFeedback={visibleInboxConversionFeedback}
+                    conversionSyncWarning={visibleInboxConversionSyncWarning}
                     conversionFeedbackFocusBlocked={overlayOpen}
                     focusedConversionFeedbackKey={focusedInboxConversionFeedbackKey}
                     pendingEntryIds={inboxController.pendingEntryIds}
                     pendingConversionEntryIds={taskController.pendingConversionEntryIds}
                     pendingNoteConversionEntryIds={noteController.pendingConversionEntryIds}
+                    conversionMutationPending={pendingInboxConversionIntents.has(
+                      snapshot.currentWorkspaceId,
+                    )}
                     requestedEntryId={
                       inboxReveal?.workspaceId === snapshot.currentWorkspaceId &&
                       !inboxReveal.handled
@@ -3632,12 +3942,22 @@ export function App() {
                     onOpenCapture={openQuickCapture}
                     onCategorize={inboxController.categorize}
                     onArchive={inboxController.archive}
-                    onDismissConversionFeedback={(feedback) =>
+                    onDismissConversionFeedback={(feedback) => {
+                      if (inboxConversionFeedbackRef.current === feedback) {
+                        inboxConversionFeedbackRef.current = null;
+                      }
                       setInboxConversionFeedbackState((current) =>
                         current?.feedback === feedback ? null : current,
-                      )
-                    }
+                      );
+                    }}
                     onOpenConversionOutput={openInboxConversionOutput}
+                    onRefreshConversionSyncWarning={async (feedback) => {
+                      const warning = inboxConversionSyncWarningRef.current;
+                      if (warning === null || warning.feedback !== feedback) {
+                        throw new InboxConversionSupersededError();
+                      }
+                      await refreshInboxConversionSyncWarning(warning);
+                    }}
                     onConversionFeedbackFocused={setFocusedInboxConversionFeedbackKey}
                     onOpenConvert={(entry) =>
                       setTaskDialog({
@@ -3970,10 +4290,7 @@ export function App() {
         <TaskDialog
           state={taskDialog}
           planningDays={taskController.snapshot?.planningDays ?? []}
-          onClose={() => {
-            if (taskDialog.mode === 'convert') taskController.clearOperationError();
-            setTaskDialog(null);
-          }}
+          onClose={closeTaskDialog}
           onCreate={async (title, planning) => {
             if (taskDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开任务窗口。');
@@ -4113,9 +4430,6 @@ export function App() {
           onCancel={cancelImport}
           onConfirm={async () => {
             if (!confirmLeaveNoteDraft()) return;
-            invalidateInboxCapture();
-            invalidateAutomationCreate();
-            invalidateScheduleCreate();
             dataReplacementApprovedRef.current = true;
             dataReplacementNoteDiscardApprovedRef.current = true;
             try {

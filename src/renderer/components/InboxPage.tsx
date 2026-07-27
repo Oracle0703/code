@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import type { InboxCategory, InboxEntry } from '../../shared/contracts';
+import { InboxConversionSyncWarning } from './InboxConversionSyncWarning';
 import {
   inboxConversionFeedbackKey,
   inboxConversionOpenFailed,
@@ -32,11 +33,17 @@ interface InboxPageProps {
   loadError: string | null;
   operationError: string | null;
   conversionFeedback: InboxConversionFeedback | null;
+  conversionSyncWarning?: {
+    readonly feedback: InboxConversionFeedback;
+    readonly message: string;
+    readonly focusActionOnMount: boolean;
+  } | null;
   conversionFeedbackFocusBlocked: boolean;
   focusedConversionFeedbackKey: string | null;
   pendingEntryIds: ReadonlySet<string>;
   pendingConversionEntryIds: ReadonlySet<string>;
   pendingNoteConversionEntryIds: ReadonlySet<string>;
+  conversionMutationPending: boolean;
   requestedEntryId?: string | null;
   onRequestedEntryHandled?: () => void;
   onRetry: () => void;
@@ -45,6 +52,7 @@ interface InboxPageProps {
   onArchive: (entry: InboxEntry) => Promise<void>;
   onDismissConversionFeedback: (feedback: InboxConversionFeedback) => void;
   onOpenConversionOutput: (feedback: InboxConversionFeedback) => Promise<void>;
+  onRefreshConversionSyncWarning?: (feedback: InboxConversionFeedback) => Promise<void>;
   onConversionFeedbackFocused: (feedbackKey: string) => void;
   onOpenConvert: (entry: InboxEntry) => void;
   onConvertNote: (entry: InboxEntry) => Promise<void>;
@@ -71,11 +79,13 @@ export function InboxPage({
   loadError,
   operationError,
   conversionFeedback,
+  conversionSyncWarning = null,
   conversionFeedbackFocusBlocked,
   focusedConversionFeedbackKey,
   pendingEntryIds,
   pendingConversionEntryIds,
   pendingNoteConversionEntryIds,
+  conversionMutationPending,
   requestedEntryId = null,
   onRequestedEntryHandled,
   onRetry,
@@ -84,6 +94,7 @@ export function InboxPage({
   onArchive,
   onDismissConversionFeedback,
   onOpenConversionOutput,
+  onRefreshConversionSyncWarning = async () => undefined,
   onConversionFeedbackFocused,
   onOpenConvert,
   onConvertNote,
@@ -284,6 +295,17 @@ export function InboxPage({
             })}
           </div>
 
+          {conversionSyncWarning ? (
+            <InboxConversionSyncWarning
+              outputKind={conversionSyncWarning.feedback.outputKind}
+              outputTitle={conversionSyncWarning.feedback.outputTitle}
+              message={conversionSyncWarning.message}
+              focusActionOnMount={conversionSyncWarning.focusActionOnMount}
+              focusBlocked={conversionFeedbackFocusBlocked}
+              onRefresh={() => onRefreshConversionSyncWarning(conversionSyncWarning.feedback)}
+            />
+          ) : null}
+
           {conversionFeedback ? (
             <div
               className="inbox-conversion-feedback"
@@ -355,7 +377,9 @@ export function InboxPage({
                 const pending =
                   pendingEntryIds.has(entry.id) ||
                   pendingConversionEntryIds.has(entry.id) ||
-                  pendingNoteConversionEntryIds.has(entry.id);
+                  pendingNoteConversionEntryIds.has(entry.id) ||
+                  conversionSyncWarning !== null;
+                const conversionPending = pending || conversionMutationPending;
                 const Icon = categoryIcon(entry.category);
                 return (
                   <li
@@ -402,7 +426,7 @@ export function InboxPage({
                         type="button"
                         className="inbox-entry__convert"
                         aria-label={`转为任务：${entry.content}`}
-                        disabled={pending}
+                        disabled={conversionPending}
                         onClick={() => onOpenConvert(entry)}
                       >
                         {pendingConversionEntryIds.has(entry.id) ? (
@@ -420,7 +444,7 @@ export function InboxPage({
                         type="button"
                         className="inbox-entry__convert inbox-entry__convert--note"
                         aria-label={`转为笔记：${entry.content}`}
-                        disabled={pending}
+                        disabled={conversionPending}
                         onClick={() => {
                           void onConvertNote(entry).catch(() => {
                             window.requestAnimationFrame(() => {

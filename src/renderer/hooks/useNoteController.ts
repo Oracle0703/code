@@ -8,6 +8,7 @@ import type {
 import {
   beginPendingNoteCreate,
   convertedNoteFromResult,
+  convertedNoteFromSnapshot,
   createdNoteFromResult,
   createNoteRequestIdentity,
   createNoteWorkspaceIdentity,
@@ -42,7 +43,7 @@ const NOTE_CREATE_RECONCILIATION_ERROR =
 
 export interface NoteInboxConversionCommit {
   readonly result: NoteConversionResult;
-  readonly createdNote: Note;
+  readonly createdNote: Note | null;
   readonly committed: boolean;
 }
 
@@ -442,26 +443,49 @@ export function useNoteController(workspaceId: string | null) {
       }
       setOperationErrorState(null);
       try {
-        const result = await window.workbench.note.convertInbox({
-          workspaceId: request.workspaceId,
-          entryId,
-        });
-        const committed = applySnapshot(result.noteSnapshot, request);
+        let result: NoteConversionResult;
+        try {
+          result = await window.workbench.note.convertInbox({
+            workspaceId: request.workspaceId,
+            entryId,
+          });
+        } catch (error) {
+          throw operationFailure(
+            error,
+            request.workspace,
+            '无法转换为笔记，请重试。',
+            shouldPublishFailure,
+          );
+        }
         const createdNote = convertedNoteFromResult(request.workspaceId, entryId, result);
-        if (!createdNote) throw new Error('转换结果与创建的笔记不匹配，请重试。');
+        const committed = createdNote !== null && applySnapshot(result.noteSnapshot, request);
         return { result, createdNote, committed };
-      } catch (error) {
-        throw operationFailure(
-          error,
-          request.workspace,
-          '无法转换为笔记，请重试。',
-          shouldPublishFailure,
-        );
       } finally {
         endPendingConversion(request.workspace, entryId);
       }
     },
     [applySnapshot, beginPendingConversion, beginRequest, endPendingConversion, operationFailure],
+  );
+
+  const getCommittedConvertedNote = useCallback(
+    (
+      expectedWorkspaceId: string,
+      expectedSourceEntryId: string,
+      expectedCreatedNoteId: string,
+    ): Note | null => {
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== expectedWorkspaceId) return null;
+      const committedSnapshot = noteSnapshotForActivation(current, storedSnapshotRef.current);
+      return committedSnapshot
+        ? convertedNoteFromSnapshot(
+            expectedWorkspaceId,
+            expectedSourceEntryId,
+            expectedCreatedNoteId,
+            committedSnapshot,
+          )
+        : null;
+    },
+    [],
   );
 
   const snapshot = noteSnapshotForActivation(activation, storedSnapshot);
@@ -513,6 +537,7 @@ export function useNoteController(workspaceId: string | null) {
       if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
+    getCommittedConvertedNote,
     clearOperationError: () =>
       setOperationErrorState((current) => (current?.activation === activation ? null : current)),
     create,

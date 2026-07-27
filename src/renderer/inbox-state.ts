@@ -119,6 +119,17 @@ export function createdInboxEntryFromResult(
   return matches.length === 1 ? matches[0]! : null;
 }
 
+export function isInboxConversionSourceArchived(
+  expectedWorkspaceId: string,
+  expectedSourceEntryId: string,
+  snapshot: InboxSnapshot,
+): boolean {
+  return (
+    snapshot.workspaceId === expectedWorkspaceId &&
+    !snapshot.entries.some(({ id }) => id === expectedSourceEntryId)
+  );
+}
+
 export async function reconcileInboxCreateResult(
   input: InboxCreateReconciliationInput,
 ): Promise<InboxCreateReconciliation> {

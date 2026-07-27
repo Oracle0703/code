@@ -243,8 +243,23 @@ export function convertedNoteFromResult(
   expectedSourceEntryId: string,
   result: NoteConversionResult,
 ): Note | null {
-  if (result.noteSnapshot.workspaceId !== expectedWorkspaceId) return null;
-  const note = result.noteSnapshot.notes.find(({ id }) => id === result.createdNoteId);
+  return convertedNoteFromSnapshot(
+    expectedWorkspaceId,
+    expectedSourceEntryId,
+    result.createdNoteId,
+    result.noteSnapshot,
+  );
+}
+
+export function convertedNoteFromSnapshot(
+  expectedWorkspaceId: string,
+  expectedSourceEntryId: string,
+  expectedCreatedNoteId: string,
+  snapshot: NoteSnapshot,
+): Note | null {
+  if (snapshot.workspaceId !== expectedWorkspaceId) return null;
+  const matches = snapshot.notes.filter(({ id }) => id === expectedCreatedNoteId);
+  const note = matches.length === 1 ? matches[0]! : null;
   return note?.sourceInboxEntryId === expectedSourceEntryId ? note : null;
 }
 

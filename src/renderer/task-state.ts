@@ -137,8 +137,23 @@ export function convertedTaskFromResult(
   expectedSourceEntryId: string,
   result: TaskConversionResult,
 ): Task | null {
-  if (result.taskSnapshot.workspaceId !== expectedWorkspaceId) return null;
-  const task = result.taskSnapshot.tasks.find(({ id }) => id === result.createdTaskId);
+  return convertedTaskFromSnapshot(
+    expectedWorkspaceId,
+    expectedSourceEntryId,
+    result.createdTaskId,
+    result.taskSnapshot,
+  );
+}
+
+export function convertedTaskFromSnapshot(
+  expectedWorkspaceId: string,
+  expectedSourceEntryId: string,
+  expectedCreatedTaskId: string,
+  snapshot: TaskSnapshot,
+): Task | null {
+  if (snapshot.workspaceId !== expectedWorkspaceId) return null;
+  const matches = snapshot.tasks.filter(({ id }) => id === expectedCreatedTaskId);
+  const task = matches.length === 1 ? matches[0]! : null;
   return task?.sourceInboxEntryId === expectedSourceEntryId ? task : null;
 }
 

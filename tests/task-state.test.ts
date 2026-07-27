@@ -5,6 +5,7 @@ import {
   countTasks,
   createdTaskFromResult,
   convertedTaskFromResult,
+  convertedTaskFromSnapshot,
   createTaskRequestIdentity,
   createTaskWorkspaceIdentity,
   filterTasks,
@@ -207,12 +208,37 @@ describe('task renderer state', () => {
 
     expect(convertedTaskFromResult(WORKSPACE_A, sourceEntryId, result)).toBe(converted);
     expect(
+      convertedTaskFromSnapshot(WORKSPACE_A, sourceEntryId, converted.id, result.taskSnapshot),
+    ).toBe(converted);
+    expect(
       convertedTaskFromResult(WORKSPACE_A, sourceEntryId, {
         ...result,
         createdTaskId: other.id,
       }),
     ).toBeNull();
     expect(convertedTaskFromResult(WORKSPACE_B, sourceEntryId, result)).toBeNull();
+    expect(
+      convertedTaskFromSnapshot(
+        WORKSPACE_A,
+        sourceEntryId,
+        converted.id,
+        snapshot({ tasks: [converted, { ...converted }] }),
+      ),
+    ).toBeNull();
+    expect(
+      convertedTaskFromSnapshot(
+        WORKSPACE_A,
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        converted.id,
+        taskSnapshot,
+      ),
+    ).toBeNull();
+    expect(
+      convertedTaskFromResult(WORKSPACE_A, sourceEntryId, {
+        ...result,
+        taskSnapshot: snapshot({ tasks: [converted, { ...converted }] }),
+      }),
+    ).toBeNull();
   });
 
   it('uses activation identity to reject an old A request after A to B to A', () => {

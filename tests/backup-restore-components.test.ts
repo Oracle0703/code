@@ -120,12 +120,28 @@ describe('backup restore renderer surfaces', () => {
 
   it('requires App-level unsaved-note approval before authorizing data replacement', () => {
     const source = readFileSync(new URL('../src/renderer/App.tsx', import.meta.url), 'utf8');
+    const restoreFlow = source.slice(
+      source.indexOf('const restoreBackupWithApproval'),
+      source.indexOf('const requestActiveView'),
+    );
+    const importFlow = source.slice(
+      source.indexOf('dataState.importPreview ?'),
+      source.indexOf('<InboxUndoStack'),
+    );
+    const closeApprovalFlow = source.slice(
+      source.indexOf('window.workbench.window.onCloseRequest'),
+      source.indexOf('const protectDraft'),
+    );
 
     expect(source).toContain('if (!confirmLeaveNoteDraft()) return null');
     expect(source).toContain('dataReplacementApprovedRef.current = true');
     expect(source).toContain('dataReplacementNoteDiscardApprovedRef.current = true');
     expect(source).toContain("if (result.status === 'cancelled')");
     expect(source).toContain('onRestoreBackup={restoreBackupWithApproval}');
+    expect(restoreFlow).not.toContain('invalidateInboxConversion();');
+    expect(importFlow).not.toContain('invalidateInboxConversion();');
+    expect(closeApprovalFlow).toContain('dataReplacementCloseApproved(request.reason, decision)');
+    expect(closeApprovalFlow).toContain('invalidateInboxConversion();');
   });
 });
 

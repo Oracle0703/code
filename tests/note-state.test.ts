@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   convertedNoteFromResult,
+  convertedNoteFromSnapshot,
   createdNoteFromResult,
   createNoteRequestIdentity,
   createNoteWorkspaceIdentity,
@@ -41,12 +42,43 @@ describe('note renderer state', () => {
       converted,
     );
     expect(
+      convertedNoteFromSnapshot(
+        WORKSPACE_A,
+        converted.sourceInboxEntryId!,
+        converted.id,
+        result.noteSnapshot,
+      ),
+    ).toBe(converted);
+    expect(
       convertedNoteFromResult(WORKSPACE_A, converted.sourceInboxEntryId!, {
         ...result,
         createdNoteId: other.id,
       }),
     ).toBeNull();
     expect(convertedNoteFromResult(WORKSPACE_B, converted.sourceInboxEntryId!, result)).toBeNull();
+    expect(
+      convertedNoteFromSnapshot(WORKSPACE_A, converted.sourceInboxEntryId!, converted.id, {
+        workspaceId: WORKSPACE_A,
+        notes: [converted, { ...converted }],
+      }),
+    ).toBeNull();
+    expect(
+      convertedNoteFromSnapshot(
+        WORKSPACE_A,
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        converted.id,
+        result.noteSnapshot,
+      ),
+    ).toBeNull();
+    expect(
+      convertedNoteFromResult(WORKSPACE_A, converted.sourceInboxEntryId!, {
+        ...result,
+        noteSnapshot: {
+          workspaceId: WORKSPACE_A,
+          notes: [converted, { ...converted }],
+        },
+      }),
+    ).toBeNull();
   });
 
   it('uses activation identity to reject an old A request after A to B to A', () => {
