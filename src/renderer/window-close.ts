@@ -37,6 +37,13 @@ export function evaluateWindowCloseProtection(
   return confirmCancelImport() ? 'cancel-import' : 'reject';
 }
 
+export function dataReplacementCloseApproved(
+  reason: WindowCloseReason,
+  decision: WindowCloseProtectionDecision,
+): boolean {
+  return reason === 'data-replacement' && decision === 'approve';
+}
+
 export function shouldProtectWindowUnload(hasUnsavedDraft: boolean): boolean {
   return hasUnsavedDraft;
 }

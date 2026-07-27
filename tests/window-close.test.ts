@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   approveWindowClose,
+  dataReplacementCloseApproved,
   evaluateWindowCloseProtection,
   shouldProtectWindowUnload,
   synchronizeDirtyDraft,
@@ -73,6 +74,14 @@ describe('renderer window close protection', () => {
 
     expect(decision).toBe('approve');
     expect(confirmDiscard).not.toHaveBeenCalled();
+  });
+
+  it('invalidates committed UI recovery only after data replacement close approval', () => {
+    expect(dataReplacementCloseApproved('data-replacement', 'reject')).toBe(false);
+    expect(dataReplacementCloseApproved('data-replacement', 'cancel-import')).toBe(false);
+    expect(dataReplacementCloseApproved('window', 'approve')).toBe(false);
+    expect(dataReplacementCloseApproved('application', 'approve')).toBe(false);
+    expect(dataReplacementCloseApproved('data-replacement', 'approve')).toBe(true);
   });
 
   it('rejects ordinary close during commit and requires preview cancellation otherwise', () => {

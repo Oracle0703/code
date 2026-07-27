@@ -9,6 +9,7 @@ import {
   isInboxRequestCurrent,
   isInboxRequestLatest,
   isInboxSequenceCurrent,
+  isInboxConversionSourceArchived,
   isInboxWorkspaceCurrent,
   reconcileInboxCreateResult,
   shouldApplyInboxSnapshot,
@@ -131,6 +132,22 @@ describe('inbox renderer state', () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it('confirms a converted source is absent only in the expected workspace snapshot', () => {
+    const source = entry('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const other = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+
+    expect(isInboxConversionSourceArchived(WORKSPACE_A, source.id, snapshot([other]))).toBe(true);
+    expect(isInboxConversionSourceArchived(WORKSPACE_A, source.id, snapshot([source, other]))).toBe(
+      false,
+    );
+    expect(
+      isInboxConversionSourceArchived(WORKSPACE_A, source.id, {
+        workspaceId: WORKSPACE_B,
+        entries: [],
+      }),
+    ).toBe(false);
   });
 
   it('commits the inbox:create transaction snapshot without an extra read', async () => {

@@ -39,7 +39,7 @@ describe('inbox conversion navigation', () => {
     expect(createInboxConversionWorkspaceIdentity(null)).toEqual({ workspaceId: null });
   });
 
-  it('keeps equal source/kind mutations single-flight and only the latest different intent current', () => {
+  it('keeps every conversion in one workspace single-flight until reconciliation finishes', () => {
     const workspace = createInboxConversionWorkspaceIdentity(WORKSPACE_A);
     const coordinator = new InboxConversionRequestCoordinator();
     expect(() =>
@@ -49,81 +49,76 @@ describe('inbox conversion navigation', () => {
 
     expect(first).not.toBeNull();
     expect(coordinator.begin(workspace, SOURCE_A, 'task')).toBeNull();
+    expect(coordinator.begin(workspace, SOURCE_B, 'note')).toBeNull();
+    expect(coordinator.isCurrent(first!, workspace)).toBe(true);
 
-    const newer = coordinator.begin(workspace, SOURCE_B, 'note');
-    expect(newer).not.toBeNull();
-    expect(coordinator.isCurrent(first!, workspace)).toBe(false);
-    expect(() =>
-      coordinator.createFeedback(first!, workspace, {
-        outputId: TASK_A,
-        outputTitle: '旧任务',
-      }),
-    ).toThrow(InboxConversionSupersededError);
-
-    const feedback = coordinator.createFeedback(newer!, workspace, {
-      outputId: NOTE_A,
-      outputTitle: '精确笔记',
+    const feedback = coordinator.createFeedback(first!, workspace, {
+      outputId: TASK_A,
+      outputTitle: '精确任务',
     });
     expect(feedback).toEqual({
-      requestGeneration: newer!.generation,
+      requestGeneration: first!.generation,
       workspaceId: WORKSPACE_A,
-      sourceEntryId: SOURCE_B,
-      outputKind: 'note',
-      outputId: NOTE_A,
-      outputTitle: '精确笔记',
+      sourceEntryId: SOURCE_A,
+      outputKind: 'task',
+      outputId: TASK_A,
+      outputTitle: '精确任务',
     });
     expect(Object.isFrozen(feedback)).toBe(true);
+
+    coordinator.end(first!);
+    expect(coordinator.begin(workspace, SOURCE_B, 'note')).not.toBeNull();
   });
 
-  it('treats different output kinds as different leases and ignores an old duplicate end', () => {
+  it('keeps one workspace single-flight across sources and ignores an old duplicate end', () => {
     const workspace = createInboxConversionWorkspaceIdentity(WORKSPACE_A);
     const coordinator = new InboxConversionRequestCoordinator();
     const task = coordinator.begin(workspace, SOURCE_A, 'task')!;
-    const note = coordinator.begin(workspace, SOURCE_A, 'note')!;
 
-    expect(task.generation).toBeLessThan(note.generation);
-    expect(coordinator.begin(workspace, SOURCE_A, 'task')).toBeNull();
     expect(coordinator.begin(workspace, SOURCE_A, 'note')).toBeNull();
+    expect(coordinator.begin(workspace, SOURCE_B, 'task')).toBeNull();
 
     coordinator.end(task);
-    const replacementTask = coordinator.begin(workspace, SOURCE_A, 'task')!;
+    const replacementNote = coordinator.begin(workspace, SOURCE_B, 'note')!;
     coordinator.end(task);
     expect(coordinator.begin(workspace, SOURCE_A, 'task')).toBeNull();
 
-    coordinator.end(replacementTask);
+    coordinator.end(replacementNote);
     expect(coordinator.begin(workspace, SOURCE_A, 'task')).not.toBeNull();
   });
 
-  it('suppresses an older same-kind failure after a newer conversion succeeds', () => {
+  it('suppresses an older same-kind failure after a conversion starts in another workspace', () => {
     const workspace = createInboxConversionWorkspaceIdentity(WORKSPACE_A);
+    const otherWorkspace = createInboxConversionWorkspaceIdentity(WORKSPACE_B);
     const coordinator = new InboxConversionRequestCoordinator();
     const older = coordinator.begin(workspace, SOURCE_A, 'note')!;
-    const newer = coordinator.begin(workspace, SOURCE_B, 'note')!;
+    const newer = coordinator.begin(otherWorkspace, SOURCE_B, 'note')!;
 
     expect(
-      coordinator.createFeedback(newer, workspace, {
+      coordinator.createFeedback(newer, otherWorkspace, {
         outputId: NOTE_B,
         outputTitle: '较新的笔记',
       }),
     ).toMatchObject({ sourceEntryId: SOURCE_B, outputId: NOTE_B });
     expect(coordinator.isCurrent(older, workspace)).toBe(false);
-    expect(coordinator.isCurrent(newer, workspace)).toBe(true);
+    expect(coordinator.isCurrent(newer, otherWorkspace)).toBe(true);
   });
 
-  it('suppresses an older cross-kind failure after a newer conversion succeeds', () => {
+  it('suppresses an older cross-kind failure after a conversion starts in another workspace', () => {
     const workspace = createInboxConversionWorkspaceIdentity(WORKSPACE_A);
+    const otherWorkspace = createInboxConversionWorkspaceIdentity(WORKSPACE_B);
     const coordinator = new InboxConversionRequestCoordinator();
     const olderTask = coordinator.begin(workspace, SOURCE_A, 'task')!;
-    const newerNote = coordinator.begin(workspace, SOURCE_B, 'note')!;
+    const newerNote = coordinator.begin(otherWorkspace, SOURCE_B, 'note')!;
 
     expect(
-      coordinator.createFeedback(newerNote, workspace, {
+      coordinator.createFeedback(newerNote, otherWorkspace, {
         outputId: NOTE_B,
         outputTitle: '较新的笔记',
       }),
     ).toMatchObject({ outputKind: 'note', outputId: NOTE_B });
     expect(coordinator.isCurrent(olderTask, workspace)).toBe(false);
-    expect(coordinator.isCurrent(newerNote, workspace)).toBe(true);
+    expect(coordinator.isCurrent(newerNote, otherWorkspace)).toBe(true);
   });
 
   it('rejects conversion feedback after invalidation or an A to B to A activation cycle', () => {

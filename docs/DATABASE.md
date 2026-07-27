@@ -132,7 +132,7 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 显式“收件箱转笔记”在一个事务内归档来源、创建笔记并建立唯一来源关系。任务与笔记共享同一个来源排他边界：同一收件箱条目不能同时转换为任务和笔记，已关联来源不能恢复。转换任一步失败都会整体回滚；成功响应中的 `createdNoteId` 是 Main 在该事务中实际插入的笔记 ID。
 
-两个 created ID 只扩展既有转换响应，不新增 IPC 通道、schema 或 migration。转换成功后界面仍停留在 Inbox；用户显式选择打开时，Renderer 会 fresh-read 对应快照，同时复核精确 created ID 与原始 `sourceInboxEntryId`，并只在快照提交到当前工作区 activation 后导航。目标缺失、来源变化、切页、较新反馈、工作区 A→B→A 或迟到响应都不会按标题、时间或列表位置回退到其他记录。
+两个 created ID 只扩展既有转换响应，不新增 IPC 通道、schema 或 migration。Main 的事务提交成功后，Renderer 必须同时提交目标快照与已归档来源的收件箱快照；若响应只同步一侧，会最多再做两轮权威读取，只接受当前工作区内唯一匹配 created ID 与原始 `sourceInboxEntryId` 的目标，并确认来源不再出现在活动收件箱中。任一侧仍无法确认时，界面会保留 exact ID 与来源 ID 的独立警告，要求重新读取且不要重复转换；同一工作区的所有转任务与转笔记 mutation 也共享单飞锁，第二个来源不能静默淘汰仍在对账的第一笔转换。转换成功后界面仍停留在 Inbox；用户显式选择打开时，Renderer 会 fresh-read 对应快照，同时复核精确 created ID 与原始来源，并只在快照提交到当前工作区 activation 后导航。目标缺失、来源变化、切页、较新反馈、工作区 A→B→A、已获批的数据替换或迟到响应都不会按标题、时间或列表位置回退到其他记录；取消恢复或导入失败不会提前清除原数据库对应的警告。
 
 日程 v5 保存真实的单日时间段，不包含重复、提醒、通知或外部日历同步。类型固定为 `focus`、`meeting`、`review`、`personal`；`scheduled_for` 是本地民用 `YYYY-MM-DD`，时间范围使用 `start_minute`/`end_minute`，满足 `0 <= start < end <= 1440`。Renderer 提交的 `expectedDate` 必须位于 Main 在数据库 FIFO 操作执行时计算的 `[todayDate, todayDate + 6]` 窗口，不能越过过去或第 8 天；更新和软归档也必须携带当前 revision。日程日期不可原地修改，归档项和归档工作区日程不可再修改，日程不提供永久删除。这个扩展不改变 v5 表结构、当前 schema v11 或 `.dwbx` v3。
 

@@ -43,6 +43,30 @@ export interface InboxConversionSnapshotReaders {
   readonly note: () => Promise<InboxConversionSnapshotRefresh<NoteSnapshot>>;
 }
 
+export interface InboxConversionReconciliationInput<Output, OutputSnapshot, InboxSnapshot> {
+  readonly initialOutputCommitted: boolean;
+  readonly initialInboxCommitted: boolean;
+  readonly getCommittedOutput: () => Output | null;
+  readonly getCommittedInbox: () => boolean;
+  readonly prepareOutputSnapshotRefresh: () => Promise<
+    InboxConversionSnapshotRefresh<OutputSnapshot>
+  >;
+  readonly prepareInboxSnapshotRefresh: () => Promise<
+    InboxConversionSnapshotRefresh<InboxSnapshot>
+  >;
+  readonly outputFromSnapshot: (snapshot: OutputSnapshot) => Output | null;
+  readonly inboxSnapshotIsCommitted: (snapshot: InboxSnapshot) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+export interface InboxConversionReconciliation<Output> {
+  readonly output: Output | null;
+  readonly outputCommitted: boolean;
+  readonly inboxCommitted: boolean;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
 export type InboxConversionNavigationTarget =
   | {
       readonly kind: 'task';
@@ -68,12 +92,8 @@ export function createInboxConversionWorkspaceIdentity(
   return Object.freeze({ workspaceId });
 }
 
-export function inboxConversionRequestKey(
-  workspaceId: string,
-  sourceEntryId: string,
-  outputKind: InboxConversionOutputKind,
-): string {
-  return JSON.stringify([workspaceId, sourceEntryId, outputKind]);
+export function inboxConversionRequestKey(workspaceId: string): string {
+  return workspaceId;
 }
 
 export function inboxConversionFeedbackKey(feedback: Readonly<InboxConversionFeedback>): string {
@@ -97,9 +117,9 @@ export function sameInboxConversionFeedback(
 }
 
 /**
- * Keeps conversion mutations single-flight per source/kind while allowing a
- * newer, different conversion to become the only request allowed to publish
- * success feedback.
+ * Keeps conversion mutations single-flight for the active workspace. Reconciliation and
+ * publication share one workspace generation, so allowing a second source to start before the
+ * first one finishes could otherwise silently supersede an already-committed conversion.
  */
 export class InboxConversionRequestCoordinator {
   #generation = 0;
@@ -111,7 +131,7 @@ export class InboxConversionRequestCoordinator {
     outputKind: InboxConversionOutputKind,
   ): InboxConversionRequestIntent | null {
     if (workspace.workspaceId === null) throw new InboxConversionSupersededError();
-    const key = inboxConversionRequestKey(workspace.workspaceId, sourceEntryId, outputKind);
+    const key = inboxConversionRequestKey(workspace.workspaceId);
     if (this.#pending.has(key)) return null;
     const intent = Object.freeze({
       generation: ++this.#generation,
@@ -127,13 +147,17 @@ export class InboxConversionRequestCoordinator {
     this.#generation += 1;
   }
 
+  isGenerationCurrent(generation: number, workspace: InboxConversionWorkspaceIdentity): boolean {
+    return generation === this.#generation && workspace.workspaceId !== null;
+  }
+
   isCurrent(
     intent: InboxConversionRequestIntent,
     currentWorkspace: InboxConversionWorkspaceIdentity,
   ): boolean {
     const workspaceId = intent.workspace.workspaceId;
     if (workspaceId === null) return false;
-    const key = inboxConversionRequestKey(workspaceId, intent.sourceEntryId, intent.outputKind);
+    const key = inboxConversionRequestKey(workspaceId);
     return (
       intent.generation === this.#generation &&
       intent.workspace === currentWorkspace &&
@@ -170,7 +194,7 @@ export class InboxConversionRequestCoordinator {
   end(intent: InboxConversionRequestIntent): void {
     const workspaceId = intent.workspace.workspaceId;
     if (workspaceId === null) return;
-    const key = inboxConversionRequestKey(workspaceId, intent.sourceEntryId, intent.outputKind);
+    const key = inboxConversionRequestKey(workspaceId);
     if (this.#pending.get(key) === intent) this.#pending.delete(key);
   }
 }
@@ -239,6 +263,33 @@ export class InboxConversionOpenGate {
   }
 }
 
+/**
+ * Holds a task-dialog conversion outcome until its modal has closed, so live
+ * regions are mounted only after the dialog is no longer the active
+ * accessibility surface.
+ */
+export class InboxConversionPublicationGate<T> {
+  #pending: {
+    readonly workspace: InboxConversionWorkspaceIdentity;
+    readonly value: T;
+  } | null = null;
+
+  stage(workspace: InboxConversionWorkspaceIdentity, value: T): void {
+    this.#pending = Object.freeze({ workspace, value });
+  }
+
+  take(dialogOpen: boolean, currentWorkspace: InboxConversionWorkspaceIdentity): T | null {
+    if (dialogOpen || this.#pending === null) return null;
+    const pending = this.#pending;
+    this.#pending = null;
+    return pending.workspace === currentWorkspace ? pending.value : null;
+  }
+
+  clear(): void {
+    this.#pending = null;
+  }
+}
+
 export class InboxConversionSupersededError extends Error {
   constructor() {
     super('收件箱转换结果已被较新的状态替代。');
@@ -255,6 +306,155 @@ export class InboxConversionOutputUnavailableError extends Error {
     );
     this.name = 'InboxConversionOutputUnavailableError';
   }
+}
+
+const INBOX_CONVERSION_RECONCILIATION_ATTEMPTS = 2;
+
+/**
+ * Reconciles the two independently stored Renderer snapshots produced by one
+ * atomic inbox conversion. Only a missing side is re-read, and success is
+ * publishable only while the originating request remains current after every
+ * asynchronous and commit boundary.
+ */
+export async function reconcileInboxConversionSnapshots<Output, OutputSnapshot, InboxSnapshot>(
+  input: InboxConversionReconciliationInput<Output, OutputSnapshot, InboxSnapshot>,
+): Promise<InboxConversionReconciliation<Output>> {
+  let output: Output | null = null;
+  let outputCommitted = input.initialOutputCommitted;
+  let inboxCommitted = input.initialInboxCommitted;
+  let error: unknown;
+
+  const markSuperseded = (): void => {
+    error = new InboxConversionSupersededError();
+  };
+
+  const recoverCommittedSides = (): void => {
+    if (!input.isCurrent()) {
+      markSuperseded();
+      return;
+    }
+
+    if (!outputCommitted || output === null) {
+      try {
+        const committedOutput = input.getCommittedOutput();
+        if (committedOutput === null) {
+          if (outputCommitted) {
+            outputCommitted = false;
+            error = new Error('The committed conversion output is unavailable.');
+          }
+        } else {
+          output = committedOutput;
+          outputCommitted = true;
+        }
+      } catch (caughtError) {
+        outputCommitted = false;
+        error = caughtError;
+      }
+    }
+
+    if (!inboxCommitted) {
+      try {
+        if (input.getCommittedInbox()) inboxCommitted = true;
+      } catch (caughtError) {
+        error = caughtError;
+      }
+    }
+  };
+
+  recoverCommittedSides();
+
+  reconciliation: for (
+    let attempt = 0;
+    input.isCurrent() &&
+    (!outputCommitted || output === null || !inboxCommitted) &&
+    attempt < INBOX_CONVERSION_RECONCILIATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    if (!outputCommitted || output === null) {
+      try {
+        const refresh = await input.prepareOutputSnapshotRefresh();
+        if (!input.isCurrent()) {
+          markSuperseded();
+          break reconciliation;
+        }
+        const refreshedOutput = input.outputFromSnapshot(refresh.snapshot);
+        if (refreshedOutput === null) {
+          throw new Error(
+            'The exact conversion output was not returned by the authoritative read.',
+          );
+        }
+        if (!input.isCurrent()) {
+          markSuperseded();
+          break reconciliation;
+        }
+        const committed = refresh.commit();
+        if (!input.isCurrent()) {
+          markSuperseded();
+          break reconciliation;
+        }
+        if (committed) {
+          output = refreshedOutput;
+          outputCommitted = true;
+        } else {
+          error = new Error('The authoritative conversion output snapshot could not be committed.');
+        }
+      } catch (caughtError) {
+        error = caughtError;
+      }
+    }
+
+    if (!input.isCurrent()) {
+      markSuperseded();
+      break;
+    }
+
+    if (!inboxCommitted) {
+      try {
+        const refresh = await input.prepareInboxSnapshotRefresh();
+        if (!input.isCurrent()) {
+          markSuperseded();
+          break reconciliation;
+        }
+        if (!input.inboxSnapshotIsCommitted(refresh.snapshot)) {
+          throw new Error('The converted inbox source is still present in the authoritative read.');
+        }
+        if (!input.isCurrent()) {
+          markSuperseded();
+          break reconciliation;
+        }
+        const committed = refresh.commit();
+        if (!input.isCurrent()) {
+          markSuperseded();
+          break reconciliation;
+        }
+        if (committed) {
+          inboxCommitted = true;
+        } else {
+          error = new Error('The authoritative inbox conversion snapshot could not be committed.');
+        }
+      } catch (caughtError) {
+        error = caughtError;
+      }
+    }
+
+    if (input.isCurrent() && (!outputCommitted || output === null || !inboxCommitted)) {
+      recoverCommittedSides();
+    }
+  }
+
+  if (input.isCurrent() && (!outputCommitted || output === null || !inboxCommitted)) {
+    recoverCommittedSides();
+  }
+  const current = input.isCurrent();
+  if (!current) markSuperseded();
+
+  return {
+    output,
+    outputCommitted,
+    inboxCommitted,
+    committed: current && output !== null && outputCommitted && inboxCommitted,
+    error,
+  };
 }
 
 export async function resolveInboxConversionNavigationTarget(

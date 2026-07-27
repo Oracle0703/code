@@ -12,6 +12,7 @@ import {
   createInboxRequestIdentity,
   createInboxWorkspaceIdentity,
   inboxSnapshotForActivation,
+  isInboxConversionSourceArchived,
   isInboxRequestCurrent,
   isInboxRequestLatest,
   reconcileInboxCreateResult,
@@ -505,6 +506,22 @@ export function useInboxController(workspaceId: string | null) {
   const counts = useMemo(() => countInboxEntries(entries), [entries]);
   const operationError =
     operationErrorState?.activation === activation ? operationErrorState.message : null;
+  const isCommittedConversionSourceArchived = useCallback(
+    (expectedWorkspaceId: string, expectedSourceEntryId: string): boolean => {
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== expectedWorkspaceId) return false;
+      const committedSnapshot = inboxSnapshotForActivation(current, storedSnapshotRef.current);
+      return (
+        committedSnapshot !== null &&
+        isInboxConversionSourceArchived(
+          expectedWorkspaceId,
+          expectedSourceEntryId,
+          committedSnapshot,
+        )
+      );
+    },
+    [],
+  );
   const pendingEntryIds = useMemo(
     () =>
       new Set(
@@ -541,6 +558,7 @@ export function useInboxController(workspaceId: string | null) {
       if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
+    isCommittedConversionSourceArchived,
     retry: () => {
       const current = activeActivationRef.current;
       if (current.workspaceId !== null) void load(current).catch(() => undefined);

@@ -20,6 +20,7 @@ import {
   reconcileTaskCreateResult,
   shouldApplyTaskSnapshot,
   taskSnapshotForActivation,
+  convertedTaskFromSnapshot,
   type TaskRequestIdentity,
   type TaskSnapshotState,
   type TaskWorkspaceIdentity,
@@ -45,7 +46,7 @@ const TASK_CREATE_RECONCILIATION_ERROR =
 
 export interface TaskInboxConversionCommit {
   readonly result: TaskConversionResult;
-  readonly createdTask: Task;
+  readonly createdTask: Task | null;
   readonly committed: boolean;
 }
 
@@ -463,22 +464,24 @@ export function useTaskController(workspaceId: string | null) {
       }
       setOperationErrorState(null);
       try {
-        const result = await window.workbench.task.convertInbox({
-          workspaceId: request.workspaceId,
-          entryId,
-          planning,
-        });
-        const committed = applySnapshot(result.taskSnapshot, request);
+        let result: TaskConversionResult;
+        try {
+          result = await window.workbench.task.convertInbox({
+            workspaceId: request.workspaceId,
+            entryId,
+            planning,
+          });
+        } catch (error) {
+          throw createOperationError(
+            error,
+            request.workspace,
+            '无法转换为任务，请重试。',
+            shouldPublishFailure,
+          );
+        }
         const createdTask = convertedTaskFromResult(request.workspaceId, entryId, result);
-        if (!createdTask) throw new Error('转换结果与创建的任务不匹配，请重试。');
+        const committed = createdTask !== null && applySnapshot(result.taskSnapshot, request);
         return { result, createdTask, committed };
-      } catch (error) {
-        throw createOperationError(
-          error,
-          request.workspace,
-          '无法转换为任务，请重试。',
-          shouldPublishFailure,
-        );
       } finally {
         endPendingConversion(request.workspace, entryId);
       }
@@ -490,6 +493,31 @@ export function useTaskController(workspaceId: string | null) {
       createOperationError,
       endPendingConversion,
     ],
+  );
+
+  const getCommittedConvertedTask = useCallback(
+    (
+      expectedWorkspaceId: string,
+      expectedSourceEntryId: string,
+      expectedCreatedTaskId: string,
+    ): Task | null => {
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== expectedWorkspaceId) return null;
+      const committedSnapshot = taskSnapshotForActivation(
+        current,
+        storedSnapshotRef.current,
+        new Date(),
+      );
+      return committedSnapshot
+        ? convertedTaskFromSnapshot(
+            expectedWorkspaceId,
+            expectedSourceEntryId,
+            expectedCreatedTaskId,
+            committedSnapshot,
+          )
+        : null;
+    },
+    [],
   );
 
   const snapshot = taskSnapshotForActivation(activation, storedSnapshot, new Date());
@@ -544,6 +572,7 @@ export function useTaskController(workspaceId: string | null) {
       if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
+    getCommittedConvertedTask,
     retry: () => {
       const current = activeActivationRef.current;
       if (current.workspaceId !== null) void load(current).catch(() => undefined);
