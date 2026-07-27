@@ -72,6 +72,7 @@ import { CommandPalette, type PaletteCommand } from './components/CommandPalette
 import { DataImportDialog } from './components/DataImportDialog';
 import { FocusSessionDialog } from './components/FocusSessionDialog';
 import { IconButton } from './components/IconButton';
+import { InboxCaptureSyncWarning } from './components/InboxCaptureSyncWarning';
 import { InboxCaptureToast } from './components/InboxCaptureToast';
 import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
@@ -131,9 +132,12 @@ import {
 import {
   createInboxCaptureWorkspaceIdentity,
   InboxCaptureCoordinator,
+  InboxCapturePublicationGate,
   InboxCaptureSupersededError,
   inboxCaptureNavigationError,
+  inboxCaptureSyncRefreshError,
   resolveInboxCaptureNavigationTarget,
+  resolveInboxCaptureSyncRefreshEntry,
   type InboxCaptureFeedback,
   type InboxCaptureWorkspaceIdentity,
 } from './inbox-capture-navigation';
@@ -268,6 +272,26 @@ interface ScheduleCreateSyncWarningState {
   readonly message: string;
 }
 
+interface InboxCaptureSyncWarningState {
+  readonly activation: InboxCaptureWorkspaceIdentity;
+  readonly requestGeneration: number;
+  readonly createdEntryId: string;
+  readonly content: string;
+  readonly focusActionOnMount: boolean;
+  readonly message: string;
+}
+
+type InboxCapturePublication =
+  | {
+      readonly kind: 'feedback';
+      readonly activation: InboxCaptureWorkspaceIdentity;
+      readonly feedback: InboxCaptureFeedback;
+    }
+  | {
+      readonly kind: 'warning';
+      readonly warning: InboxCaptureSyncWarningState;
+    };
+
 type ScheduleCreatePublication =
   | {
       readonly kind: 'feedback';
@@ -343,6 +367,8 @@ export function App() {
     readonly activation: InboxCaptureWorkspaceIdentity;
     readonly feedback: InboxCaptureFeedback;
   } | null>(null);
+  const [inboxCaptureSyncWarningState, setInboxCaptureSyncWarningState] =
+    useState<InboxCaptureSyncWarningState | null>(null);
   const [taskCreateFeedbackState, setTaskCreateFeedbackState] = useState<{
     readonly activation: TaskCreateWorkspaceIdentity;
     readonly feedback: TaskCreateFeedback;
@@ -375,6 +401,9 @@ export function App() {
   const [searchNavigation] = useState(() => new SearchNavigationCoordinator());
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
   const [inboxCaptureCoordinator] = useState(() => new InboxCaptureCoordinator());
+  const [inboxCapturePublicationGate] = useState(
+    () => new InboxCapturePublicationGate<InboxCapturePublication>(),
+  );
   const [taskCreateCoordinator] = useState(() => new TaskCreateCoordinator());
   const [scheduleCreateCoordinator] = useState(() => new ScheduleCreateCoordinator());
   const [scheduleCreatePublicationGate] = useState(
@@ -493,6 +522,10 @@ export function App() {
   const visibleInboxCaptureFeedback =
     inboxCaptureFeedbackState?.activation === inboxCaptureActivation
       ? inboxCaptureFeedbackState.feedback
+      : null;
+  const visibleInboxCaptureSyncWarning =
+    inboxCaptureSyncWarningState?.activation === inboxCaptureActivation
+      ? inboxCaptureSyncWarningState
       : null;
   const visibleTaskCreateFeedback =
     taskCreateFeedbackState?.activation === taskCreateActivation
@@ -658,6 +691,49 @@ export function App() {
     automationDialog !== null ||
     focusDialogOpen ||
     dataState.importPreview !== null;
+  const invalidateInboxCapture = useCallback((): void => {
+    inboxCaptureCoordinator.invalidate();
+    inboxCapturePublicationGate.clear();
+    inboxCaptureFeedbackRef.current = null;
+    setInboxCaptureFeedbackState(null);
+    setInboxCaptureSyncWarningState(null);
+  }, [inboxCaptureCoordinator, inboxCapturePublicationGate]);
+  const publishInboxCapturePublication = useCallback(
+    (publication: InboxCapturePublication): void => {
+      const activation =
+        publication.kind === 'feedback' ? publication.activation : publication.warning.activation;
+      const requestGeneration =
+        publication.kind === 'feedback'
+          ? publication.feedback.requestGeneration
+          : publication.warning.requestGeneration;
+      if (
+        activation !== inboxCaptureActivationRef.current ||
+        !inboxCaptureCoordinator.isGenerationCurrent(requestGeneration, activation)
+      ) {
+        return;
+      }
+
+      if (publication.kind === 'feedback') {
+        inboxCaptureFeedbackRef.current = publication.feedback;
+        setInboxCaptureSyncWarningState(null);
+        setInboxCaptureFeedbackState({
+          activation,
+          feedback: publication.feedback,
+        });
+        return;
+      }
+
+      inboxCaptureFeedbackRef.current = null;
+      setInboxCaptureFeedbackState(null);
+      setInboxCaptureSyncWarningState(publication.warning);
+    },
+    [inboxCaptureCoordinator],
+  );
+  const closeQuickCaptureDialog = useCallback((): void => {
+    setQuickCaptureTarget(null);
+    const publication = inboxCapturePublicationGate.take(false, inboxCaptureActivationRef.current);
+    if (publication !== null) publishInboxCapturePublication(publication);
+  }, [inboxCapturePublicationGate, publishInboxCapturePublication]);
   const invalidateAutomationCreate = useCallback((): void => {
     automationCreateCoordinator.invalidate();
     automationCreateFeedbackRef.current = null;
@@ -733,7 +809,7 @@ export function App() {
       inboxCaptureSurfaceGenerationRef.current += 1;
     }
     if (previousActivation !== inboxCaptureActivation) {
-      inboxCaptureCoordinator.invalidate();
+      invalidateInboxCapture();
     } else if (previousSurface !== activeSurface || overlayOpen) {
       inboxCaptureCoordinator.cancelOpen();
     }
@@ -741,6 +817,7 @@ export function App() {
     activeSurface,
     inboxCaptureActivation,
     inboxCaptureCoordinator,
+    invalidateInboxCapture,
     overlayOpen,
     visibleInboxCaptureFeedback,
   ]);
@@ -891,6 +968,7 @@ export function App() {
   const restoreBackupWithApproval = useCallback(
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
       if (!confirmLeaveNoteDraft()) return null;
+      invalidateInboxCapture();
       invalidateAutomationCreate();
       invalidateScheduleCreate();
       dataReplacementApprovedRef.current = true;
@@ -908,7 +986,13 @@ export function App() {
         throw error;
       }
     },
-    [confirmLeaveNoteDraft, invalidateAutomationCreate, invalidateScheduleCreate, restoreBackup],
+    [
+      confirmLeaveNoteDraft,
+      invalidateAutomationCreate,
+      invalidateInboxCapture,
+      invalidateScheduleCreate,
+      restoreBackup,
+    ],
   );
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
@@ -987,7 +1071,7 @@ export function App() {
       invalidateAutomationCreate();
       invalidateScheduleCreate();
       assistantSavedNoteNavigation.invalidate();
-      inboxCaptureCoordinator.invalidate();
+      invalidateInboxCapture();
       taskCreateCoordinator.invalidate();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
@@ -997,7 +1081,7 @@ export function App() {
       assistantSavedNoteNavigation,
       automationOutputNavigation,
       confirmLeaveNoteDraft,
-      inboxCaptureCoordinator,
+      invalidateInboxCapture,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
       searchNavigation,
@@ -1050,8 +1134,10 @@ export function App() {
       const originSurface = inboxCaptureSurfaceRef.current;
       const originSurfaceGeneration = inboxCaptureSurfaceGenerationRef.current;
       const intent = inboxCaptureCoordinator.beginCapture(activation);
+      inboxCapturePublicationGate.clear();
       inboxCaptureFeedbackRef.current = null;
       setInboxCaptureFeedbackState(null);
+      setInboxCaptureSyncWarningState(null);
       try {
         const commit = await createInbox(
           workspaceId,
@@ -1063,17 +1149,42 @@ export function App() {
             (inboxCaptureSurfaceRef.current !== originSurface ||
               inboxCaptureSurfaceGenerationRef.current !== originSurfaceGeneration),
         );
-        const feedback = inboxCaptureCoordinator.createFeedback(
-          intent,
-          inboxCaptureActivationRef.current,
-          commit.createdEntry,
-          commit.committed,
-        );
-        inboxCaptureFeedbackRef.current = feedback;
-        setInboxCaptureFeedbackState({
-          activation: intent.workspace,
-          feedback,
-        });
+        if (!inboxCaptureCoordinator.isCaptureCurrent(intent, inboxCaptureActivationRef.current)) {
+          return;
+        }
+        let publication: InboxCapturePublication;
+        if (!commit.committed || commit.createdEntry === null) {
+          publication = {
+            kind: 'warning',
+            warning: {
+              activation: intent.workspace,
+              requestGeneration: intent.generation,
+              createdEntryId: commit.result.createdEntryId,
+              content: commit.createdEntry?.content ?? content,
+              focusActionOnMount: errorOwner === 'dialog',
+              message:
+                commit.reconciliationWarning ??
+                '记录已创建，但当前收件箱未能同步。请重新读取后查看，避免重复添加。',
+            },
+          };
+        } else {
+          const feedback = inboxCaptureCoordinator.createFeedback(
+            intent,
+            inboxCaptureActivationRef.current,
+            commit.createdEntry,
+            true,
+          );
+          publication = {
+            kind: 'feedback',
+            activation: intent.workspace,
+            feedback,
+          };
+        }
+        if (errorOwner === 'dialog') {
+          inboxCapturePublicationGate.stage(intent.workspace, publication);
+        } else {
+          publishInboxCapturePublication(publication);
+        }
       } catch (error) {
         if (
           !inboxCaptureCoordinator.isCaptureCurrent(intent, inboxCaptureActivationRef.current) ||
@@ -1086,7 +1197,12 @@ export function App() {
         inboxCaptureCoordinator.endCapture(intent);
       }
     },
-    [createInbox, inboxCaptureCoordinator],
+    [
+      createInbox,
+      inboxCaptureCoordinator,
+      inboxCapturePublicationGate,
+      publishInboxCapturePublication,
+    ],
   );
   const openInboxCapture = useCallback(
     async (feedback: InboxCaptureFeedback): Promise<void> => {
@@ -1172,6 +1288,65 @@ export function App() {
         : document.querySelector<HTMLElement>('.page-chrome__actions button:not(:disabled)');
     fallback?.focus({ preventScroll: true });
   }, []);
+  const dismissInboxCaptureSyncWarning = useCallback(
+    (warning: InboxCaptureSyncWarningState): void => {
+      if (
+        warning.activation !== inboxCaptureActivationRef.current ||
+        !inboxCaptureCoordinator.isGenerationCurrent(warning.requestGeneration, warning.activation)
+      ) {
+        return;
+      }
+      invalidateInboxCapture();
+      window.requestAnimationFrame(restoreInboxCaptureFocus);
+    },
+    [inboxCaptureCoordinator, invalidateInboxCapture, restoreInboxCaptureFocus],
+  );
+  const refreshInboxCaptureSyncWarning = useCallback(
+    async (warning: InboxCaptureSyncWarningState): Promise<void> => {
+      if (
+        warning.activation !== inboxCaptureActivationRef.current ||
+        !inboxCaptureCoordinator.isGenerationCurrent(warning.requestGeneration, warning.activation)
+      ) {
+        return;
+      }
+      const intent = inboxCaptureCoordinator.beginSyncRefresh(
+        warning.activation,
+        warning.requestGeneration,
+      );
+      const assertCurrent = (): void =>
+        inboxCaptureCoordinator.assertSyncRefreshCurrent(intent, inboxCaptureActivationRef.current);
+      try {
+        const createdEntry = await resolveInboxCaptureSyncRefreshEntry(
+          intent,
+          warning.createdEntryId,
+          prepareInboxSnapshotRefresh,
+          assertCurrent,
+        );
+        const feedback = inboxCaptureCoordinator.createRecoveredFeedback(
+          warning.requestGeneration,
+          warning.activation,
+          createdEntry,
+          true,
+        );
+        assertCurrent();
+        inboxCaptureFeedbackRef.current = feedback;
+        setInboxCaptureSyncWarningState((current) => (current === warning ? null : current));
+        setInboxCaptureFeedbackState({
+          activation: warning.activation,
+          feedback,
+        });
+      } catch (error) {
+        if (
+          error instanceof InboxCaptureSupersededError ||
+          !inboxCaptureCoordinator.isSyncRefreshCurrent(intent, inboxCaptureActivationRef.current)
+        ) {
+          return;
+        }
+        throw inboxCaptureSyncRefreshError(error);
+      }
+    },
+    [inboxCaptureCoordinator, prepareInboxSnapshotRefresh],
+  );
   const createManualTask = useCallback(
     async (workspaceId: string, title: string, planning: TaskPlanning): Promise<void> => {
       const activation = taskCreateActivationRef.current;
@@ -3734,7 +3909,7 @@ export function App() {
       {quickCaptureTarget ? (
         <QuickCaptureDialog
           target={quickCaptureTarget}
-          onClose={() => setQuickCaptureTarget(null)}
+          onClose={closeQuickCaptureDialog}
           onSubmit={createInboxCapture}
         />
       ) : null}
@@ -3885,6 +4060,7 @@ export function App() {
           onCancel={cancelImport}
           onConfirm={async () => {
             if (!confirmLeaveNoteDraft()) return;
+            invalidateInboxCapture();
             invalidateAutomationCreate();
             invalidateScheduleCreate();
             dataReplacementApprovedRef.current = true;
@@ -3959,6 +4135,16 @@ export function App() {
             onOpen={openManualTask}
             onDismiss={dismissTaskCreate}
             onFocusFallback={restoreTaskCreateFocus}
+          />
+        ) : null}
+        {visibleInboxCaptureSyncWarning ? (
+          <InboxCaptureSyncWarning
+            content={visibleInboxCaptureSyncWarning.content}
+            message={visibleInboxCaptureSyncWarning.message}
+            focusActionOnMount={visibleInboxCaptureSyncWarning.focusActionOnMount}
+            focusBlocked={overlayOpen}
+            onRefresh={() => refreshInboxCaptureSyncWarning(visibleInboxCaptureSyncWarning)}
+            onDismiss={() => dismissInboxCaptureSyncWarning(visibleInboxCaptureSyncWarning)}
           />
         ) : null}
         {visibleInboxCaptureFeedback ? (

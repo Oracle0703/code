@@ -7,12 +7,16 @@ import {
   inboxCaptureOpenFailed,
   inboxCaptureOpenFinished,
   inboxCaptureOpenStarted,
+  inboxCaptureSyncRefreshError,
   InboxCaptureCoordinator,
   InboxCaptureEntryUnavailableError,
   InboxCaptureInProgressError,
   InboxCaptureOpenGate,
+  InboxCapturePublicationGate,
   InboxCaptureSupersededError,
+  InboxCaptureSyncRefreshError,
   resolveInboxCaptureNavigationTarget,
+  resolveInboxCaptureSyncRefreshEntry,
   sameInboxCaptureFeedback,
   type InboxCaptureFeedback,
   type InboxCaptureSnapshotRefresh,
@@ -82,6 +86,163 @@ describe('inbox capture navigation', () => {
     expect(() => coordinator.beginCapture(secondA)).toThrow(InboxCaptureInProgressError);
     coordinator.endCapture(replacement);
     expect(() => coordinator.beginCapture(secondA)).not.toThrow();
+  });
+
+  it('recovers feedback only for the exact current capture generation', () => {
+    const firstA = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const secondA = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const coordinator = new InboxCaptureCoordinator();
+    const intent = coordinator.beginCapture(firstA);
+    coordinator.endCapture(intent);
+
+    expect(coordinator.isGenerationCurrent(intent.generation, firstA)).toBe(true);
+    const recovered = coordinator.createRecoveredFeedback(
+      intent.generation,
+      firstA,
+      entry({ content: '权威重读内容', category: 'task' }),
+      true,
+    );
+    expect(recovered).toEqual({
+      requestGeneration: intent.generation,
+      workspaceId: WORKSPACE_A,
+      createdEntryId: ENTRY_A,
+      content: '权威重读内容',
+      category: 'task',
+    });
+    expect(Object.isFrozen(recovered)).toBe(true);
+    expect(coordinator.isGenerationCurrent(intent.generation, secondA)).toBe(false);
+    expect(() =>
+      coordinator.createRecoveredFeedback(intent.generation, firstA, entry(), false),
+    ).toThrow(InboxCaptureSupersededError);
+
+    const replacement = coordinator.beginCapture(firstA);
+    expect(replacement.generation).toBeGreaterThan(intent.generation);
+    expect(() =>
+      coordinator.createRecoveredFeedback(intent.generation, firstA, entry(), true),
+    ).toThrow(InboxCaptureSupersededError);
+  });
+
+  it('invalidates a warning refresh on page, overlay, workspace, or newer capture changes', () => {
+    const firstA = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const secondA = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const coordinator = new InboxCaptureCoordinator();
+    const capture = coordinator.beginCapture(firstA);
+    coordinator.endCapture(capture);
+    const firstRefresh = coordinator.beginSyncRefresh(firstA, capture.generation);
+
+    expect(coordinator.isSyncRefreshCurrent(firstRefresh, firstA)).toBe(true);
+    expect(coordinator.isSyncRefreshCurrent(firstRefresh, secondA)).toBe(false);
+    coordinator.cancelOpen();
+    expect(coordinator.isSyncRefreshCurrent(firstRefresh, firstA)).toBe(false);
+
+    const secondRefresh = coordinator.beginSyncRefresh(firstA, capture.generation);
+    coordinator.beginCapture(firstA);
+    expect(() => coordinator.assertSyncRefreshCurrent(secondRefresh, firstA)).toThrow(
+      InboxCaptureSupersededError,
+    );
+    expect(() => coordinator.beginSyncRefresh(secondA, capture.generation)).toThrow(
+      InboxCaptureSupersededError,
+    );
+  });
+
+  it('reconciles a warning refresh only by one exact id and commits the authoritative snapshot', async () => {
+    const workspace = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const coordinator = new InboxCaptureCoordinator();
+    const capture = coordinator.beginCapture(workspace);
+    coordinator.endCapture(capture);
+    const intent = coordinator.beginSyncRefresh(workspace, capture.generation);
+    const created = entry({ content: '权威重读后的内容', category: 'link' });
+    const commit = vi.fn(() => true);
+
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        intent,
+        ENTRY_A,
+        async () => refresh(snapshot({ entries: [entry({ id: ENTRY_B }), created] }), commit),
+        () => coordinator.assertSyncRefreshCurrent(intent, workspace),
+      ),
+    ).resolves.toEqual(created);
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it('fails a warning refresh closed for missing, duplicate, stale, or uncommitted exact ids', async () => {
+    const workspace = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const coordinator = new InboxCaptureCoordinator();
+    const capture = coordinator.beginCapture(workspace);
+    coordinator.endCapture(capture);
+    const intent = coordinator.beginSyncRefresh(workspace, capture.generation);
+    const assertCurrent = () => coordinator.assertSyncRefreshCurrent(intent, workspace);
+    const missingCommit = vi.fn(() => true);
+    const duplicateCommit = vi.fn(() => true);
+    const wrongWorkspaceCommit = vi.fn(() => true);
+
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        intent,
+        ENTRY_A,
+        async () => refresh(snapshot({ workspaceId: WORKSPACE_B }), wrongWorkspaceCommit),
+        assertCurrent,
+      ),
+    ).rejects.toBeInstanceOf(InboxCaptureSyncRefreshError);
+    expect(wrongWorkspaceCommit).not.toHaveBeenCalled();
+
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        intent,
+        ENTRY_A,
+        async () => refresh(snapshot({ entries: [] }), missingCommit),
+        assertCurrent,
+      ),
+    ).rejects.toBeInstanceOf(InboxCaptureSyncRefreshError);
+    expect(missingCommit).not.toHaveBeenCalled();
+
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        intent,
+        ENTRY_A,
+        async () => refresh(snapshot({ entries: [entry(), entry()] }), duplicateCommit),
+        assertCurrent,
+      ),
+    ).rejects.toBeInstanceOf(InboxCaptureSyncRefreshError);
+    expect(duplicateCommit).not.toHaveBeenCalled();
+
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        intent,
+        ENTRY_A,
+        async () => refresh(snapshot(), () => false),
+        assertCurrent,
+      ),
+    ).rejects.toBeInstanceOf(InboxCaptureSyncRefreshError);
+
+    const staleCommit = vi.fn(() => true);
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        intent,
+        ENTRY_A,
+        async () => {
+          coordinator.cancelOpen();
+          return refresh(snapshot(), staleCommit);
+        },
+        assertCurrent,
+      ),
+    ).rejects.toBeInstanceOf(InboxCaptureSupersededError);
+    expect(staleCommit).not.toHaveBeenCalled();
+
+    const postCommitIntent = coordinator.beginSyncRefresh(workspace, capture.generation);
+    const invalidatingCommit = vi.fn(() => {
+      coordinator.cancelOpen();
+      return true;
+    });
+    await expect(
+      resolveInboxCaptureSyncRefreshEntry(
+        postCommitIntent,
+        ENTRY_A,
+        async () => refresh(snapshot(), invalidatingCommit),
+        () => coordinator.assertSyncRefreshCurrent(postCommitIntent, workspace),
+      ),
+    ).rejects.toBeInstanceOf(InboxCaptureSupersededError);
+    expect(invalidatingCommit).toHaveBeenCalledOnce();
   });
 
   it('rejects a delayed capture after invalidation or an A to B to A activation cycle', () => {
@@ -354,6 +515,28 @@ describe('inbox capture navigation', () => {
     expect(gate.begin({ ...equalReplacement })).toBe(true);
   });
 
+  it('publishes a staged dialog result once and only to the same activation', () => {
+    const firstA = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const secondA = createInboxCaptureWorkspaceIdentity(WORKSPACE_A);
+    const workspaceB = createInboxCaptureWorkspaceIdentity(WORKSPACE_B);
+    const gate = new InboxCapturePublicationGate<{ readonly kind: string }>();
+    const success = Object.freeze({ kind: 'success' });
+
+    gate.stage(firstA, success);
+    expect(gate.take(true, firstA)).toBeNull();
+    expect(gate.take(false, secondA)).toBeNull();
+    expect(gate.take(false, firstA)).toBeNull();
+
+    gate.stage(firstA, success);
+    expect(gate.take(false, workspaceB)).toBeNull();
+    gate.stage(firstA, success);
+    gate.clear();
+    expect(gate.take(false, firstA)).toBeNull();
+    gate.stage(firstA, success);
+    expect(gate.take(false, firstA)).toBe(success);
+    expect(gate.take(false, firstA)).toBeNull();
+  });
+
   it('ignores late failure and finally reducers after newer feedback replaces the state', () => {
     const original = feedback();
     const newer = feedback({
@@ -395,6 +578,20 @@ describe('inbox capture navigation', () => {
 
     const unknown = inboxCaptureNavigationError(new Error('secret provider details'));
     expect(unknown.message).toBe('无法打开刚创建的收件箱记录，请重试。');
+    expect(unknown.message).not.toContain('secret');
+  });
+
+  it('bounds warning refresh failures without exposing provider details', () => {
+    const superseded = new InboxCaptureSupersededError();
+    const unavailable = new InboxCaptureSyncRefreshError('重新读取后仍无法确认。');
+    const mappedSuperseded = inboxCaptureSyncRefreshError(superseded);
+    expect(mappedSuperseded).toBeInstanceOf(InboxCaptureSyncRefreshError);
+    expect(mappedSuperseded.message).toContain('请不要重复添加');
+    expect(inboxCaptureSyncRefreshError(unavailable)).toBe(unavailable);
+
+    const unknown = inboxCaptureSyncRefreshError(new Error('secret sqlite details'));
+    expect(unknown).toBeInstanceOf(InboxCaptureSyncRefreshError);
+    expect(unknown.message).toContain('请不要重复添加');
     expect(unknown.message).not.toContain('secret');
   });
 });

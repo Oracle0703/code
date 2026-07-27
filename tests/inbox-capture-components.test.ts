@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { InboxCaptureSyncWarning } from '../src/renderer/components/InboxCaptureSyncWarning';
 import { InboxCaptureToast } from '../src/renderer/components/InboxCaptureToast';
 import {
   inboxCaptureContentSummary,
@@ -34,6 +35,60 @@ describe('inbox capture renderer components', () => {
     expect(markup).toContain('type="button"');
     expect(markup).not.toContain('href=');
     expect(markup).not.toContain('role="alert"');
+  });
+
+  it('renders a bounded post-commit synchronization warning as an independent alert', () => {
+    const content = `${'记'.repeat(100)}不应泄露的尾部`;
+    const summary = inboxCaptureContentSummary(content);
+    const message = '记录已创建，但当前收件箱未能同步。请重新读取，避免重复添加。';
+    const markup = renderToStaticMarkup(
+      createElement(InboxCaptureSyncWarning, {
+        content,
+        message,
+        focusActionOnMount: true,
+        focusBlocked: false,
+        onRefresh: async () => undefined,
+        onDismiss: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain(
+      'class="inbox-capture-toast task-create-sync-warning inbox-capture-sync-warning"',
+    );
+    expect(markup).toContain('aria-busy="false"');
+    expect(markup.match(/role="alert"/gu)).toHaveLength(1);
+    expect(markup).toContain('aria-atomic="true"');
+    expect(markup).not.toContain(
+      'class="inbox-capture-toast task-create-sync-warning inbox-capture-sync-warning" role="alert"',
+    );
+    expect(markup).toContain(summary);
+    expect(markup).not.toContain('不应泄露的尾部');
+    expect(markup).toContain(message);
+    expect(markup).toContain('记录已创建，但收件箱未同步');
+    expect(markup).toContain('重新读取');
+    expect(markup).toContain(`aria-label="重新读取收件箱并确认：“${summary}”"`);
+    expect(markup).toContain(`aria-label="关闭快速记录同步警告：“${summary}”"`);
+    expect(markup).not.toContain('打开记录');
+  });
+
+  it('keeps warning refresh single-flight and focuses an inline alert after failure', () => {
+    const source = componentSource('InboxCaptureSyncWarning.tsx');
+
+    expect(source).toContain('const refreshingRef = useRef(false);');
+    expect(source).toContain(
+      'if (!focusActionOnMount || focusBlocked || actionFocusedRef.current)',
+    );
+    expect(source).toContain('action?.focus({ preventScroll: true });');
+    expect(source).toContain('if (refreshError === null || focusBlocked) return;');
+    expect(source).toContain('if (refreshingRef.current) return;');
+    expect(source).toContain('refreshingRef.current = true;');
+    expect(source).toContain('await onRefresh();');
+    expect(source).toContain('refreshingRef.current = false;');
+    expect(source).toContain('errorRef.current?.focus({ preventScroll: true })');
+    expect(source).toMatch(
+      /className="inbox-capture-toast__error inbox-capture-sync-warning__error"\s+role="alert"\s+tabIndex=\{-1\}/u,
+    );
+    expect(source.match(/disabled=\{refreshing\}/gu)).toHaveLength(2);
   });
 
   it('keeps opening user-triggered and single-flight without an automatic navigation effect', () => {
@@ -103,7 +158,7 @@ describe('inbox capture renderer components', () => {
     expect(source).toContain('role="alert"');
   });
 
-  it('keeps capture failures with their visible owner and publishes only after Today unmounts', () => {
+  it('keeps capture failures with their visible owner and invalidates cross-workspace state', () => {
     const appSource = rendererSource('App.tsx');
     const controllerSource = rendererSource('hooks/useInboxController.ts');
     const createSource = sourceBetween(
@@ -118,8 +173,42 @@ describe('inbox capture renderer components', () => {
     expect(appSource).toContain("(statusbarErrorSource === 'inbox' && activeSurface === 'inbox')");
     expect(controllerSource).toContain('shouldPublishFailure() &&');
     expect(appSource).toMatch(
-      /const requestWorkspaceActivation = useCallback\(\s+\(workspaceId: string\) => \{\s+if \(workspaceId === currentWorkspaceIdRef\.current\) return;[\s\S]*?inboxCaptureCoordinator\.invalidate\(\);/u,
+      /const invalidateInboxCapture = useCallback\(\(\): void => \{[\s\S]*?inboxCaptureCoordinator\.invalidate\(\);[\s\S]*?setInboxCaptureSyncWarningState\(null\);/u,
     );
+    expect(appSource).toMatch(
+      /const requestWorkspaceActivation = useCallback\(\s+\(workspaceId: string\) => \{\s+if \(workspaceId === currentWorkspaceIdRef\.current\) return;[\s\S]*?invalidateInboxCapture\(\);/u,
+    );
+  });
+
+  it('separates post-commit reconciliation warnings from retryable create failures', () => {
+    const appSource = rendererSource('App.tsx');
+    const createSource = sourceBetween(
+      appSource,
+      'const createInboxCapture = useCallback(',
+      'const openInboxCapture = useCallback(',
+    );
+    const refreshSource = sourceBetween(
+      appSource,
+      'const refreshInboxCaptureSyncWarning = useCallback(',
+      'const createManualTask = useCallback(',
+    );
+
+    expect(createSource).toContain('!commit.committed || commit.createdEntry === null');
+    expect(createSource).toContain('createdEntryId: commit.result.createdEntryId');
+    expect(createSource).toContain("focusActionOnMount: errorOwner === 'dialog'");
+    expect(createSource).toContain('commit.reconciliationWarning ??');
+    expect(createSource).toMatch(
+      /if \(errorOwner === 'dialog'\) \{\s+inboxCapturePublicationGate\.stage/u,
+    );
+    expect(createSource).toContain('publishInboxCapturePublication(publication);');
+    expect(appSource).toMatch(
+      /const closeQuickCaptureDialog = useCallback\([\s\S]*?setQuickCaptureTarget\(null\);[\s\S]*?inboxCapturePublicationGate\.take/u,
+    );
+    expect(appSource).toContain('onClose={closeQuickCaptureDialog}');
+    expect(refreshSource).toContain('resolveInboxCaptureSyncRefreshEntry(');
+    expect(refreshSource).toContain('createRecoveredFeedback(');
+    expect(refreshSource).toContain('!inboxCaptureCoordinator.isSyncRefreshCurrent(');
+    expect(appSource).toContain('<InboxCaptureSyncWarning');
   });
 
   it('returns focus inside Quick Capture after a failed submit', () => {

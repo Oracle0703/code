@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   countInboxEntries,
   createdInboxEntryFromResult,
@@ -10,6 +10,7 @@ import {
   isInboxRequestLatest,
   isInboxSequenceCurrent,
   isInboxWorkspaceCurrent,
+  reconcileInboxCreateResult,
   shouldApplyInboxSnapshot,
 } from '../src/renderer/inbox-state';
 import type { InboxCreateResult, InboxEntry, InboxSnapshot } from '../src/shared/contracts';
@@ -121,6 +122,171 @@ describe('inbox renderer state', () => {
       }),
     ).toBeNull();
     expect(createdInboxEntryFromResult(WORKSPACE_B, result)).toBeNull();
+    expect(
+      createdInboxEntryFromResult(WORKSPACE_A, {
+        ...result,
+        inboxSnapshot: {
+          workspaceId: WORKSPACE_A,
+          entries: [created, { ...created }],
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it('commits the inbox:create transaction snapshot without an extra read', async () => {
+    const created = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const commitResultSnapshot = vi.fn(() => true);
+    const prepareSnapshotRefresh = vi.fn();
+
+    await expect(
+      reconcileInboxCreateResult({
+        expectedWorkspaceId: WORKSPACE_A,
+        result: resultFor(created),
+        commitResultSnapshot,
+        getCommittedEntry: () => null,
+        prepareSnapshotRefresh,
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({
+      createdEntry: created,
+      committed: true,
+      error: undefined,
+    });
+    expect(commitResultSnapshot).toHaveBeenCalledOnce();
+    expect(prepareSnapshotRefresh).not.toHaveBeenCalled();
+  });
+
+  it('recovers on the second authoritative read after the first read fails', async () => {
+    const created = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const sameContent = entry('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const prepareSnapshotRefresh = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('internal path must not become UI text'))
+      .mockResolvedValueOnce({
+        snapshot: snapshot([sameContent, created]),
+        commit: () => true,
+      });
+
+    await expect(
+      reconcileInboxCreateResult({
+        expectedWorkspaceId: WORKSPACE_A,
+        result: resultFor(created),
+        commitResultSnapshot: () => false,
+        getCommittedEntry: () => null,
+        prepareSnapshotRefresh,
+        isCurrent: () => true,
+      }),
+    ).resolves.toEqual({
+      createdEntry: created,
+      committed: true,
+      error: expect.any(Error),
+    });
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers when the first authoritative snapshot omits the exact id', async () => {
+    const created = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const sameContent = entry('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const prepareSnapshotRefresh = vi
+      .fn()
+      .mockResolvedValueOnce({
+        snapshot: snapshot([sameContent]),
+        commit: () => true,
+      })
+      .mockResolvedValueOnce({
+        snapshot: snapshot([sameContent, created]),
+        commit: () => true,
+      });
+
+    const reconciled = await reconcileInboxCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: resultFor(created),
+      commitResultSnapshot: () => false,
+      getCommittedEntry: () => null,
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled).toEqual({
+      createdEntry: created,
+      committed: true,
+      error: expect.any(Error),
+    });
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed after two reads but accepts a newer exact entry in the final check', async () => {
+    const created = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const prepareSnapshotRefresh = vi.fn(async () => ({
+      snapshot: snapshot([created]),
+      commit: () => false,
+    }));
+    let committedSnapshotChecks = 0;
+
+    const reconciled = await reconcileInboxCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: resultFor(created),
+      commitResultSnapshot: () => false,
+      getCommittedEntry: () => {
+        committedSnapshotChecks += 1;
+        return committedSnapshotChecks === 3 ? created : null;
+      },
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled.createdEntry).toBe(created);
+    expect(reconciled.committed).toBe(true);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+    expect(committedSnapshotChecks).toBe(3);
+  });
+
+  it('returns a bounded post-commit failure without matching duplicate content', async () => {
+    const created = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    const sameContent = entry('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    const prepareSnapshotRefresh = vi.fn(async () => ({
+      snapshot: snapshot([sameContent]),
+      commit: () => true,
+    }));
+
+    const reconciled = await reconcileInboxCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: resultFor(created),
+      commitResultSnapshot: () => false,
+      getCommittedEntry: () => null,
+      prepareSnapshotRefresh,
+      isCurrent: () => true,
+    });
+
+    expect(reconciled.createdEntry).toBe(created);
+    expect(reconciled.committed).toBe(false);
+    expect(reconciled.error).toBeInstanceOf(Error);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops reconciliation when the originating activation is superseded', async () => {
+    const created = entry('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+    let current = true;
+    const prepareSnapshotRefresh = vi.fn(async () => {
+      current = false;
+      return {
+        snapshot: snapshot([created]),
+        commit: () => true,
+      };
+    });
+
+    const reconciled = await reconcileInboxCreateResult({
+      expectedWorkspaceId: WORKSPACE_A,
+      result: resultFor(created),
+      commitResultSnapshot: () => false,
+      getCommittedEntry: () => null,
+      prepareSnapshotRefresh,
+      isCurrent: () => current,
+    });
+
+    expect(reconciled.createdEntry).toBe(created);
+    expect(reconciled.committed).toBe(false);
+    expect(prepareSnapshotRefresh).toHaveBeenCalledOnce();
   });
 
   it('derives every badge from the real active-entry snapshot', () => {
@@ -173,3 +339,24 @@ describe('inbox renderer state', () => {
     expect(filterInboxEntries(entries, '发布', 'task', null)).toEqual([entries[0]]);
   });
 });
+
+function entry(id: string): InboxEntry {
+  return {
+    id,
+    content: '重复内容',
+    category: 'uncategorized',
+    createdAt: '2026-07-25T12:00:00.000Z',
+    updatedAt: '2026-07-25T12:00:00.000Z',
+  };
+}
+
+function snapshot(entries: readonly InboxEntry[]): InboxSnapshot {
+  return { workspaceId: WORKSPACE_A, entries };
+}
+
+function resultFor(created: InboxEntry): InboxCreateResult {
+  return {
+    inboxSnapshot: snapshot([created]),
+    createdEntryId: created.id,
+  };
+}
