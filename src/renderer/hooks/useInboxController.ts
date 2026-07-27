@@ -14,6 +14,7 @@ import {
   inboxSnapshotForActivation,
   isInboxRequestCurrent,
   isInboxRequestLatest,
+  reconcileInboxCreateResult,
   shouldApplyInboxSnapshot,
   type InboxRequestIdentity,
   type InboxSnapshotState,
@@ -29,8 +30,9 @@ export interface InboxUndoNotice {
 
 export interface InboxCaptureCommit {
   readonly result: InboxCreateResult;
-  readonly createdEntry: InboxEntry;
+  readonly createdEntry: InboxEntry | null;
   readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
 }
 
 type InboxStatus = 'loading' | 'ready' | 'error';
@@ -48,11 +50,14 @@ interface InboxOperationError {
 
 const EMPTY_ENTRIES: readonly InboxEntry[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createInboxWorkspaceIdentity(null));
+const INBOX_CREATE_RECONCILIATION_ERROR =
+  '记录已创建，但当前收件箱未能同步。请重新读取后查看，避免重复添加。';
 
 export function useInboxController(workspaceId: string | null) {
   const activation = useMemo(() => createInboxWorkspaceIdentity(workspaceId), [workspaceId]);
   const activeActivationRef = useRef<InboxWorkspaceIdentity>(activation);
   const [storedSnapshot, setStoredSnapshot] = useState<InboxSnapshotState | null>(null);
+  const storedSnapshotRef = useRef<InboxSnapshotState | null>(null);
   const [loadState, setLoadState] = useState<InboxLoadState>({
     activation,
     status: 'loading',
@@ -75,6 +80,11 @@ export function useInboxController(workspaceId: string | null) {
   const pendingEntryOperationsRef = useRef(new Map<string, InboxWorkspaceIdentity>());
   const pendingCaptureActivationsRef = useRef(new Set<InboxWorkspaceIdentity>());
   const pendingUndoOperationsRef = useRef(new Map<string, InboxWorkspaceIdentity>());
+
+  const setStored = useCallback((value: InboxSnapshotState | null) => {
+    storedSnapshotRef.current = value;
+    setStoredSnapshot(value);
+  }, []);
 
   const beginPendingEntry = useCallback(
     (target: InboxWorkspaceIdentity, entryId: string): boolean => {
@@ -163,7 +173,7 @@ export function useInboxController(workspaceId: string | null) {
         return false;
       }
       appliedSequenceRef.current = request.sequence;
-      setStoredSnapshot({ activation: request.workspace, snapshot });
+      setStored({ activation: request.workspace, snapshot });
       setLoadState({
         activation: request.workspace,
         status: 'ready',
@@ -171,7 +181,7 @@ export function useInboxController(workspaceId: string | null) {
       });
       return true;
     },
-    [],
+    [setStored],
   );
 
   const load = useCallback(
@@ -197,7 +207,7 @@ export function useInboxController(workspaceId: string | null) {
           requestIsCurrent(request) &&
           isInboxRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
-          setStoredSnapshot(null);
+          setStored(null);
           setLoadState({
             activation: request.workspace,
             status: 'error',
@@ -207,7 +217,7 @@ export function useInboxController(workspaceId: string | null) {
         throw error;
       }
     },
-    [applySnapshot, beginRequest, requestIsCurrent],
+    [applySnapshot, beginRequest, requestIsCurrent, setStored],
   );
 
   const prepareSnapshotRefresh = useCallback(async () => {
@@ -298,27 +308,55 @@ export function useInboxController(workspaceId: string | null) {
       }
       clearOperationErrorFor(target);
       try {
-        const result = await window.workbench.inbox.create({
-          workspaceId: request.workspaceId,
-          content,
-          category,
-        });
-        const createdEntry = createdInboxEntryFromResult(request.workspaceId, result);
-        if (!createdEntry) {
-          throw new Error('快速记录结果与创建的收件箱记录不匹配，请重试。');
+        let result: InboxCreateResult;
+        try {
+          result = await window.workbench.inbox.create({
+            workspaceId: request.workspaceId,
+            content,
+            category,
+          });
+        } catch (error) {
+          throw operationFailure(
+            error,
+            request.workspace,
+            '快速记录失败，请重试。',
+            () =>
+              shouldPublishFailure() &&
+              requestIsCurrent(request) &&
+              isInboxRequestLatest(request.sequence, latestRequestSequenceRef.current),
+          );
         }
-        const committed = applySnapshot(result.inboxSnapshot, request);
-        return { result, createdEntry, committed };
-      } catch (error) {
-        throw operationFailure(
-          error,
-          request.workspace,
-          '快速记录失败，请重试。',
-          () =>
-            shouldPublishFailure() &&
-            requestIsCurrent(request) &&
-            isInboxRequestLatest(request.sequence, latestRequestSequenceRef.current),
-        );
+
+        const reconciliation = await reconcileInboxCreateResult({
+          expectedWorkspaceId: request.workspaceId,
+          result,
+          commitResultSnapshot: () => applySnapshot(result.inboxSnapshot, request),
+          getCommittedEntry: () => {
+            const currentSnapshot = inboxSnapshotForActivation(
+              request.workspace,
+              storedSnapshotRef.current,
+            );
+            return currentSnapshot
+              ? createdInboxEntryFromResult(request.workspaceId, {
+                  inboxSnapshot: currentSnapshot,
+                  createdEntryId: result.createdEntryId,
+                })
+              : null;
+          },
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
+        });
+
+        const reconciliationWarning =
+          !reconciliation.committed && requestIsCurrent(request)
+            ? INBOX_CREATE_RECONCILIATION_ERROR
+            : null;
+        return {
+          result,
+          createdEntry: reconciliation.createdEntry,
+          committed: reconciliation.committed,
+          reconciliationWarning,
+        };
       } finally {
         endPendingCapture(request.workspace);
       }
@@ -330,6 +368,7 @@ export function useInboxController(workspaceId: string | null) {
       clearOperationErrorFor,
       endPendingCapture,
       operationFailure,
+      prepareSnapshotRefresh,
       requestIsCurrent,
     ],
   );

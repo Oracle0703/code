@@ -25,6 +25,12 @@ export interface InboxCaptureOpenIntent {
   readonly feedback: Readonly<InboxCaptureFeedback>;
 }
 
+export interface InboxCaptureSyncRefreshIntent {
+  readonly generation: number;
+  readonly workspace: InboxCaptureWorkspaceIdentity;
+  readonly requestGeneration: number;
+}
+
 export interface InboxCaptureSnapshotRefresh {
   readonly snapshot: InboxSnapshot;
   readonly commit: () => boolean;
@@ -131,13 +137,72 @@ export class InboxCaptureCoordinator {
   ): InboxCaptureFeedback {
     this.assertCaptureCurrent(intent, currentWorkspace);
     if (!committed) throw new InboxCaptureSupersededError();
+    return createInboxCaptureFeedback(
+      intent.generation,
+      intent.workspace.workspaceId!,
+      createdEntry,
+    );
+  }
+
+  createRecoveredFeedback(
+    requestGeneration: number,
+    currentWorkspace: InboxCaptureWorkspaceIdentity,
+    createdEntry: Readonly<InboxEntry>,
+    committed: boolean,
+  ): InboxCaptureFeedback {
+    if (!committed || !this.isGenerationCurrent(requestGeneration, currentWorkspace)) {
+      throw new InboxCaptureSupersededError();
+    }
+    return createInboxCaptureFeedback(
+      requestGeneration,
+      currentWorkspace.workspaceId!,
+      createdEntry,
+    );
+  }
+
+  isGenerationCurrent(
+    requestGeneration: number,
+    currentWorkspace: InboxCaptureWorkspaceIdentity,
+  ): boolean {
+    return (
+      currentWorkspace.workspaceId !== null &&
+      this.#workspace === currentWorkspace &&
+      requestGeneration === this.#generation
+    );
+  }
+
+  beginSyncRefresh(
+    workspace: InboxCaptureWorkspaceIdentity,
+    requestGeneration: number,
+  ): InboxCaptureSyncRefreshIntent {
+    if (!this.isGenerationCurrent(requestGeneration, workspace)) {
+      throw new InboxCaptureSupersededError();
+    }
     return Object.freeze({
-      requestGeneration: intent.generation,
-      workspaceId: intent.workspace.workspaceId!,
-      createdEntryId: createdEntry.id,
-      content: createdEntry.content,
-      category: createdEntry.category,
+      generation: ++this.#openGeneration,
+      workspace,
+      requestGeneration,
     });
+  }
+
+  isSyncRefreshCurrent(
+    intent: InboxCaptureSyncRefreshIntent,
+    currentWorkspace: InboxCaptureWorkspaceIdentity,
+  ): boolean {
+    return (
+      intent.generation === this.#openGeneration &&
+      intent.workspace === currentWorkspace &&
+      this.isGenerationCurrent(intent.requestGeneration, currentWorkspace)
+    );
+  }
+
+  assertSyncRefreshCurrent(
+    intent: InboxCaptureSyncRefreshIntent,
+    currentWorkspace: InboxCaptureWorkspaceIdentity,
+  ): void {
+    if (!this.isSyncRefreshCurrent(intent, currentWorkspace)) {
+      throw new InboxCaptureSupersededError();
+    }
   }
 
   beginOpen(
@@ -229,6 +294,32 @@ export class InboxCaptureOpenGate {
   }
 }
 
+/**
+ * Holds a capture outcome until its modal has closed, so live regions are
+ * mounted only after the dialog is no longer the active accessibility surface.
+ */
+export class InboxCapturePublicationGate<T> {
+  #pending: {
+    readonly workspace: InboxCaptureWorkspaceIdentity;
+    readonly value: T;
+  } | null = null;
+
+  stage(workspace: InboxCaptureWorkspaceIdentity, value: T): void {
+    this.#pending = Object.freeze({ workspace, value });
+  }
+
+  take(dialogOpen: boolean, currentWorkspace: InboxCaptureWorkspaceIdentity): T | null {
+    if (dialogOpen || this.#pending === null) return null;
+    const pending = this.#pending;
+    this.#pending = null;
+    return pending.workspace === currentWorkspace ? pending.value : null;
+  }
+
+  clear(): void {
+    this.#pending = null;
+  }
+}
+
 export class InboxCaptureSupersededError extends Error {
   constructor() {
     super('快速记录结果已被较新的状态替代。');
@@ -247,6 +338,15 @@ export class InboxCaptureEntryUnavailableError extends Error {
   constructor() {
     super('刚创建的收件箱记录已不可用；它可能已归档或工作区数据已经变化。');
     this.name = 'InboxCaptureEntryUnavailableError';
+  }
+}
+
+export class InboxCaptureSyncRefreshError extends Error {
+  constructor(
+    message = '收件箱仍无法安全确认。请稍后重新读取；记录可能已经创建，请不要重复添加。',
+  ) {
+    super(message);
+    this.name = 'InboxCaptureSyncRefreshError';
   }
 }
 
@@ -271,6 +371,36 @@ export async function resolveInboxCaptureNavigationTarget(
     workspaceId: feedback.workspaceId,
     entry: matches[0]!,
   };
+}
+
+export async function resolveInboxCaptureSyncRefreshEntry(
+  intent: InboxCaptureSyncRefreshIntent,
+  createdEntryId: string,
+  readInbox: () => Promise<InboxCaptureSnapshotRefresh>,
+  assertCurrent: () => void,
+): Promise<InboxEntry> {
+  assertCurrent();
+  const refresh = await readInbox();
+  assertCurrent();
+  if (refresh.snapshot.workspaceId !== intent.workspace.workspaceId) {
+    throw new InboxCaptureSyncRefreshError(
+      '重新读取返回了其他工作区，无法确认刚创建的记录。记录可能已经创建，请不要重复添加。',
+    );
+  }
+  const matches = refresh.snapshot.entries.filter(({ id }) => id === createdEntryId);
+  if (matches.length !== 1) {
+    throw new InboxCaptureSyncRefreshError(
+      '重新读取后仍无法确认刚创建的记录。请稍后再试；记录可能已经创建，请不要重复添加。',
+    );
+  }
+  assertCurrent();
+  if (!refresh.commit()) {
+    throw new InboxCaptureSyncRefreshError(
+      '收件箱在读取期间发生变化。请重新读取；记录可能已经创建，请不要重复添加。',
+    );
+  }
+  assertCurrent();
+  return matches[0]!;
 }
 
 export function inboxCaptureOpenStarted(
@@ -328,4 +458,23 @@ export function inboxCaptureNavigationError(error: unknown): Error {
     }
   }
   return new Error('无法打开刚创建的收件箱记录，请重试。', { cause: error });
+}
+
+export function inboxCaptureSyncRefreshError(error: unknown): Error {
+  if (error instanceof InboxCaptureSyncRefreshError) return error;
+  return new InboxCaptureSyncRefreshError();
+}
+
+function createInboxCaptureFeedback(
+  requestGeneration: number,
+  workspaceId: string,
+  createdEntry: Readonly<InboxEntry>,
+): InboxCaptureFeedback {
+  return Object.freeze({
+    requestGeneration,
+    workspaceId,
+    createdEntryId: createdEntry.id,
+    content: createdEntry.content,
+    category: createdEntry.category,
+  });
 }

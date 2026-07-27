@@ -22,6 +22,28 @@ export interface InboxSnapshotState {
   readonly snapshot: InboxSnapshot;
 }
 
+export interface InboxCreateSnapshotRefresh {
+  readonly snapshot: InboxSnapshot;
+  readonly commit: () => boolean;
+}
+
+export interface InboxCreateReconciliation {
+  readonly createdEntry: InboxEntry | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+interface InboxCreateReconciliationInput {
+  readonly expectedWorkspaceId: string;
+  readonly result: InboxCreateResult;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedEntry: () => InboxEntry | null;
+  readonly prepareSnapshotRefresh: () => Promise<InboxCreateSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
+const INBOX_CREATE_REFRESH_ATTEMPTS = 2;
+
 export function createInboxWorkspaceIdentity(workspaceId: string | null): InboxWorkspaceIdentity {
   return { workspaceId };
 }
@@ -93,7 +115,75 @@ export function createdInboxEntryFromResult(
   result: InboxCreateResult,
 ): InboxEntry | null {
   if (result.inboxSnapshot.workspaceId !== expectedWorkspaceId) return null;
-  return result.inboxSnapshot.entries.find(({ id }) => id === result.createdEntryId) ?? null;
+  const matches = result.inboxSnapshot.entries.filter(({ id }) => id === result.createdEntryId);
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+export async function reconcileInboxCreateResult(
+  input: InboxCreateReconciliationInput,
+): Promise<InboxCreateReconciliation> {
+  let createdEntry: InboxEntry | null = null;
+  let committed = false;
+  let error: unknown;
+
+  try {
+    createdEntry = createdInboxEntryFromResult(input.expectedWorkspaceId, input.result);
+    committed = createdEntry !== null ? input.commitResultSnapshot() : false;
+  } catch (caughtError) {
+    error = caughtError;
+  }
+
+  for (
+    let attempt = 0;
+    !committed && input.isCurrent() && attempt < INBOX_CREATE_REFRESH_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      const currentEntry = input.getCommittedEntry();
+      if (currentEntry) {
+        createdEntry = currentEntry;
+        committed = true;
+        break;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+    if (!input.isCurrent()) break;
+
+    try {
+      const refresh = await input.prepareSnapshotRefresh();
+      if (!input.isCurrent()) break;
+      const freshEntry = createdInboxEntryFromResult(input.expectedWorkspaceId, {
+        inboxSnapshot: refresh.snapshot,
+        createdEntryId: input.result.createdEntryId,
+      });
+      if (!freshEntry) {
+        throw new Error('The committed inbox entry was not returned by the authoritative refresh.');
+      }
+      createdEntry = freshEntry;
+      if (refresh.commit()) {
+        committed = true;
+        break;
+      }
+      error = new Error('The authoritative inbox snapshot could not be committed.');
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  if (!committed && input.isCurrent()) {
+    try {
+      const currentEntry = input.getCommittedEntry();
+      if (currentEntry) {
+        createdEntry = currentEntry;
+        committed = true;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  return { createdEntry, committed, error };
 }
 
 export function countInboxEntries(entries: readonly InboxEntry[]) {

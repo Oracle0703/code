@@ -118,7 +118,7 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 收件箱 v3 不导入界面中的演示条目，也不会把原型 `localStorage` 任务当作真实收件箱数据。条目允许重复正文，分类只接受 `uncategorized`、`task`、`note`、`link`；其中 `task` 只是处理意图。归档工作区中的条目原样保留，但触发器和 Service 都拒绝继续修改。
 
-`inbox:create` 沿用既有输入与通道，成功响应新增同一事务后的 `inboxSnapshot` 和 Main 实际插入的 `createdEntryId`；这不新增 schema、migration 或 IPC 通道。Today 与全局快速记录保存成功后仍留在原页，并共用统一回执；只有用户显式打开时，Renderer 才 fresh-read 当前工作区收件箱并只按该 opaque ID 精确复核。目标缺失、已归档或状态变化时不会按正文、时间或列表位置模糊回退。
+`inbox:create` 沿用既有输入与通道，成功响应新增同一事务后的 `inboxSnapshot` 和 Main 实际插入的 `createdEntryId`；这不新增 schema、migration 或 IPC 通道。Renderer 先提交事务快照；若它被较新序号抢先，最多再做两次权威读取，并只接受当前工作区内唯一匹配该 opaque ID 的条目。Today 与全局快速记录同步成功后仍留在原页，并共用统一回执；只有用户显式打开时，Renderer 才再次 fresh-read 并精确复核。若 Main 已落库但两次读取后仍无法提交快照，输入面会关闭或清空并显示独立警告，要求重新读取且不要重复添加；重新读取只有在 exact ID 存在且快照提交成功后才发布回执。真正的创建请求失败仍保留原输入供重试。目标缺失、已归档、工作区 activation 或较新请求变化时不会按正文、时间或列表位置模糊回退。
 
 任务 v4 也不会导入 `daily.today.tasks` 中的演示任务，或自动转换既有 `task` 分类收件箱条目。任务状态固定为 `todo`、`in_progress`、`completed`；`planned_for` 只保存 Main 计算的本地民用 `YYYY-MM-DD` 或 `NULL`，完成状态与 `completed_at` 必须一致。Renderer 只能提交 Main 快照签发语义下的 `day-0` 至 `day-6` 或 `none` 固定计划意图；Service 在数据库 FIFO 操作真正执行时把 token 映射到民用日期，不能由页面伪造日期、ID、时间戳或来源关系。这个扩展不改变 v4 表结构或当前 schema 版本。
 
