@@ -20,6 +20,39 @@ export interface NoteSnapshotState {
   readonly snapshot: NoteSnapshot;
 }
 
+export interface NoteCreateSnapshotRefresh {
+  readonly snapshot: NoteSnapshot;
+  readonly commit: () => boolean;
+}
+
+export interface NoteCreateReconciliation {
+  readonly createdNote: Note | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
+export interface NoteCreateSyncWarningTarget {
+  readonly result: NoteCreateResult;
+  readonly title: string;
+  readonly body: string;
+  readonly message: string;
+}
+
+export interface NoteCreateSyncWarningState extends NoteCreateSyncWarningTarget {
+  readonly activation: NoteWorkspaceIdentity;
+}
+
+interface NoteCreateReconciliationInput {
+  readonly expectedWorkspaceId: string;
+  readonly result: NoteCreateResult;
+  readonly commitResultSnapshot: () => boolean;
+  readonly getCommittedNote: () => Note | null;
+  readonly prepareSnapshotRefresh: () => Promise<NoteCreateSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
+const NOTE_CREATE_REFRESH_ATTEMPTS = 2;
+
 export function createNoteWorkspaceIdentity(workspaceId: string | null): NoteWorkspaceIdentity {
   return { workspaceId };
 }
@@ -86,12 +119,123 @@ export function noteSnapshotForActivation(
     : null;
 }
 
+export function noteCreateSyncWarningForActivation(
+  activation: NoteWorkspaceIdentity,
+  state: NoteCreateSyncWarningState | null,
+): NoteCreateSyncWarningTarget | null {
+  return state?.activation === activation ? state : null;
+}
+
+export function isNoteCreateNavigationBlocked(
+  pendingCreate: boolean,
+  warning: NoteCreateSyncWarningTarget | null,
+): boolean {
+  return pendingCreate || warning !== null;
+}
+
+export function beginPendingNoteCreate(
+  pendingWorkspaceIds: ReadonlySet<string>,
+  workspaceId: string | null,
+): Set<string> | null {
+  if (workspaceId === null || pendingWorkspaceIds.has(workspaceId)) return null;
+  return new Set(pendingWorkspaceIds).add(workspaceId);
+}
+
+export function endPendingNoteCreate(
+  pendingWorkspaceIds: ReadonlySet<string>,
+  workspaceId: string | null,
+): ReadonlySet<string> {
+  if (workspaceId === null || !pendingWorkspaceIds.has(workspaceId)) return pendingWorkspaceIds;
+  const next = new Set(pendingWorkspaceIds);
+  next.delete(workspaceId);
+  return next;
+}
+
+export function clearResolvedNoteCreateSyncWarning(
+  state: NoteCreateSyncWarningState | null,
+  activation: NoteWorkspaceIdentity,
+  resolved: NoteCreateSyncWarningTarget,
+): NoteCreateSyncWarningState | null {
+  return state?.activation === activation &&
+    state.result.createdNoteId === resolved.result.createdNoteId
+    ? null
+    : state;
+}
+
 export function createdNoteFromResult(
   expectedWorkspaceId: string,
   result: NoteCreateResult,
 ): Note | null {
   if (result.noteSnapshot.workspaceId !== expectedWorkspaceId) return null;
-  return result.noteSnapshot.notes.find(({ id }) => id === result.createdNoteId) ?? null;
+  const matches = result.noteSnapshot.notes.filter(({ id }) => id === result.createdNoteId);
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+export async function reconcileNoteCreateResult(
+  input: NoteCreateReconciliationInput,
+): Promise<NoteCreateReconciliation> {
+  let createdNote: Note | null = null;
+  let committed = false;
+  let error: unknown;
+
+  try {
+    createdNote = createdNoteFromResult(input.expectedWorkspaceId, input.result);
+    committed = createdNote !== null ? input.commitResultSnapshot() : false;
+  } catch (caughtError) {
+    error = caughtError;
+  }
+
+  for (
+    let attempt = 0;
+    !committed && input.isCurrent() && attempt < NOTE_CREATE_REFRESH_ATTEMPTS;
+    attempt += 1
+  ) {
+    try {
+      const currentNote = input.getCommittedNote();
+      if (currentNote) {
+        createdNote = currentNote;
+        committed = true;
+        break;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+    if (!input.isCurrent()) break;
+
+    try {
+      const refresh = await input.prepareSnapshotRefresh();
+      if (!input.isCurrent()) break;
+      const freshNote = createdNoteFromResult(input.expectedWorkspaceId, {
+        noteSnapshot: refresh.snapshot,
+        createdNoteId: input.result.createdNoteId,
+      });
+      if (!freshNote) {
+        throw new Error('The committed note was not returned by the authoritative refresh.');
+      }
+      createdNote = freshNote;
+      if (refresh.commit()) {
+        committed = true;
+        break;
+      }
+      error = new Error('The authoritative note snapshot could not be committed.');
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  if (!committed && input.isCurrent()) {
+    try {
+      const currentNote = input.getCommittedNote();
+      if (currentNote) {
+        createdNote = currentNote;
+        committed = true;
+      }
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  return { createdNote, committed, error };
 }
 
 export function convertedNoteFromResult(

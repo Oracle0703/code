@@ -490,6 +490,10 @@ describe('assistant renderer surfaces', () => {
         onCreate: async () => {
           throw new Error('not called');
         },
+        createSyncWarning: null,
+        onCreateSyncWarning: () => undefined,
+        onCreateSyncResolved: () => undefined,
+        onRefreshCreated: async () => null,
         onUpdate: async () => {
           throw new Error('not called');
         },
