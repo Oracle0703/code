@@ -166,6 +166,46 @@ describe('schedule service', () => {
     await reopened.close();
   });
 
+  it('keeps revision and updatedAt stable for a normalized no-op update', async () => {
+    const dataDirectory = await createDataDirectory();
+    let now = new Date(NOW);
+    const service = createService(dataDirectory, {
+      workspaceIds: [WORKSPACE_A],
+      scheduleIds: [SCHEDULE_A],
+      now: () => new Date(now),
+    });
+    await service.open();
+
+    const creation = await service.createScheduleItem({
+      workspaceId: WORKSPACE_A,
+      expectedDate: TODAY,
+      title: '深度工作',
+      kind: 'focus',
+      startMinute: 540,
+      endMinute: 600,
+    });
+    const original = creation.scheduleSnapshot.items[0]!;
+    now = new Date('2026-07-22T13:34:56.000Z');
+
+    const snapshot = await service.updateScheduleItem({
+      workspaceId: WORKSPACE_A,
+      scheduleId: original.id,
+      expectedDate: original.scheduledFor,
+      expectedRevision: original.revision,
+      title: '  深度工作  ',
+      kind: original.kind,
+      startMinute: original.startMinute,
+      endMinute: original.endMinute,
+    });
+
+    expect(snapshot.items).toEqual([original]);
+    expect(snapshot.items[0]).toMatchObject({
+      revision: original.revision,
+      updatedAt: original.updatedAt,
+    });
+    await service.close();
+  });
+
   it('uses Main rolling-window authority and keeps each item on its original date', async () => {
     const dataDirectory = await createDataDirectory();
     let today = TODAY;

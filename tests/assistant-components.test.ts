@@ -426,6 +426,9 @@ describe('assistant renderer surfaces', () => {
         scheduleOperationError: null,
         pendingScheduleItemIds: new Set<string>(),
         scheduleCreatePending: false,
+        scheduleMutationBlocked: false,
+        workspaceNavigationBlocked: false,
+        workspaceNavigationBlockedReason: null,
         focusSnapshot: {
           workspaceId: WORKSPACE_ID,
           todayDate: '2026-07-23',

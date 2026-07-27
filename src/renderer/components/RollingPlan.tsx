@@ -33,6 +33,7 @@ interface RollingPlanProps {
   pendingScheduleItemIds: ReadonlySet<string>;
   taskCreatePending: boolean;
   scheduleCreatePending: boolean;
+  scheduleMutationBlocked: boolean;
   onRetryTasks: () => void;
   onRetrySchedule: () => void;
   onCreateTask: (planning: PlanningDayToken) => void;
@@ -54,6 +55,7 @@ export function RollingPlan({
   pendingScheduleItemIds,
   taskCreatePending,
   scheduleCreatePending,
+  scheduleMutationBlocked,
   onRetryTasks,
   onRetrySchedule,
   onCreateTask,
@@ -159,8 +161,9 @@ export function RollingPlan({
             </button>
             <button
               type="button"
+              data-schedule-create-action="true"
               onClick={() => onCreateSchedule(selectedDay.date)}
-              disabled={scheduleCreatePending}
+              disabled={scheduleCreatePending || scheduleMutationBlocked}
             >
               {scheduleCreatePending ? (
                 <LoaderCircle className="is-spinning" size={14} />
@@ -237,6 +240,7 @@ export function RollingPlan({
             <PlanningScheduleList
               items={selectedScheduleItems}
               pendingItemIds={pendingScheduleItemIds}
+              blocked={scheduleMutationBlocked}
               onOpenSchedule={onOpenSchedule}
             />
           </div>
@@ -372,10 +376,12 @@ function PlanningTaskList({
 function PlanningScheduleList({
   items,
   pendingItemIds,
+  blocked,
   onOpenSchedule,
 }: {
   items: readonly ScheduleItem[];
   pendingItemIds: ReadonlySet<string>;
+  blocked: boolean;
   onOpenSchedule: (item: ScheduleItem) => void;
 }) {
   return (
@@ -394,7 +400,8 @@ function PlanningScheduleList({
                 <button
                   type="button"
                   className="rolling-plan__item-title"
-                  disabled={pending}
+                  data-schedule-id={item.id}
+                  disabled={pending || blocked}
                   onClick={() => onOpenSchedule(item)}
                   aria-label={`编辑日程：${item.title}，${formatScheduleInputMinute(item.startMinute)} 到 ${formatScheduleInputMinute(item.endMinute)}`}
                 >

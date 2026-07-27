@@ -110,6 +110,30 @@ describe('focus renderer components', () => {
     expect(markup).not.toContain('>暂停</button>');
   });
 
+  it('explains and disables a foreign-session workspace switch while recovery blocks navigation', () => {
+    const blockedReason = '请先确认当前日程写入，再切换工作区。';
+    const markup = renderToStaticMarkup(
+      createElement(
+        TodayDashboard,
+        dashboardProps({
+          focusSnapshot: snapshot({
+            session: session({
+              workspaceId: WORKSPACE_B,
+              workspaceName: '研发',
+            }),
+          }),
+          workspaceNavigationBlocked: true,
+          workspaceNavigationBlockedReason: blockedReason,
+        }),
+      ),
+    );
+
+    expect(markup).toContain(
+      'aria-describedby="focus-workspace-switch-blocked-reason" disabled=""',
+    );
+    expect(markup).toContain(blockedReason);
+  });
+
   it('labels a paused foreign session without implying that its timer is running', () => {
     const markup = renderToStaticMarkup(
       createElement(
@@ -644,6 +668,9 @@ function dashboardProps(overrides: Partial<TodayDashboardProps> = {}): TodayDash
     scheduleOperationError: null,
     pendingScheduleItemIds: new Set<string>(),
     scheduleCreatePending: false,
+    scheduleMutationBlocked: false,
+    workspaceNavigationBlocked: false,
+    workspaceNavigationBlockedReason: null,
     focusSnapshot: snapshot(),
     focusStatus: 'ready',
     focusError: null,

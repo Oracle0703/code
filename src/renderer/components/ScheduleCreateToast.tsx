@@ -17,6 +17,8 @@ import { formatScheduleInputMinute } from '../schedule-state';
 interface ScheduleCreateToastProps {
   feedback: ScheduleCreateFeedback;
   focusBlocked: boolean;
+  blocked: boolean;
+  blockedReason: string | null;
   onOpen: (feedback: ScheduleCreateFeedback) => Promise<void>;
   onDismiss: (feedback: ScheduleCreateFeedback) => boolean;
   onFocusFallback: () => void;
@@ -25,6 +27,8 @@ interface ScheduleCreateToastProps {
 export function ScheduleCreateToast({
   feedback,
   focusBlocked,
+  blocked,
+  blockedReason,
   onOpen,
   onDismiss,
   onFocusFallback,
@@ -50,6 +54,7 @@ export function ScheduleCreateToast({
     feedback.endMinute,
     feedback.kind,
   );
+  const blockedReasonId = `schedule-create-toast-blocked-${feedback.requestGeneration}`;
 
   useLayoutEffect(() => {
     feedbackRef.current = feedback;
@@ -88,7 +93,7 @@ export function ScheduleCreateToast({
   }, [errorFocusKey, focusBlocked]);
 
   const openSchedule = async (): Promise<void> => {
-    if (!openGate.begin(feedback)) return;
+    if (blocked || !openGate.begin(feedback)) return;
     setOpenState(scheduleCreateOpenStarted(feedback));
     try {
       await onOpen(feedback);
@@ -140,7 +145,8 @@ export function ScheduleCreateToast({
         type="button"
         className="task-create-toast__action schedule-create-toast__action"
         aria-label="编辑刚创建的日程"
-        disabled={opening}
+        aria-describedby={blocked && blockedReason ? blockedReasonId : undefined}
+        disabled={opening || blocked}
         onClick={() => void openSchedule()}
       >
         {opening ? (
@@ -150,6 +156,11 @@ export function ScheduleCreateToast({
         )}
         {opening ? '正在打开…' : '编辑日程'}
       </button>
+      {blocked && blockedReason ? (
+        <span id={blockedReasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
       <button
         type="button"
         className="task-create-toast__close schedule-create-toast__close"

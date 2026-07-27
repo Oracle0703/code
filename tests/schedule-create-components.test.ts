@@ -65,6 +65,8 @@ describe('schedule create renderer components', () => {
         startMinute: 540,
         endMinute: 630,
         message,
+        blocked: false,
+        blockedReason: null,
         onRefresh: async () => undefined,
         onDismiss: () => undefined,
       }),
@@ -88,6 +90,43 @@ describe('schedule create renderer components', () => {
     expect(markup).toContain(`aria-label="重新读取日程列表并确认：“${summary}”"`);
     expect(markup).toContain(`aria-label="关闭日程同步警告：“${summary}”"`);
     expect(markup).not.toContain('编辑日程');
+  });
+
+  it('disables create recovery and receipt navigation behind the mutation gate', () => {
+    const blockedReason = '请先完成当前日程写入的重新读取。';
+    const warningMarkup = renderToStaticMarkup(
+      createElement(ScheduleCreateSyncWarning, {
+        title: '深度工作',
+        scheduledFor: '2026-07-27',
+        startMinute: 540,
+        endMinute: 630,
+        message: '日程已创建，但列表未同步。',
+        blocked: true,
+        blockedReason,
+        onRefresh: async () => undefined,
+        onDismiss: () => undefined,
+      }),
+    );
+    const toastMarkup = renderToStaticMarkup(
+      createElement(ScheduleCreateToast, {
+        feedback: feedback(),
+        focusBlocked: false,
+        blocked: true,
+        blockedReason,
+        onOpen: async () => undefined,
+        onDismiss: () => true,
+        onFocusFallback: () => undefined,
+      }),
+    );
+
+    expect(warningMarkup).toContain(
+      'aria-describedby="schedule-create-sync-warning-blocked-reason"',
+    );
+    expect(warningMarkup).toContain(blockedReason);
+    expect(warningMarkup.match(/disabled=""/gu)).toHaveLength(1);
+    expect(toastMarkup).toContain('aria-describedby="schedule-create-toast-blocked-4"');
+    expect(toastMarkup).toContain(blockedReason);
+    expect(toastMarkup.match(/disabled=""/gu)).toHaveLength(1);
   });
 
   it('defers live-region publication, wires recovery, and moves focus before receipt removal', () => {
@@ -157,6 +196,8 @@ function scheduleToast(value: ScheduleCreateFeedback) {
   return createElement(ScheduleCreateToast, {
     feedback: value,
     focusBlocked: false,
+    blocked: false,
+    blockedReason: null,
     onOpen: async () => undefined,
     onDismiss: () => true,
     onFocusFallback: () => undefined,

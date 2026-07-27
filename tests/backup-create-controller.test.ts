@@ -122,10 +122,10 @@ describe('manual backup creation App contract', () => {
 
     expect(restoreFlow).toContain("if (result.status === 'cancelled')");
     expect(restoreFlow).toMatch(
-      /else \{\s*invalidateNoteMutations\(\);\s*invalidateManualBackupRecovery\(\);\s*\}/u,
+      /else \{\s*invalidateNoteMutations\(\);\s*invalidateScheduleMutations\(\);\s*invalidateManualBackupRecovery\(\);\s*\}/u,
     );
     expect(importFlow).toMatch(
-      /await commitImport\(\);\s*invalidateNoteMutations\(\);\s*invalidateManualBackupRecovery\(\);/u,
+      /await commitImport\(\);\s*invalidateNoteMutations\(\);\s*invalidateScheduleMutations\(\);\s*invalidateManualBackupRecovery\(\);/u,
     );
     expect(closeFlow).not.toContain('invalidateManualBackupRecovery');
   });

@@ -225,6 +225,8 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 
 - 日程 ID、持久化日期、时间戳和 revision 由 Main 控制；Renderer 只能提交 `expectedDate`、标题、固定类型以及分钟范围。
 - 既有 `schedule:create` 在同一个 Main 事务中返回事务后的完整 `scheduleSnapshot` 与实际插入的 opaque `createdScheduleId`；这只扩展返回契约，不新增 IPC 通道、schema 或 migration。Today 与 7 日计划创建成功后仍留在 Today；只有用户显式打开时才 fresh-read 当前工作区日程、唯一匹配该 ID 与持久化日期，并用权威快照中的当前 revision 打开编辑窗口。目标缺失、重复 ID、跨午夜、切页、较新创建、工作区 A→B→A 或迟到请求都失败关闭，不按标题、类型、时段或列表位置回退。
+- `schedule:update` 与 `schedule:archive` 的 Main 成功是不可重放的提交边界。Renderer 冻结原行与目标字段，更新只接受同工作区、同持久化日期、精确 ID、创建时间、规范化内容/时段和预期 revision 的唯一行；归档只接受覆盖目标日期的权威快照中精确 ID 缺失。规范化后无变化的更新保持原 revision 与 `updatedAt`。响应快照若未能发布，Controller 会复查 ref-backed 最新快照并最多准备两次权威重读；跨午夜恢复必须先有可信 Main 响应中的精确结果，不能仅凭旧日期从新窗口消失推断成功。
+- Main 已提交但 Renderer 仍无法确认时，App 保留跨页面的失败关闭警告和精确 mutation 身份。显式“重新读取”只运行同一对账，不会再次调用 update/archive；恢复完成前，同工作区创建、编辑、归档、工作区切换和日程搜索跳转都被阻止，相关日程入口同步禁用。取消或失败的数据导入/备份恢复保留警告，只有成功替换数据库后才使它失效；焦点在警告动作、错误与原日程/页面标题之间受控交接。
 - 若 Main 已提交创建但 Renderer 在有界重读后仍无法提交权威快照，创建窗口会关闭并显示独立警告，明确要求刷新且不要重复创建；此路径不发布未经确认的成功回执。
 - 类型固定为 `focus`、`meeting`、`review`、`personal`。时间使用本地民用日期和 `0..1440` 分钟边界，结束分钟必须晚于开始分钟，不依赖 locale 字符串或 UTC 日期切片。
 - 创建、编辑和归档都会验证 `expectedDate` 位于 Main 执行时计算的 `[todayDate, todayDate + 6]` 民用日期窗口；过去日期和第 8 天都会拒绝，跨午夜后旧页面不能把过期请求写入新窗口。
