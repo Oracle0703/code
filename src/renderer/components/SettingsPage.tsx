@@ -80,6 +80,7 @@ interface SettingsPageProps {
   readonly dataStatus: DataLoadStatus;
   readonly dataOperation: DataOperationKind | null;
   readonly dataFeedback: DataFeedback | null;
+  readonly manualBackupBlocked: boolean;
   readonly onRetryData: () => void;
   readonly onCreateBackup: () => void | Promise<void>;
   readonly onRestoreBackup: (
@@ -128,6 +129,7 @@ export function SettingsPage({
   dataStatus,
   dataOperation,
   dataFeedback,
+  manualBackupBlocked,
   onRetryData,
   onCreateBackup,
   onRestoreBackup,
@@ -227,6 +229,7 @@ export function SettingsPage({
               status={dataStatus}
               operation={dataOperation}
               feedback={dataFeedback}
+              manualBackupBlocked={manualBackupBlocked}
               onRetry={onRetryData}
               onCreateBackup={onCreateBackup}
               onRestoreBackup={onRestoreBackup}
@@ -1083,6 +1086,7 @@ interface DataSettingsProps {
   readonly status: DataLoadStatus;
   readonly operation: DataOperationKind | null;
   readonly feedback: DataFeedback | null;
+  readonly manualBackupBlocked: boolean;
   readonly onRetry: () => void;
   readonly onCreateBackup: () => void | Promise<void>;
   readonly onRestoreBackup: (
@@ -1098,6 +1102,7 @@ export function DataSettings({
   status,
   operation,
   feedback,
+  manualBackupBlocked,
   onRetry,
   onCreateBackup,
   onRestoreBackup,
@@ -1108,8 +1113,8 @@ export function DataSettings({
   const actionInFlightRef = useRef(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [restoreTarget, setRestoreTarget] = useState<DatabaseBackupInfo | null>(null);
-  const runAction = async (action: () => void | Promise<void>): Promise<void> => {
-    if (operation !== null || actionInFlightRef.current) return;
+  const runAction = async (action: () => void | Promise<void>, blocked = false): Promise<void> => {
+    if (operation !== null || actionInFlightRef.current || blocked) return;
     actionInFlightRef.current = true;
     try {
       await action();
@@ -1201,8 +1206,11 @@ export function DataSettings({
           <button
             type="button"
             className="secondary-button"
-            disabled={busy}
-            onClick={() => void runAction(onCreateBackup).catch(() => undefined)}
+            data-backup-create-action="manual"
+            disabled={busy || manualBackupBlocked}
+            onClick={() =>
+              void runAction(onCreateBackup, manualBackupBlocked).catch(() => undefined)
+            }
           >
             <Archive size={14} aria-hidden="true" /> 立即备份
           </button>

@@ -68,6 +68,7 @@ import { AutomationCreateSyncWarning } from './components/AutomationCreateSyncWa
 import { AutomationCreateToast } from './components/AutomationCreateToast';
 import { AutomationDialog, type AutomationDialogState } from './components/AutomationDialog';
 import { AutomationPage } from './components/AutomationPage';
+import { BackupCreateSyncWarning } from './components/BackupCreateSyncWarning';
 import { BrowserPanel } from './components/BrowserPanel';
 import { CommandPalette, type PaletteCommand } from './components/CommandPalette';
 import { DataImportDialog } from './components/DataImportDialog';
@@ -419,8 +420,12 @@ export function App() {
   const workspaceController = useWorkspaceController();
   const {
     state: dataState,
+    manualBackupSyncWarning,
+    manualBackupBlocked,
     load: loadData,
     createBackup,
+    refreshManualBackupSyncWarning,
+    invalidateManualBackupRecovery,
     restoreBackup,
     updateBackupPolicy,
     exportData,
@@ -1602,6 +1607,7 @@ export function App() {
           dataReplacementNoteDiscardApprovedRef.current = false;
         } else {
           invalidateNoteMutations();
+          invalidateManualBackupRecovery();
         }
         return result;
       } catch (error) {
@@ -1610,8 +1616,29 @@ export function App() {
         throw error;
       }
     },
-    [confirmLeaveNoteDraft, invalidateNoteMutations, noteMutationCoordinator, restoreBackup],
+    [
+      confirmLeaveNoteDraft,
+      invalidateManualBackupRecovery,
+      invalidateNoteMutations,
+      noteMutationCoordinator,
+      restoreBackup,
+    ],
   );
+  const restoreManualBackupSyncWarningFocus = useCallback((): void => {
+    const manualBackupAction = document.querySelector<HTMLButtonElement>(
+      '[data-backup-create-action="manual"]:not(:disabled)',
+    );
+    if (manualBackupAction) {
+      manualBackupAction.focus({ preventScroll: true });
+      return;
+    }
+    const fallback = document.querySelector<HTMLElement>(
+      '.section-page__header h1, .section-page__header h2, main h1, .activity-rail button[aria-current="page"]',
+    );
+    if (!fallback) return;
+    if (!fallback.hasAttribute('tabindex')) fallback.tabIndex = -1;
+    fallback.focus({ preventScroll: true });
+  }, []);
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
@@ -4162,6 +4189,10 @@ export function App() {
       : dataState.importPreview
         ? '请先处理当前导入预览'
         : undefined;
+    const manualBackupDisabled = dataDisabled || manualBackupBlocked;
+    const manualBackupDisabledReason = manualBackupBlocked
+      ? '备份已创建，请先重新读取确认'
+      : dataDisabledReason;
     const workspaceCommands: PaletteCommand[] = snapshot.workspaces
       .filter(({ id }) => id !== activeWorkspace.id)
       .map((workspace) => ({
@@ -4216,8 +4247,8 @@ export function App() {
         group: '数据',
         icon: Archive,
         keywords: '数据 备份 backup sqlite',
-        disabled: dataDisabled,
-        disabledReason: dataDisabledReason,
+        disabled: manualBackupDisabled,
+        disabledReason: manualBackupDisabledReason,
         action: createBackup,
       },
       {
@@ -4408,6 +4439,7 @@ export function App() {
     dataState.activeOperation,
     dataState.importPreview,
     exportData,
+    manualBackupBlocked,
     openAutomationCreate,
     openQuickCapture,
     openTerminalSettings,
@@ -4933,6 +4965,7 @@ export function App() {
                     dataStatus={dataState.loadStatus}
                     dataOperation={dataState.activeOperation?.kind ?? null}
                     dataFeedback={dataState.feedback}
+                    manualBackupBlocked={manualBackupBlocked}
                     onRetryData={() => void loadData()}
                     onCreateBackup={createBackup}
                     onRestoreBackup={restoreBackupWithApproval}
@@ -5308,6 +5341,7 @@ export function App() {
             try {
               await commitImport();
               invalidateNoteMutations();
+              invalidateManualBackupRecovery();
             } catch (error) {
               dataReplacementApprovedRef.current = false;
               dataReplacementNoteDiscardApprovedRef.current = false;
@@ -5322,6 +5356,18 @@ export function App() {
         onUndo={inboxController.undoArchive}
         onDismiss={inboxController.dismissUndo}
       >
+        {manualBackupSyncWarning ? (
+          <BackupCreateSyncWarning
+            backup={manualBackupSyncWarning.backup}
+            focusActionOnMount={manualBackupSyncWarning.focusActionOnMount}
+            focusBlocked={overlayOpen}
+            blocked={dataState.activeOperation !== null}
+            refreshing={manualBackupSyncWarning.refreshing}
+            refreshError={manualBackupSyncWarning.refreshError}
+            onRefresh={refreshManualBackupSyncWarning}
+            onFocusFallback={restoreManualBackupSyncWarningFocus}
+          />
+        ) : null}
         {visibleAutomationCreateSyncWarning ? (
           <AutomationCreateSyncWarning
             name={visibleAutomationCreateSyncWarning.name}

@@ -103,6 +103,7 @@ describe('backup restore renderer surfaces', () => {
         status: 'ready',
         operation: null,
         feedback: null,
+        manualBackupBlocked: false,
         onRetry: () => undefined,
         onCreateBackup: () => undefined,
         onRestoreBackup: async () => ({ status: 'cancelled' as const }),

@@ -181,10 +181,28 @@ describe('data management renderer state', () => {
 
   it('provides bounded, user-facing operation labels', () => {
     expect(dataOperationLabel('backup')).toBe('正在创建一致性备份…');
+    expect(dataOperationLabel('backup-refresh')).toContain('重新读取备份列表');
     expect(dataOperationLabel('restore-backup')).toContain('验证备份');
     expect(dataOperationLabel('commit-import')).toContain('准备重启');
     expect(dataOperationLabel(null)).toBeNull();
     expect(backupReasonLabel('pre-import')).toBe('替换前备份');
+  });
+
+  it('publishes a success resolved by an exact external backup snapshot', () => {
+    const active = dataManagementReducer(INITIAL_DATA_MANAGEMENT_STATE, {
+      type: 'operation-started',
+      operation: { kind: 'export', generation: 12 },
+    });
+    const published = dataManagementReducer(active, {
+      type: 'feedback-published',
+      feedback: { tone: 'success', message: '已确认刚创建的备份。' },
+    });
+
+    expect(published.activeOperation).toBe(active.activeOperation);
+    expect(published.feedback).toEqual({
+      tone: 'success',
+      message: '已确认刚创建的备份。',
+    });
   });
 
   it('does not let an older backup event replace a newer policy revision', () => {

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   BackupPolicyUpdateInput,
   DataImportPreview,
+  DataManagementSnapshot,
+  DatabaseBackupInfo,
   DatabaseBackupRestoreInput,
   DatabaseBackupRestoreResult,
   WorkbenchApi,
@@ -9,9 +11,16 @@ import type {
 import {
   INITIAL_DATA_MANAGEMENT_STATE,
   DataImportLifecycle,
+  createManualBackupIdentity,
+  createManualBackupSyncWarning,
   dataManagementReducer,
+  exactManualBackupFromSnapshot,
+  reconcileDataManagementSnapshot,
+  reconcileManualBackupCreation,
   type DataManagementState,
   type DataOperationKind,
+  type ManualBackupCreateIdentity,
+  type ManualBackupSyncWarning,
 } from '../data-state';
 
 interface DataManagementControllerOptions {
@@ -25,8 +34,12 @@ interface OperationToken {
 
 export interface DataManagementController {
   readonly state: DataManagementState;
+  readonly manualBackupSyncWarning: ManualBackupSyncWarning | null;
+  readonly manualBackupBlocked: boolean;
   load(): Promise<void>;
   createBackup(): Promise<void>;
+  refreshManualBackupSyncWarning(): Promise<void>;
+  invalidateManualBackupRecovery(): void;
   restoreBackup(input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult>;
   updateBackupPolicy(input: BackupPolicyUpdateInput): Promise<void>;
   exportData(): Promise<void>;
@@ -45,6 +58,78 @@ export function useDataManagementController({
   const operationGenerationRef = useRef(0);
   const activeOperationRef = useRef<OperationToken | null>(null);
   const importLifecycleRef = useRef(new DataImportLifecycle());
+  const committedSnapshotRef = useRef<DataManagementSnapshot | null>(null);
+  const protectedManualBackupsRef = useRef<readonly ManualBackupCreateIdentity[]>([]);
+  const manualBackupReconciliationGenerationRef = useRef(0);
+  const manualBackupRefreshTaskRef = useRef<Promise<void> | null>(null);
+  const manualBackupSyncWarningRef = useRef<ManualBackupSyncWarning | null>(null);
+  const [manualBackupSyncWarning, setManualBackupSyncWarning] =
+    useState<ManualBackupSyncWarning | null>(null);
+
+  const publishManualBackupSyncWarning = useCallback(
+    (warning: ManualBackupSyncWarning | null): void => {
+      manualBackupSyncWarningRef.current = warning;
+      setManualBackupSyncWarning(warning);
+    },
+    [],
+  );
+
+  const protectManualBackup = useCallback((identity: ManualBackupCreateIdentity | null): void => {
+    if (identity === null) return;
+    protectedManualBackupsRef.current = Object.freeze([
+      ...protectedManualBackupsRef.current.filter(({ id }) => id !== identity.id),
+      identity,
+    ]);
+  }, []);
+
+  const resolveManualBackupSyncWarning = useCallback(
+    (snapshot: DataManagementSnapshot, publishFeedback = true): boolean => {
+      const warning = manualBackupSyncWarningRef.current;
+      if (
+        !warning?.identity ||
+        exactManualBackupFromSnapshot(warning.identity, snapshot) === null ||
+        manualBackupSyncWarningRef.current !== warning
+      ) {
+        return false;
+      }
+      manualBackupSyncWarningRef.current = null;
+      setManualBackupSyncWarning((current) => (current === warning ? null : current));
+      if (publishFeedback && activeOperationRef.current?.kind !== 'backup-refresh') {
+        dispatch({
+          type: 'feedback-published',
+          feedback: { tone: 'success', message: '已确认刚创建的备份。' },
+        });
+      }
+      return true;
+    },
+    [],
+  );
+
+  const commitObservedSnapshot = useCallback(
+    (
+      snapshot: DataManagementSnapshot,
+      requiredManualBackup: ManualBackupCreateIdentity | null = null,
+    ): boolean => {
+      const protectedManualBackups = protectedManualBackupsRef.current;
+      const reconciled = reconcileDataManagementSnapshot(
+        committedSnapshotRef.current,
+        snapshot,
+        protectedManualBackups,
+      );
+      committedSnapshotRef.current = reconciled;
+      dispatch({
+        type: 'snapshot-observed',
+        snapshot,
+        protectedManualBackups,
+      });
+      resolveManualBackupSyncWarning(reconciled);
+      return (
+        requiredManualBackup === null ||
+        exactManualBackupFromSnapshot(requiredManualBackup, reconciled) !== null
+      );
+    },
+    [resolveManualBackupSyncWarning],
+  );
 
   const beginOperation = useCallback((kind: DataOperationKind): OperationToken => {
     if (activeOperationRef.current) {
@@ -98,7 +183,14 @@ export function useDataManagementController({
     try {
       const snapshot = await databaseApi.getManagementSnapshot();
       if (generation !== loadGenerationRef.current) return;
-      dispatch({ type: 'load-succeeded', generation, snapshot });
+      const protectedManualBackups = protectedManualBackupsRef.current;
+      committedSnapshotRef.current = reconcileDataManagementSnapshot(
+        committedSnapshotRef.current,
+        snapshot,
+        protectedManualBackups,
+      );
+      dispatch({ type: 'load-succeeded', generation, snapshot, protectedManualBackups });
+      resolveManualBackupSyncWarning(committedSnapshotRef.current);
     } catch (error) {
       if (generation !== loadGenerationRef.current) return;
       dispatch({
@@ -107,15 +199,15 @@ export function useDataManagementController({
         message: toDataError(error, '无法读取数据管理状态，请重试。').message,
       });
     }
-  }, [databaseApi]);
+  }, [databaseApi, resolveManualBackupSyncWarning]);
 
   useEffect(() => {
     if (!databaseApi) return;
     return databaseApi.onBackupStateChange((snapshot) => {
       loadGenerationRef.current += 1;
-      dispatch({ type: 'snapshot-observed', snapshot });
+      commitObservedSnapshot(snapshot);
     });
-  }, [databaseApi]);
+  }, [commitObservedSnapshot, databaseApi]);
 
   useEffect(
     () => () => {
@@ -129,25 +221,215 @@ export function useDataManagementController({
   );
 
   const createBackup = useCallback(async (): Promise<void> => {
+    if (manualBackupSyncWarningRef.current !== null) {
+      throw new Error('上一份备份已经创建但列表尚未同步，请先重新读取，勿重复创建。');
+    }
     const operation = beginOperation('backup');
     if (!databaseApi) {
       throw failOperation(operation, null, '桌面数据桥接不可用，请重新启动应用。');
     }
+    let backup: Readonly<DatabaseBackupInfo>;
     try {
-      await databaseApi.createBackup();
-      const snapshot = await databaseApi.getManagementSnapshot();
-      loadGenerationRef.current += 1;
-      if (!finishOperation(operation)) return;
-      dispatch({
-        type: 'operation-succeeded',
-        generation: operation.generation,
-        snapshot,
-        message: '一致性备份已创建。',
-      });
+      backup = Object.freeze({ ...(await databaseApi.createBackup()) });
     } catch (error) {
       throw failOperation(operation, error, '备份创建失败；现有数据未被更改。');
     }
-  }, [beginOperation, databaseApi, failOperation, finishOperation]);
+
+    const identity = createManualBackupIdentity(backup);
+    protectManualBackup(identity);
+    const reconciliationGeneration = ++manualBackupReconciliationGenerationRef.current;
+    const isCurrent = (): boolean =>
+      reconciliationGeneration === manualBackupReconciliationGenerationRef.current;
+    let committed: boolean;
+    try {
+      const reconciliation = await reconcileManualBackupCreation({
+        backup,
+        getCommittedSnapshot: () => committedSnapshotRef.current,
+        prepareSnapshotRefresh: async () => {
+          const loadGeneration = ++loadGenerationRef.current;
+          const snapshot = await databaseApi.getManagementSnapshot();
+          return {
+            snapshot,
+            commit: () =>
+              loadGeneration === loadGenerationRef.current &&
+              isCurrent() &&
+              commitObservedSnapshot(snapshot, identity),
+          };
+        },
+        isCurrent,
+      });
+      committed = reconciliation.committed;
+    } catch {
+      committed = false;
+    }
+
+    const operationCurrent = finishOperation(operation);
+    if (!isCurrent()) {
+      if (operationCurrent) {
+        dispatch({
+          type: 'operation-succeeded',
+          generation: operation.generation,
+        });
+      }
+      return;
+    }
+    if (committed) {
+      publishManualBackupSyncWarning(null);
+      if (operationCurrent) {
+        dispatch({
+          type: 'operation-succeeded',
+          generation: operation.generation,
+          message: '一致性备份已创建。',
+        });
+      }
+      return;
+    }
+
+    publishManualBackupSyncWarning(
+      createManualBackupSyncWarning(
+        backup,
+        '备份已经创建，但当前列表未能确认这份精确备份。请重新读取；勿重复创建。',
+      ),
+    );
+    if (operationCurrent) {
+      dispatch({
+        type: 'operation-succeeded',
+        generation: operation.generation,
+      });
+    }
+  }, [
+    beginOperation,
+    commitObservedSnapshot,
+    databaseApi,
+    failOperation,
+    finishOperation,
+    protectManualBackup,
+    publishManualBackupSyncWarning,
+  ]);
+
+  const runManualBackupSyncRefresh = useCallback(async (): Promise<void> => {
+    const warning = manualBackupSyncWarningRef.current;
+    if (warning === null) return;
+    let operation: OperationToken;
+    try {
+      operation = beginOperation('backup-refresh');
+    } catch (error) {
+      const refreshError = toDataError(
+        error,
+        '另一项数据操作正在进行，请稍候再重新读取备份。',
+      ).message;
+      if (manualBackupSyncWarningRef.current?.backup.id === warning.backup.id) {
+        publishManualBackupSyncWarning({
+          ...warning,
+          refreshing: false,
+          refreshError,
+          focusActionOnMount: false,
+        });
+      }
+      throw new Error(refreshError, { cause: error });
+    }
+    publishManualBackupSyncWarning({
+      ...warning,
+      refreshing: true,
+      refreshError: null,
+      focusActionOnMount: false,
+    });
+    const reconciliationGeneration = ++manualBackupReconciliationGenerationRef.current;
+    const isCurrent = (): boolean =>
+      reconciliationGeneration === manualBackupReconciliationGenerationRef.current;
+    let committed = false;
+
+    if (databaseApi) {
+      try {
+        const reconciliation = await reconcileManualBackupCreation({
+          backup: warning.backup,
+          getCommittedSnapshot: () => committedSnapshotRef.current,
+          prepareSnapshotRefresh: async () => {
+            const loadGeneration = ++loadGenerationRef.current;
+            const snapshot = await databaseApi.getManagementSnapshot();
+            return {
+              snapshot,
+              commit: () =>
+                loadGeneration === loadGenerationRef.current &&
+                isCurrent() &&
+                commitObservedSnapshot(snapshot, warning.identity),
+            };
+          },
+          isCurrent,
+        });
+        committed = reconciliation.committed;
+      } catch {
+        committed = false;
+      }
+    }
+
+    const operationCurrent = finishOperation(operation);
+    if (!isCurrent()) {
+      if (operationCurrent) {
+        dispatch({
+          type: 'operation-succeeded',
+          generation: operation.generation,
+        });
+      }
+      return;
+    }
+    if (committed) {
+      const warningStillCurrent =
+        manualBackupSyncWarningRef.current?.backup.id === warning.backup.id;
+      if (warningStillCurrent) publishManualBackupSyncWarning(null);
+      if (operationCurrent) {
+        dispatch({
+          type: 'operation-succeeded',
+          generation: operation.generation,
+          message: '已确认刚创建的备份。',
+        });
+      }
+      return;
+    }
+
+    const refreshError = databaseApi
+      ? '重新读取后仍无法确认备份，请稍后重试；备份已经创建，请勿重复创建。'
+      : '桌面数据桥接不可用；备份已经创建，请勿重复创建，重启应用后再确认。';
+    if (isCurrent() && manualBackupSyncWarningRef.current?.backup.id === warning.backup.id) {
+      publishManualBackupSyncWarning({
+        ...warning,
+        refreshing: false,
+        refreshError,
+        focusActionOnMount: false,
+      });
+    }
+    if (operationCurrent) {
+      dispatch({
+        type: 'operation-succeeded',
+        generation: operation.generation,
+      });
+    }
+    throw new Error(refreshError);
+  }, [
+    beginOperation,
+    commitObservedSnapshot,
+    databaseApi,
+    finishOperation,
+    publishManualBackupSyncWarning,
+  ]);
+
+  const refreshManualBackupSyncWarning = useCallback((): Promise<void> => {
+    const currentTask = manualBackupRefreshTaskRef.current;
+    if (currentTask !== null) return currentTask;
+    const task = runManualBackupSyncRefresh().finally(() => {
+      if (manualBackupRefreshTaskRef.current === task) {
+        manualBackupRefreshTaskRef.current = null;
+      }
+    });
+    manualBackupRefreshTaskRef.current = task;
+    return task;
+  }, [runManualBackupSyncRefresh]);
+
+  const invalidateManualBackupRecovery = useCallback((): void => {
+    manualBackupReconciliationGenerationRef.current += 1;
+    protectedManualBackupsRef.current = [];
+    publishManualBackupSyncWarning(null);
+  }, [publishManualBackupSyncWarning]);
 
   const restoreBackup = useCallback(
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult> => {
@@ -189,17 +471,25 @@ export function useDataManagementController({
         const snapshot = await databaseApi.updateBackupPolicy(input);
         loadGenerationRef.current += 1;
         if (!finishOperation(operation)) return;
+        const protectedManualBackups = protectedManualBackupsRef.current;
+        committedSnapshotRef.current = reconcileDataManagementSnapshot(
+          committedSnapshotRef.current,
+          snapshot,
+          protectedManualBackups,
+        );
+        resolveManualBackupSyncWarning(committedSnapshotRef.current, false);
         dispatch({
           type: 'operation-succeeded',
           generation: operation.generation,
           snapshot,
+          protectedManualBackups,
           message: '自动备份策略已保存。',
         });
       } catch (error) {
         throw failOperation(operation, error, '自动备份策略保存失败，请刷新后重试。');
       }
     },
-    [beginOperation, databaseApi, failOperation, finishOperation],
+    [beginOperation, databaseApi, failOperation, finishOperation, resolveManualBackupSyncWarning],
   );
 
   const exportData = useCallback(async (): Promise<void> => {
@@ -301,8 +591,12 @@ export function useDataManagementController({
 
   return {
     state,
+    manualBackupSyncWarning,
+    manualBackupBlocked: manualBackupSyncWarning !== null,
     load,
     createBackup,
+    refreshManualBackupSyncWarning,
+    invalidateManualBackupRecovery,
     restoreBackup,
     updateBackupPolicy,
     exportData,
