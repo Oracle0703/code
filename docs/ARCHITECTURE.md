@@ -142,6 +142,8 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 
 自动备份调度是应用级单例，不跟随工作区切换。策略默认关闭，只允许每日/每周、本地分钟、可选星期和 1–90 个保留数量；策略更新使用 revision。调度器为 single-flight，并持久记录最近尝试、成功 bucket、失败码和连续失败次数。创建与保留清理都完成后才记录当前 bucket 成功；任一步失败都会按 5 分钟起、最长 6 小时的指数退避重试完整备份轮次。保留数量在执行删除的同一个数据库队列操作中重新读取，不能用已被新设置取代的旧值删除文件。保留清理只作用于 `scheduled` 备份，手动、迁移前和导入前备份不会被自动清理。
 
+手动备份调用分成两个发布阶段。`database:create-backup` 拒绝前仍是普通可重试失败；一旦 Main 返回完整 `DatabaseBackupInfo`，文件已经耐久发布，Renderer 就不能把之后的列表读取或 React 发布失败伪装成“创建失败”。Controller 冻结六字段手动身份，先检查 ref-backed committed snapshot，再最多准备两次带 generation 的权威读取；只有唯一 exact ID 的全部元数据匹配且快照 commit 成功，才发布普通成功。无法确认时，始终挂载的 App 层保留独立警告并同时锁住设置页与命令面板的手动入口；恢复读取共用 Controller task 单飞且绝不重发创建 IPC。已确认身份继续保护快照，避免同 policy revision 的迟到事件隐藏新备份；保护与警告只在备份恢复返回 `restarting` 或导入提交成功后失效，取消、失败和关闭审批本身都不清除。
+
 逻辑数据包是版本化的规范 JSON 行流，不是 SQLite 文件，也不包含 FTS 索引、自动化运行状态/occurrence、终端/浏览器/AI 会话运行时、API key 或机器相关的终端 Profile、路径与 WSL 选择。source schema v10 和 v11 都使用 `.dwbx` v3，携带自动化定义以及未取消的专注记录；v11 没有提升包格式，也不导出内部 workspace recovery revision。导入时所有自动化和未结束专注都强制暂停，并始终构建 schema v11 staging。v9 `.dwbx` v2 与 v7/v8 legacy v1 包仍可导入。Manifest 绑定源版本、记录计数和 SHA-256，解析器限制大小、记录数、字段集合和引用图。导出在文件对话框返回后立即冻结目标的“缺失或既有文件身份”，写入同目录唯一临时文件并 `fsync`；最终重命名前目标若被创建、替换或修改就拒绝覆盖，发布后再逐字回读并同步父目录。
 
 导入预览在受控隔离目录中生成 schema v11 staging 数据库，并以有时限的 opaque ID/摘要绑定确认；替换 marker 只记录受控文件名、摘要、阶段和导入前备份 ID，使启动恢复能够决定继续安装、提交或回滚。替换过程中每次文件发布和 marker 更新都同步文件与目录；缺失 marker 时只对“主数据库缺失且恰有一个受控 rollback”做自动恢复。

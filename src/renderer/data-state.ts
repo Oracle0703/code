@@ -10,6 +10,7 @@ export type DataLoadStatus = 'idle' | 'loading' | 'ready' | 'error';
 
 export type DataOperationKind =
   | 'backup'
+  | 'backup-refresh'
   | 'restore-backup'
   | 'update-policy'
   | 'export'
@@ -27,6 +28,40 @@ export interface DataFeedback {
   readonly message: string;
 }
 
+export type ManualBackupCreateIdentity = Readonly<
+  Omit<DatabaseBackupInfo, 'reason'> & {
+    readonly reason: 'manual';
+  }
+>;
+
+export interface ManualBackupSyncWarning {
+  readonly backup: DatabaseBackupInfo;
+  readonly identity: ManualBackupCreateIdentity | null;
+  readonly message: string;
+  readonly refreshing: boolean;
+  readonly refreshError: string | null;
+  readonly focusActionOnMount: boolean;
+}
+
+export interface ManualBackupSnapshotRefresh {
+  readonly snapshot: DataManagementSnapshot;
+  readonly commit: () => boolean;
+}
+
+export interface ManualBackupCreateReconciliationInput {
+  readonly backup: DatabaseBackupInfo;
+  readonly getCommittedSnapshot: () => DataManagementSnapshot | null;
+  readonly prepareSnapshotRefresh: () => Promise<ManualBackupSnapshotRefresh>;
+  readonly isCurrent: () => boolean;
+}
+
+export interface ManualBackupCreateReconciliation {
+  readonly backup: DatabaseBackupInfo;
+  readonly identity: ManualBackupCreateIdentity | null;
+  readonly committed: boolean;
+  readonly error: unknown;
+}
+
 export interface DataManagementState {
   readonly snapshot: DataManagementSnapshot | null;
   readonly loadStatus: DataLoadStatus;
@@ -42,9 +77,14 @@ export type DataManagementAction =
       readonly type: 'load-succeeded';
       readonly generation: number;
       readonly snapshot: DataManagementSnapshot;
+      readonly protectedManualBackups?: readonly ManualBackupCreateIdentity[];
     }
   | { readonly type: 'load-failed'; readonly generation: number; readonly message: string }
-  | { readonly type: 'snapshot-observed'; readonly snapshot: DataManagementSnapshot }
+  | {
+      readonly type: 'snapshot-observed';
+      readonly snapshot: DataManagementSnapshot;
+      readonly protectedManualBackups?: readonly ManualBackupCreateIdentity[];
+    }
   | {
       readonly type: 'operation-started';
       readonly operation: ActiveDataOperation;
@@ -55,6 +95,7 @@ export type DataManagementAction =
       readonly snapshot?: DataManagementSnapshot;
       readonly message?: string;
       readonly importPreview?: DataImportPreview | null;
+      readonly protectedManualBackups?: readonly ManualBackupCreateIdentity[];
     }
   | {
       readonly type: 'operation-failed';
@@ -62,6 +103,7 @@ export type DataManagementAction =
       readonly message: string;
       readonly clearImportPreview?: boolean;
     }
+  | { readonly type: 'feedback-published'; readonly feedback: DataFeedback }
   | { readonly type: 'import-preview-cleared' }
   | { readonly type: 'feedback-cleared' };
 
@@ -91,7 +133,11 @@ export function dataManagementReducer(
       if (action.generation !== state.loadGeneration) return state;
       return {
         ...state,
-        snapshot: reconcileDataManagementSnapshot(state.snapshot, action.snapshot),
+        snapshot: reconcileDataManagementSnapshot(
+          state.snapshot,
+          action.snapshot,
+          action.protectedManualBackups,
+        ),
         loadStatus: 'ready',
         feedback: null,
       };
@@ -105,7 +151,11 @@ export function dataManagementReducer(
     case 'snapshot-observed':
       return {
         ...state,
-        snapshot: reconcileDataManagementSnapshot(state.snapshot, action.snapshot),
+        snapshot: reconcileDataManagementSnapshot(
+          state.snapshot,
+          action.snapshot,
+          action.protectedManualBackups,
+        ),
         loadStatus: 'ready',
       };
     case 'operation-started':
@@ -120,7 +170,11 @@ export function dataManagementReducer(
       return {
         ...state,
         snapshot: action.snapshot
-          ? reconcileDataManagementSnapshot(state.snapshot, action.snapshot)
+          ? reconcileDataManagementSnapshot(
+              state.snapshot,
+              action.snapshot,
+              action.protectedManualBackups,
+            )
           : state.snapshot,
         loadStatus: action.snapshot ? 'ready' : state.loadStatus,
         activeOperation: null,
@@ -136,6 +190,8 @@ export function dataManagementReducer(
         importPreview: action.clearImportPreview ? null : state.importPreview,
         feedback: { tone: 'error', message: action.message },
       };
+    case 'feedback-published':
+      return { ...state, feedback: action.feedback };
     case 'import-preview-cleared':
       return { ...state, importPreview: null };
     case 'feedback-cleared':
@@ -150,11 +206,198 @@ export function canStartDataOperation(state: DataManagementState): boolean {
 export function reconcileDataManagementSnapshot(
   current: DataManagementSnapshot | null,
   incoming: DataManagementSnapshot,
+  protectedManualBackups:
+    ManualBackupCreateIdentity | readonly ManualBackupCreateIdentity[] | null = null,
 ): DataManagementSnapshot {
   if (current && incoming.schedule.policy.revision < current.schedule.policy.revision) {
     return current;
   }
-  return incoming;
+  let reconciled = incoming;
+  const protectedIdentities =
+    protectedManualBackups === null
+      ? []
+      : Array.isArray(protectedManualBackups)
+        ? protectedManualBackups
+        : [protectedManualBackups];
+  for (const protectedManualBackup of protectedIdentities) {
+    if (!current) break;
+    const protectedBackup = exactManualBackupFromSnapshot(protectedManualBackup, current);
+    if (
+      protectedBackup &&
+      exactManualBackupFromSnapshot(protectedManualBackup, reconciled) === null
+    ) {
+      const incomingIdMatches = reconciled.backups.filter(
+        ({ id }) => id === protectedManualBackup.id,
+      );
+      if (incomingIdMatches.length > 0) return current;
+      const backups = orderDatabaseBackups([...reconciled.backups, protectedBackup]);
+      reconciled = {
+        ...reconciled,
+        database: {
+          ...reconciled.database,
+          backupCount: Math.max(reconciled.database.backupCount, backups.length),
+        },
+        backups,
+      };
+    }
+  }
+  return reconciled;
+}
+
+export function createManualBackupIdentity(
+  backup: DatabaseBackupInfo,
+): ManualBackupCreateIdentity | null {
+  if (backup.reason !== 'manual') return null;
+  return Object.freeze({
+    id: backup.id,
+    fileName: backup.fileName,
+    createdAt: backup.createdAt,
+    sizeBytes: backup.sizeBytes,
+    reason: backup.reason,
+    schemaVersion: backup.schemaVersion,
+  });
+}
+
+export function createManualBackupSyncWarning(
+  backup: DatabaseBackupInfo,
+  message: string,
+): ManualBackupSyncWarning {
+  const immutableBackup = Object.freeze({ ...backup });
+  return Object.freeze({
+    backup: immutableBackup,
+    identity: createManualBackupIdentity(immutableBackup),
+    message,
+    refreshing: false,
+    refreshError: null,
+    focusActionOnMount: true,
+  });
+}
+
+export function exactManualBackupFromSnapshot(
+  identity: ManualBackupCreateIdentity | null,
+  snapshot: DataManagementSnapshot,
+): DatabaseBackupInfo | null {
+  if (identity === null) return null;
+  const matches = snapshot.backups.filter(({ id }) => id === identity.id);
+  if (matches.length !== 1) return null;
+  const candidate = matches[0]!;
+  return sameManualBackup(candidate, identity) ? candidate : null;
+}
+
+export class ManualBackupCreateIdentityError extends Error {
+  constructor() {
+    super('The created backup does not have a valid manual-backup identity.');
+    this.name = 'ManualBackupCreateIdentityError';
+  }
+}
+
+export class ManualBackupCreateUnavailableError extends Error {
+  constructor() {
+    super('The exact manual backup was not returned by the authoritative snapshot.');
+    this.name = 'ManualBackupCreateUnavailableError';
+  }
+}
+
+export class ManualBackupSnapshotCommitError extends Error {
+  constructor() {
+    super('The authoritative data-management snapshot could not be committed.');
+    this.name = 'ManualBackupSnapshotCommitError';
+  }
+}
+
+export class ManualBackupCreateSupersededError extends Error {
+  constructor() {
+    super('The manual-backup creation reconciliation is no longer current.');
+    this.name = 'ManualBackupCreateSupersededError';
+  }
+}
+
+const MANUAL_BACKUP_CREATE_REFRESH_ATTEMPTS = 2;
+
+export async function reconcileManualBackupCreation(
+  input: ManualBackupCreateReconciliationInput,
+): Promise<ManualBackupCreateReconciliation> {
+  const identity = createManualBackupIdentity(input.backup);
+  let error: unknown = identity === null ? new ManualBackupCreateIdentityError() : undefined;
+  const result = (committed: boolean): ManualBackupCreateReconciliation => ({
+    backup: input.backup,
+    identity,
+    committed,
+    error,
+  });
+  const superseded = (): ManualBackupCreateReconciliation => ({
+    backup: input.backup,
+    identity,
+    committed: false,
+    error: new ManualBackupCreateSupersededError(),
+  });
+
+  if (identity === null) return result(false);
+  if (!input.isCurrent()) return superseded();
+
+  try {
+    const committedSnapshot = input.getCommittedSnapshot();
+    if (!input.isCurrent()) return superseded();
+    if (
+      committedSnapshot !== null &&
+      exactManualBackupFromSnapshot(identity, committedSnapshot) !== null
+    ) {
+      return result(true);
+    }
+    if (committedSnapshot !== null) error = new ManualBackupCreateUnavailableError();
+  } catch (caughtError) {
+    error = caughtError;
+  }
+
+  for (let attempt = 0; attempt < MANUAL_BACKUP_CREATE_REFRESH_ATTEMPTS; attempt += 1) {
+    if (!input.isCurrent()) return superseded();
+    try {
+      const refresh = await input.prepareSnapshotRefresh();
+      if (!input.isCurrent()) return superseded();
+      if (exactManualBackupFromSnapshot(identity, refresh.snapshot) === null) {
+        error = new ManualBackupCreateUnavailableError();
+        continue;
+      }
+      if (!input.isCurrent()) return superseded();
+      const committed = refresh.commit();
+      if (!input.isCurrent()) return superseded();
+      if (committed) return result(true);
+      error = new ManualBackupSnapshotCommitError();
+    } catch (caughtError) {
+      error = caughtError;
+    }
+  }
+
+  if (!input.isCurrent()) return superseded();
+  try {
+    const committedSnapshot = input.getCommittedSnapshot();
+    if (!input.isCurrent()) return superseded();
+    if (
+      committedSnapshot !== null &&
+      exactManualBackupFromSnapshot(identity, committedSnapshot) !== null
+    ) {
+      return result(true);
+    }
+    error ??= new ManualBackupCreateUnavailableError();
+  } catch (caughtError) {
+    error = caughtError;
+  }
+  return result(false);
+}
+
+function sameManualBackup(
+  backup: DatabaseBackupInfo,
+  identity: ManualBackupCreateIdentity,
+): boolean {
+  return (
+    identity.reason === 'manual' &&
+    backup.reason === identity.reason &&
+    backup.id === identity.id &&
+    backup.fileName === identity.fileName &&
+    backup.createdAt === identity.createdAt &&
+    backup.sizeBytes === identity.sizeBytes &&
+    backup.schemaVersion === identity.schemaVersion
+  );
 }
 
 export function latestDatabaseBackup(
@@ -222,6 +465,8 @@ export function dataOperationLabel(operation: DataOperationKind | null): string 
   switch (operation) {
     case 'backup':
       return '正在创建一致性备份…';
+    case 'backup-refresh':
+      return '正在重新读取备份列表…';
     case 'restore-backup':
       return '正在验证备份并准备安全恢复…';
     case 'update-policy':
