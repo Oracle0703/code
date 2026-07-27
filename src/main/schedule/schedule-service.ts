@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
   ScheduleCreateInput,
+  ScheduleCreateResult,
   ScheduleKind,
   ScheduleSnapshot,
   ScheduleTargetInput,
@@ -76,7 +77,7 @@ export class ScheduleService {
     });
   }
 
-  create(input: ScheduleCreateInput): Promise<ScheduleSnapshot> {
+  create(input: ScheduleCreateInput): Promise<ScheduleCreateResult> {
     const workspaceId = this.#workspaceId(input?.workspaceId);
     const expectedDate = this.#expectedDate(input?.expectedDate);
     const title = this.#title(input?.title);
@@ -97,7 +98,10 @@ export class ScheduleService {
           ...range,
           timestamp,
         });
-        return schedule.readSnapshot(workspaceId, todayDate);
+        return {
+          scheduleSnapshot: schedule.readSnapshot(workspaceId, todayDate),
+          createdScheduleId: scheduleId,
+        };
       }),
     );
   }

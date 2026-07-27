@@ -34,6 +34,7 @@ import type {
   NoteSnapshot,
   NoteUpdateInput,
   ScheduleCreateInput,
+  ScheduleCreateResult,
   ScheduleSnapshot,
   ScheduleTargetInput,
   ScheduleUpdateInput,
@@ -749,7 +750,7 @@ export class DatabaseService implements TerminalPreferenceStore {
     return this.#scheduleService.getSnapshot(input);
   }
 
-  createScheduleItem(input: ScheduleCreateInput): Promise<ScheduleSnapshot> {
+  createScheduleItem(input: ScheduleCreateInput): Promise<ScheduleCreateResult> {
     return this.#scheduleService.create(input);
   }
 

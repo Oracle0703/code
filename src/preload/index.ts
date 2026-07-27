@@ -55,6 +55,7 @@ import {
   type NoteSnapshot,
   type NoteUpdateInput,
   type ScheduleCreateInput,
+  type ScheduleCreateResult,
   type ScheduleSnapshot,
   type ScheduleTargetInput,
   type ScheduleUpdateInput,
@@ -262,7 +263,7 @@ const workbenchApi: WorkbenchApi = Object.freeze({
     getSnapshot: (input: WorkspaceTargetInput) =>
       invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.getSnapshot, input),
     create: (input: ScheduleCreateInput) =>
-      invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.create, input),
+      invoke<ScheduleCreateResult>(IPC_CHANNELS.schedule.create, input),
     update: (input: ScheduleUpdateInput) =>
       invoke<ScheduleSnapshot>(IPC_CHANNELS.schedule.update, input),
     archive: (input: ScheduleTargetInput) =>

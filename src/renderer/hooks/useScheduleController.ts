@@ -1,122 +1,235 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ScheduleItem, ScheduleKind, ScheduleSnapshot } from '../../shared/contracts';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type {
+  ScheduleCreateResult,
+  ScheduleItem,
+  ScheduleKind,
+  ScheduleSnapshot,
+} from '../../shared/contracts';
 import {
+  createdScheduleFromResult,
+  createScheduleRequestIdentity,
+  createScheduleWorkspaceIdentity,
+  isScheduleRequestCurrent,
   isScheduleRequestLatest,
-  isScheduleSequenceCurrent,
   isScheduleSnapshotDateCurrent,
-  isScheduleWorkspaceCurrent,
+  reconcileScheduleCreateResult,
+  scheduleSnapshotForActivation,
+  shouldApplyScheduleSnapshot,
   sortScheduleItems,
+  type ScheduleRequestIdentity,
+  type ScheduleSnapshotState,
+  type ScheduleWorkspaceIdentity,
 } from '../schedule-state';
 import { millisecondsUntilNextLocalDay } from '../task-state';
 
 type ScheduleControllerStatus = 'loading' | 'ready' | 'error';
+
+interface ScheduleLoadState {
+  readonly activation: ScheduleWorkspaceIdentity;
+  readonly status: ScheduleControllerStatus;
+  readonly error: string | null;
+}
+
+interface ScheduleOperationError {
+  readonly activation: ScheduleWorkspaceIdentity;
+  readonly message: string;
+}
+
 const EMPTY_ITEMS: readonly ScheduleItem[] = Object.freeze([]);
+const INACTIVE_ACTIVATION = Object.freeze(createScheduleWorkspaceIdentity(null));
+const SCHEDULE_CREATE_RECONCILIATION_ERROR =
+  '日程已创建，但当前计划未能同步。请重新读取后查看，避免重复创建。';
+
+export interface ScheduleCreateCommit {
+  readonly result: ScheduleCreateResult;
+  readonly createdSchedule: ScheduleItem | null;
+  readonly committed: boolean;
+  readonly committedTodayDate: string | null;
+  readonly reconciliationWarning: string | null;
+}
 
 export function useScheduleController(workspaceId: string | null) {
-  const [storedSnapshot, setStoredSnapshot] = useState<ScheduleSnapshot | null>(null);
-  const [status, setStatus] = useState<ScheduleControllerStatus>('loading');
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [operationErrorState, setOperationErrorState] = useState<{
-    readonly workspaceId: string;
-    readonly message: string;
-  } | null>(null);
-  const [pendingItemIds, setPendingItemIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [pendingCreateWorkspaces, setPendingCreateWorkspaces] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  const activation = useMemo(() => createScheduleWorkspaceIdentity(workspaceId), [workspaceId]);
+  const activeActivationRef = useRef<ScheduleWorkspaceIdentity>(activation);
+  const [storedSnapshot, setStoredSnapshot] = useState<ScheduleSnapshotState | null>(null);
+  const storedSnapshotRef = useRef<ScheduleSnapshotState | null>(null);
+  const [loadState, setLoadState] = useState<ScheduleLoadState>({
+    activation,
+    status: 'loading',
+    error: null,
+  });
+  const [operationErrorState, setOperationErrorState] = useState<ScheduleOperationError | null>(
+    null,
   );
-  const activeWorkspaceRef = useRef(workspaceId);
-  const storedSnapshotRef = useRef<ScheduleSnapshot | null>(null);
+  const [pendingItemOperations, setPendingItemOperations] = useState<
+    ReadonlyMap<string, ScheduleWorkspaceIdentity>
+  >(() => new Map());
+  const [pendingCreateActivations, setPendingCreateActivations] = useState<
+    ReadonlySet<ScheduleWorkspaceIdentity>
+  >(() => new Set());
   const requestSequenceRef = useRef(0);
-  const latestRequestSequenceRef = useRef(new Map<string, number>());
-  const appliedSequenceRef = useRef(new Map<string, number>());
-  const pendingItemIdsRef = useRef(new Set<string>());
-  const pendingCreateWorkspacesRef = useRef(new Set<string>());
+  const latestRequestSequenceRef = useRef(-1);
+  const appliedSequenceRef = useRef(-1);
+  const pendingItemOperationsRef = useRef(new Map<string, ScheduleWorkspaceIdentity>());
+  const pendingCreateActivationsRef = useRef(new Set<ScheduleWorkspaceIdentity>());
 
-  const beginRequest = useCallback((targetWorkspaceId: string): number => {
-    const sequence = ++requestSequenceRef.current;
-    latestRequestSequenceRef.current.set(targetWorkspaceId, sequence);
-    return sequence;
+  const setStored = useCallback((value: ScheduleSnapshotState | null) => {
+    storedSnapshotRef.current = value;
+    setStoredSnapshot(value);
   }, []);
 
-  const applySnapshot = useCallback((snapshot: ScheduleSnapshot, sequence: number): boolean => {
-    if (!isScheduleSnapshotDateCurrent(snapshot, new Date())) return false;
-    const lastApplied = appliedSequenceRef.current.get(snapshot.workspaceId) ?? -1;
-    if (!isScheduleSequenceCurrent(sequence, lastApplied)) return false;
-    appliedSequenceRef.current.set(snapshot.workspaceId, sequence);
-    if (!isScheduleWorkspaceCurrent(activeWorkspaceRef.current, snapshot)) return false;
-    storedSnapshotRef.current = snapshot;
-    setStoredSnapshot(snapshot);
-    setStatus('ready');
-    setLoadError(null);
-    return true;
-  }, []);
+  const beginRequest = useCallback(
+    (target: ScheduleWorkspaceIdentity): ScheduleRequestIdentity | null => {
+      if (target.workspaceId === null) return null;
+      const sequence = ++requestSequenceRef.current;
+      latestRequestSequenceRef.current = sequence;
+      return createScheduleRequestIdentity(target, sequence);
+    },
+    [],
+  );
+
+  const requestIsCurrent = useCallback(
+    (request: ScheduleRequestIdentity): boolean =>
+      isScheduleRequestCurrent(activeActivationRef.current, request),
+    [],
+  );
+
+  const applySnapshot = useCallback(
+    (snapshot: ScheduleSnapshot, request: ScheduleRequestIdentity): boolean => {
+      if (
+        !shouldApplyScheduleSnapshot(
+          activeActivationRef.current,
+          appliedSequenceRef.current,
+          request,
+          snapshot,
+          new Date(),
+        )
+      ) {
+        return false;
+      }
+      appliedSequenceRef.current = request.sequence;
+      setStored({ activation: request.workspace, snapshot });
+      setLoadState({
+        activation: request.workspace,
+        status: 'ready',
+        error: null,
+      });
+      return true;
+    },
+    [setStored],
+  );
 
   const load = useCallback(
-    async (targetWorkspaceId: string): Promise<void> => {
-      const sequence = beginRequest(targetWorkspaceId);
-      if (activeWorkspaceRef.current === targetWorkspaceId) {
-        setStatus('loading');
-        setLoadError(null);
+    async (target: ScheduleWorkspaceIdentity): Promise<void> => {
+      const request = beginRequest(target);
+      if (!request) return;
+      if (requestIsCurrent(request)) {
+        setLoadState({
+          activation: request.workspace,
+          status: 'loading',
+          error: null,
+        });
       }
       try {
-        applySnapshot(
-          await window.workbench.schedule.getSnapshot({ workspaceId: targetWorkspaceId }),
-          sequence,
-        );
+        const snapshot = await window.workbench.schedule.getSnapshot({
+          workspaceId: request.workspaceId,
+        });
+        applySnapshot(snapshot, request);
       } catch (error) {
-        const latestRequested = latestRequestSequenceRef.current.get(targetWorkspaceId) ?? -1;
         if (
-          isScheduleRequestLatest(sequence, latestRequested) &&
-          activeWorkspaceRef.current === targetWorkspaceId
+          requestIsCurrent(request) &&
+          isScheduleRequestLatest(request.sequence, latestRequestSequenceRef.current)
         ) {
-          storedSnapshotRef.current = null;
-          setStoredSnapshot(null);
-          setStatus('error');
-          setLoadError(toMessage(error, '今日日程暂时无法读取。'));
+          setStored(null);
+          setLoadState({
+            activation: request.workspace,
+            status: 'error',
+            error: toMessage(error, '今日日程暂时无法读取。'),
+          });
         }
+        throw error;
       }
     },
-    [applySnapshot, beginRequest],
+    [applySnapshot, beginRequest, requestIsCurrent, setStored],
   );
 
-  useEffect(() => {
-    activeWorkspaceRef.current = workspaceId;
-    if (workspaceId) void load(workspaceId);
-  }, [load, workspaceId]);
+  const prepareSnapshotRefresh = useCallback(async () => {
+    const target = activeActivationRef.current;
+    const request = beginRequest(target);
+    if (!request) throw new Error('当前工作区不可用，无法读取日程。');
+    const snapshot = await window.workbench.schedule.getSnapshot({
+      workspaceId: request.workspaceId,
+    });
+    return {
+      snapshot,
+      commit: () =>
+        isScheduleRequestLatest(request.sequence, latestRequestSequenceRef.current) &&
+        applySnapshot(snapshot, request),
+    };
+  }, [applySnapshot, beginRequest]);
+
+  useLayoutEffect(() => {
+    activeActivationRef.current = activation;
+    return () => {
+      if (activeActivationRef.current === activation) {
+        activeActivationRef.current = INACTIVE_ACTIVATION;
+      }
+    };
+  }, [activation]);
 
   useEffect(() => {
-    if (!workspaceId) return;
+    if (activation.workspaceId !== null && activeActivationRef.current === activation) {
+      void load(activation).catch(() => undefined);
+    }
+  }, [activation, load]);
+
+  useEffect(() => {
+    if (activation.workspaceId === null) return;
     let timeout = 0;
+
     const scheduleRollover = () => {
       window.clearTimeout(timeout);
       timeout = window.setTimeout(() => {
+        if (activeActivationRef.current !== activation) return;
         const current = storedSnapshotRef.current;
-        if (current && !isScheduleSnapshotDateCurrent(current, new Date())) {
-          storedSnapshotRef.current = null;
-          setStoredSnapshot(null);
-          setStatus('loading');
-          setLoadError(null);
+        if (
+          current?.activation === activation &&
+          !isScheduleSnapshotDateCurrent(current.snapshot, new Date())
+        ) {
+          setStored(null);
+          setLoadState({
+            activation,
+            status: 'loading',
+            error: null,
+          });
         }
-        void load(workspaceId);
+        void load(activation).catch(() => undefined);
         scheduleRollover();
       }, millisecondsUntilNextLocalDay(new Date()));
     };
     const refreshIfDateChanged = () => {
+      if (activeActivationRef.current !== activation) return;
       const current = storedSnapshotRef.current;
-      if (!current || !isScheduleSnapshotDateCurrent(current, new Date())) {
-        if (current) {
-          storedSnapshotRef.current = null;
-          setStoredSnapshot(null);
-          setStatus('loading');
-          setLoadError(null);
+      if (
+        current?.activation !== activation ||
+        !isScheduleSnapshotDateCurrent(current.snapshot, new Date())
+      ) {
+        if (current?.activation === activation) {
+          setStored(null);
+          setLoadState({
+            activation,
+            status: 'loading',
+            error: null,
+          });
         }
-        void load(workspaceId);
+        void load(activation).catch(() => undefined);
       }
       scheduleRollover();
     };
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') refreshIfDateChanged();
     };
+
     scheduleRollover();
     window.addEventListener('focus', refreshIfDateChanged);
     document.addEventListener('visibilitychange', handleVisibility);
@@ -125,42 +238,49 @@ export function useScheduleController(workspaceId: string | null) {
       window.removeEventListener('focus', refreshIfDateChanged);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [load, workspaceId]);
+  }, [activation, load, setStored]);
 
-  const beginPendingItem = useCallback((itemId: string): boolean => {
-    if (pendingItemIdsRef.current.has(itemId)) return false;
-    pendingItemIdsRef.current = new Set(pendingItemIdsRef.current).add(itemId);
-    setPendingItemIds(pendingItemIdsRef.current);
-    return true;
-  }, []);
+  const beginPendingItem = useCallback(
+    (target: ScheduleWorkspaceIdentity, itemId: string): boolean => {
+      if (pendingItemOperationsRef.current.get(itemId) === target) return false;
+      pendingItemOperationsRef.current = new Map(pendingItemOperationsRef.current).set(
+        itemId,
+        target,
+      );
+      setPendingItemOperations(pendingItemOperationsRef.current);
+      return true;
+    },
+    [],
+  );
 
-  const endPendingItem = useCallback((itemId: string): void => {
-    const next = new Set(pendingItemIdsRef.current);
+  const endPendingItem = useCallback((target: ScheduleWorkspaceIdentity, itemId: string): void => {
+    if (pendingItemOperationsRef.current.get(itemId) !== target) return;
+    const next = new Map(pendingItemOperationsRef.current);
     next.delete(itemId);
-    pendingItemIdsRef.current = next;
-    setPendingItemIds(next);
+    pendingItemOperationsRef.current = next;
+    setPendingItemOperations(next);
   }, []);
 
-  const beginPendingCreate = useCallback((targetWorkspaceId: string): boolean => {
-    if (pendingCreateWorkspacesRef.current.has(targetWorkspaceId)) return false;
-    pendingCreateWorkspacesRef.current = new Set(pendingCreateWorkspacesRef.current).add(
-      targetWorkspaceId,
-    );
-    setPendingCreateWorkspaces(pendingCreateWorkspacesRef.current);
+  const beginPendingCreate = useCallback((target: ScheduleWorkspaceIdentity): boolean => {
+    if (pendingCreateActivationsRef.current.has(target)) return false;
+    pendingCreateActivationsRef.current = new Set(pendingCreateActivationsRef.current).add(target);
+    setPendingCreateActivations(pendingCreateActivationsRef.current);
     return true;
   }, []);
 
-  const endPendingCreate = useCallback((targetWorkspaceId: string): void => {
-    const next = new Set(pendingCreateWorkspacesRef.current);
-    next.delete(targetWorkspaceId);
-    pendingCreateWorkspacesRef.current = next;
-    setPendingCreateWorkspaces(next);
+  const endPendingCreate = useCallback((target: ScheduleWorkspaceIdentity): void => {
+    const next = new Set(pendingCreateActivationsRef.current);
+    next.delete(target);
+    pendingCreateActivationsRef.current = next;
+    setPendingCreateActivations(next);
   }, []);
 
   const operationFailure = useCallback(
-    (error: unknown, targetWorkspaceId: string, fallback: string): Error => {
+    (error: unknown, target: ScheduleWorkspaceIdentity, fallback: string): Error => {
       const message = toMessage(error, fallback);
-      setOperationErrorState({ workspaceId: targetWorkspaceId, message });
+      if (activeActivationRef.current === target) {
+        setOperationErrorState({ activation: target, message });
+      }
       return new Error(message, { cause: error });
     },
     [],
@@ -173,36 +293,91 @@ export function useScheduleController(workspaceId: string | null) {
       kind: ScheduleKind,
       startMinute: number,
       endMinute: number,
-    ): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingCreate(targetWorkspaceId)) {
+    ): Promise<ScheduleCreateCommit> => {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingCreate(target)) {
         throw new Error('这个工作区正在创建另一条日程。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingCreate(target);
+        throw new Error('当前工作区不可用，无法创建日程。');
+      }
       setOperationErrorState(null);
       try {
-        applySnapshot(
-          await window.workbench.schedule.create({
-            workspaceId: targetWorkspaceId,
+        let result: ScheduleCreateResult;
+        try {
+          result = await window.workbench.schedule.create({
+            workspaceId: request.workspaceId,
             expectedDate,
             title,
             kind,
             startMinute,
             endMinute,
-          }),
-          sequence,
+          });
+        } catch (error) {
+          throw operationFailure(
+            error,
+            request.workspace,
+            '日程创建失败；如果日期已经变化，请刷新后重试。',
+          );
+        }
+
+        const reconciliation = await reconcileScheduleCreateResult({
+          expectedWorkspaceId: request.workspaceId,
+          expectedScheduledFor: expectedDate,
+          result,
+          commitResultSnapshot: () => applySnapshot(result.scheduleSnapshot, request),
+          getCommittedSchedule: () => {
+            const currentSnapshot = scheduleSnapshotForActivation(
+              request.workspace,
+              storedSnapshotRef.current,
+              new Date(),
+            );
+            return currentSnapshot
+              ? createdScheduleFromResult(request.workspaceId, expectedDate, {
+                  scheduleSnapshot: currentSnapshot,
+                  createdScheduleId: result.createdScheduleId,
+                })
+              : null;
+          },
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
+        });
+        const committedSnapshot = scheduleSnapshotForActivation(
+          request.workspace,
+          storedSnapshotRef.current,
+          new Date(),
         );
-      } catch (error) {
-        throw operationFailure(
-          error,
-          targetWorkspaceId,
-          '日程创建失败；如果日期已经变化，请刷新后重试。',
-        );
+        const committedSchedule = committedSnapshot
+          ? createdScheduleFromResult(request.workspaceId, expectedDate, {
+              scheduleSnapshot: committedSnapshot,
+              createdScheduleId: result.createdScheduleId,
+            })
+          : null;
+        const committed = reconciliation.committed && committedSchedule !== null;
+
+        return {
+          result,
+          createdSchedule: committedSchedule ?? reconciliation.createdSchedule,
+          committed,
+          committedTodayDate: committed ? committedSnapshot!.todayDate : null,
+          reconciliationWarning:
+            !committed && requestIsCurrent(request) ? SCHEDULE_CREATE_RECONCILIATION_ERROR : null,
+        };
       } finally {
-        endPendingCreate(targetWorkspaceId);
+        endPendingCreate(request.workspace);
       }
     },
-    [applySnapshot, beginPendingCreate, beginRequest, endPendingCreate, operationFailure],
+    [
+      applySnapshot,
+      beginPendingCreate,
+      beginRequest,
+      endPendingCreate,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
   );
 
   const update = useCallback(
@@ -214,16 +389,20 @@ export function useScheduleController(workspaceId: string | null) {
       startMinute: number,
       endMinute: number,
     ): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingItem(item.id)) {
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingItem(target, item.id)) {
         throw new Error('这条日程正在保存。');
       }
-      const sequence = beginRequest(targetWorkspaceId);
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingItem(target, item.id);
+        throw new Error('当前工作区不可用，无法保存日程。');
+      }
       setOperationErrorState(null);
       try {
         applySnapshot(
           await window.workbench.schedule.update({
-            workspaceId: targetWorkspaceId,
+            workspaceId: request.workspaceId,
             scheduleId: item.id,
             expectedDate,
             expectedRevision: item.revision,
@@ -232,16 +411,16 @@ export function useScheduleController(workspaceId: string | null) {
             startMinute,
             endMinute,
           }),
-          sequence,
+          request,
         );
       } catch (error) {
         throw operationFailure(
           error,
-          targetWorkspaceId,
+          request.workspace,
           '日程保存失败，可能已经跨日或在其他操作中更新。',
         );
       } finally {
-        endPendingItem(item.id);
+        endPendingItem(request.workspace, item.id);
       }
     },
     [applySnapshot, beginPendingItem, beginRequest, endPendingItem, operationFailure],
@@ -249,62 +428,81 @@ export function useScheduleController(workspaceId: string | null) {
 
   const archive = useCallback(
     async (item: ScheduleItem, expectedDate: string): Promise<void> => {
-      const targetWorkspaceId = activeWorkspaceRef.current;
-      if (!targetWorkspaceId || !beginPendingItem(item.id)) return;
-      const sequence = beginRequest(targetWorkspaceId);
+      const target = activeActivationRef.current;
+      if (target.workspaceId === null || !beginPendingItem(target, item.id)) return;
+      const request = beginRequest(target);
+      if (!request) {
+        endPendingItem(target, item.id);
+        return;
+      }
       setOperationErrorState(null);
       try {
         applySnapshot(
           await window.workbench.schedule.archive({
-            workspaceId: targetWorkspaceId,
+            workspaceId: request.workspaceId,
             scheduleId: item.id,
             expectedDate,
             expectedRevision: item.revision,
           }),
-          sequence,
+          request,
         );
       } catch (error) {
         throw operationFailure(
           error,
-          targetWorkspaceId,
+          request.workspace,
           '日程归档失败，可能已经跨日或在其他操作中更新。',
         );
       } finally {
-        endPendingItem(item.id);
+        endPendingItem(request.workspace, item.id);
       }
     },
     [applySnapshot, beginPendingItem, beginRequest, endPendingItem, operationFailure],
   );
 
-  const snapshot =
-    storedSnapshot?.workspaceId === workspaceId &&
-    workspaceId !== null &&
-    isScheduleSnapshotDateCurrent(storedSnapshot, new Date())
-      ? storedSnapshot
-      : null;
+  const snapshot = scheduleSnapshotForActivation(activation, storedSnapshot, new Date());
+  const visibleLoadState =
+    loadState.activation === activation && !(loadState.status === 'ready' && snapshot === null)
+      ? loadState
+      : {
+          activation,
+          status: 'loading' as const,
+          error: null,
+        };
   const items = useMemo(
     () => (snapshot ? sortScheduleItems(snapshot.items) : EMPTY_ITEMS),
     [snapshot],
   );
+  const pendingItemIds = useMemo(
+    () =>
+      new Set(
+        [...pendingItemOperations]
+          .filter(([, target]) => target === activation)
+          .map(([itemId]) => itemId),
+      ),
+    [activation, pendingItemOperations],
+  );
 
   return {
+    activation,
     snapshot,
     items,
-    status:
-      snapshot !== null
-        ? ('ready' as const)
-        : storedSnapshot !== null
-          ? ('loading' as const)
-          : status,
-    loadError,
+    status: snapshot !== null ? ('ready' as const) : visibleLoadState.status,
+    loadError: visibleLoadState.error,
     operationError:
-      operationErrorState?.workspaceId === workspaceId ? operationErrorState.message : null,
+      operationErrorState?.activation === activation ? operationErrorState.message : null,
     pendingItemIds,
-    pendingCreate: workspaceId ? pendingCreateWorkspaces.has(workspaceId) : false,
-    retry: () => {
-      if (workspaceId) void load(workspaceId);
+    pendingCreate: pendingCreateActivations.has(activation),
+    refresh: async () => {
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) await load(current);
     },
-    clearOperationError: () => setOperationErrorState(null),
+    prepareSnapshotRefresh,
+    retry: () => {
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== null) void load(current).catch(() => undefined);
+    },
+    clearOperationError: () =>
+      setOperationErrorState((current) => (current?.activation === activation ? null : current)),
     create,
     update,
     archive,

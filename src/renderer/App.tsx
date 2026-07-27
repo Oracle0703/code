@@ -48,6 +48,7 @@ import {
   type DatabaseBackupRestoreInput,
   type DatabaseBackupRestoreResult,
   type InboxEntry,
+  type ScheduleKind,
   type SearchResult,
   type TaskPlanning,
 } from '../shared/contracts';
@@ -76,6 +77,8 @@ import { InboxPage } from './components/InboxPage';
 import { InboxUndoStack } from './components/InboxUndoStack';
 import { NotePage } from './components/NotePage';
 import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickCaptureDialog';
+import { ScheduleCreateSyncWarning } from './components/ScheduleCreateSyncWarning';
+import { ScheduleCreateToast } from './components/ScheduleCreateToast';
 import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
 import { SettingsPage, type SettingsSection } from './components/SettingsPage';
 import { TaskCreateSyncWarning } from './components/TaskCreateSyncWarning';
@@ -150,6 +153,21 @@ import {
   type AutomationWorkspaceIdentity,
 } from './automation-state';
 import type { AppSurfaceId } from './model';
+import {
+  createScheduleCreateWorkspaceIdentity,
+  isScheduleCreateTodayDateCurrent,
+  resolveScheduleCreateNavigationTarget,
+  ScheduleCreateCoordinator,
+  ScheduleCreateNoteDraftPreservedError,
+  ScheduleCreatePublicationGate,
+  ScheduleCreateSupersededError,
+  ScheduleCreateSyncRefreshError,
+  ScheduleCreateUnavailableError,
+  scheduleCreateNavigationError,
+  scheduleCreateSyncRefreshError,
+  type ScheduleCreateFeedback,
+  type ScheduleCreateWorkspaceIdentity,
+} from './schedule-create-navigation';
 import { defaultScheduleRangeForPlanningDate } from './schedule-state';
 import {
   SearchNavigationCoordinator,
@@ -239,9 +257,38 @@ interface AutomationCreateSyncWarningState {
   readonly message: string;
 }
 
+interface ScheduleCreateSyncWarningState {
+  readonly activation: ScheduleCreateWorkspaceIdentity;
+  readonly requestGeneration: number;
+  readonly createdScheduleId: string;
+  readonly title: string;
+  readonly scheduledFor: string;
+  readonly startMinute: number;
+  readonly endMinute: number;
+  readonly message: string;
+}
+
+type ScheduleCreatePublication =
+  | {
+      readonly kind: 'feedback';
+      readonly activation: ScheduleCreateWorkspaceIdentity;
+      readonly feedback: ScheduleCreateFeedback;
+      readonly todayDate: string;
+    }
+  | {
+      readonly kind: 'warning';
+      readonly warning: ScheduleCreateSyncWarningState;
+    };
+
 function focusAutomationActivityRailAnchor(): void {
   document
     .querySelector<HTMLButtonElement>('.activity-rail button[aria-label="自动化"]')
+    ?.focus({ preventScroll: true });
+}
+
+function focusTodayActivityRailAnchor(): void {
+  document
+    .querySelector<HTMLButtonElement>('.activity-rail button[aria-label="今日"]')
     ?.focus({ preventScroll: true });
 }
 
@@ -306,6 +353,12 @@ export function App() {
     readonly title: string;
     readonly message: string;
   } | null>(null);
+  const [scheduleCreateFeedbackState, setScheduleCreateFeedbackState] = useState<{
+    readonly activation: ScheduleCreateWorkspaceIdentity;
+    readonly feedback: ScheduleCreateFeedback;
+  } | null>(null);
+  const [scheduleCreateSyncWarningState, setScheduleCreateSyncWarningState] =
+    useState<ScheduleCreateSyncWarningState | null>(null);
   const [automationCreateFeedbackState, setAutomationCreateFeedbackState] = useState<{
     readonly activation: AutomationCreateWorkspaceIdentity;
     readonly feedback: AutomationCreateFeedback;
@@ -323,6 +376,10 @@ export function App() {
   const [automationOutputNavigation] = useState(() => new AutomationOutputNavigationCoordinator());
   const [inboxCaptureCoordinator] = useState(() => new InboxCaptureCoordinator());
   const [taskCreateCoordinator] = useState(() => new TaskCreateCoordinator());
+  const [scheduleCreateCoordinator] = useState(() => new ScheduleCreateCoordinator());
+  const [scheduleCreatePublicationGate] = useState(
+    () => new ScheduleCreatePublicationGate<ScheduleCreatePublication>(),
+  );
   const [automationCreateCoordinator] = useState(() => new AutomationCreateCoordinator());
   const [inboxConversionRequestCoordinator] = useState(
     () => new InboxConversionRequestCoordinator(),
@@ -362,6 +419,11 @@ export function App() {
   );
   const taskCreateFeedbackRef = useRef<TaskCreateFeedback | null>(null);
   const taskCreateSurfaceRef = useRef<AppSurfaceId>('today');
+  const scheduleCreateActivationRef = useRef<ScheduleCreateWorkspaceIdentity>(
+    createScheduleCreateWorkspaceIdentity(null),
+  );
+  const scheduleCreateFeedbackRef = useRef<ScheduleCreateFeedback | null>(null);
+  const scheduleCreateSurfaceRef = useRef<AppSurfaceId>('today');
   const automationCreateActivationRef = useRef<AutomationCreateWorkspaceIdentity>(
     createAutomationCreateWorkspaceIdentity(null),
   );
@@ -402,6 +464,10 @@ export function App() {
     () => createTaskCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
   );
+  const scheduleCreateActivation = useMemo(
+    () => createScheduleCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
+    [snapshot?.currentWorkspaceId],
+  );
   const automationCreateActivation = useMemo(
     () => createAutomationCreateWorkspaceIdentity(snapshot?.currentWorkspaceId ?? null),
     [snapshot?.currentWorkspaceId],
@@ -435,6 +501,14 @@ export function App() {
   const visibleTaskCreateSyncWarning =
     taskCreateSyncWarningState?.activation === taskCreateActivation
       ? taskCreateSyncWarningState
+      : null;
+  const visibleScheduleCreateFeedback =
+    scheduleCreateFeedbackState?.activation === scheduleCreateActivation
+      ? scheduleCreateFeedbackState.feedback
+      : null;
+  const visibleScheduleCreateSyncWarning =
+    scheduleCreateSyncWarningState?.activation === scheduleCreateActivation
+      ? scheduleCreateSyncWarningState
       : null;
   const visibleAutomationCreateFeedback =
     automationCreateFeedbackState?.activation === automationCreateActivation
@@ -590,6 +664,53 @@ export function App() {
     setAutomationCreateFeedbackState(null);
     setAutomationCreateSyncWarningState(null);
   }, [automationCreateCoordinator]);
+  const invalidateScheduleCreate = useCallback((): void => {
+    scheduleCreateCoordinator.invalidate();
+    scheduleCreatePublicationGate.clear();
+    scheduleCreateFeedbackRef.current = null;
+    setScheduleCreateFeedbackState(null);
+    setScheduleCreateSyncWarningState(null);
+  }, [scheduleCreateCoordinator, scheduleCreatePublicationGate]);
+  const closeScheduleDialog = useCallback((): void => {
+    setScheduleDialog(null);
+    const activation = scheduleCreateActivationRef.current;
+    const publication = scheduleCreatePublicationGate.take(false, activation);
+    if (publication === null) return;
+
+    const requestGeneration =
+      publication.kind === 'feedback'
+        ? publication.feedback.requestGeneration
+        : publication.warning.requestGeneration;
+    const publicationActivation =
+      publication.kind === 'feedback' ? publication.activation : publication.warning.activation;
+    if (!scheduleCreateCoordinator.isGenerationCurrent(requestGeneration, publicationActivation)) {
+      return;
+    }
+
+    if (publication.kind === 'feedback') {
+      if (!isScheduleCreateTodayDateCurrent(publication.todayDate, new Date())) {
+        setScheduleCreateSyncWarningState({
+          activation: publication.activation,
+          requestGeneration: publication.feedback.requestGeneration,
+          createdScheduleId: publication.feedback.createdScheduleId,
+          title: publication.feedback.title,
+          scheduledFor: publication.feedback.scheduledFor,
+          startMinute: publication.feedback.startMinute,
+          endMinute: publication.feedback.endMinute,
+          message:
+            '日程已创建，但日期窗口已经变化，当前计划未能安全确认。请重新读取后查看，避免重复创建。',
+        });
+        return;
+      }
+      scheduleCreateFeedbackRef.current = publication.feedback;
+      setScheduleCreateFeedbackState({
+        activation: publication.activation,
+        feedback: publication.feedback,
+      });
+      return;
+    }
+    setScheduleCreateSyncWarningState(publication.warning);
+  }, [scheduleCreateCoordinator, scheduleCreatePublicationGate]);
   useLayoutEffect(() => {
     automationOutputActivationRef.current = automationOutputActivation;
     automationRunFeedbackRef.current = automationController.runFeedback;
@@ -659,6 +780,25 @@ export function App() {
     invalidateAutomationCreate,
     overlayOpen,
     visibleAutomationCreateFeedback,
+  ]);
+  useLayoutEffect(() => {
+    const previousActivation = scheduleCreateActivationRef.current;
+    const previousSurface = scheduleCreateSurfaceRef.current;
+    scheduleCreateActivationRef.current = scheduleCreateActivation;
+    scheduleCreateFeedbackRef.current = visibleScheduleCreateFeedback;
+    scheduleCreateSurfaceRef.current = activeSurface;
+    if (previousActivation !== scheduleCreateActivation) {
+      invalidateScheduleCreate();
+    } else if (previousSurface !== activeSurface || overlayOpen) {
+      scheduleCreateCoordinator.cancelOpen();
+    }
+  }, [
+    activeSurface,
+    invalidateScheduleCreate,
+    overlayOpen,
+    scheduleCreateActivation,
+    scheduleCreateCoordinator,
+    visibleScheduleCreateFeedback,
   ]);
   useLayoutEffect(() => {
     const previousActivation = inboxConversionActivationRef.current;
@@ -752,6 +892,7 @@ export function App() {
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
       if (!confirmLeaveNoteDraft()) return null;
       invalidateAutomationCreate();
+      invalidateScheduleCreate();
       dataReplacementApprovedRef.current = true;
       dataReplacementNoteDiscardApprovedRef.current = true;
       try {
@@ -767,13 +908,14 @@ export function App() {
         throw error;
       }
     },
-    [confirmLeaveNoteDraft, invalidateAutomationCreate, restoreBackup],
+    [confirmLeaveNoteDraft, invalidateAutomationCreate, invalidateScheduleCreate, restoreBackup],
   );
   const requestActiveView = useCallback(
     (view: AppSurfaceId) => {
       if (view === activeSurface || !confirmLeaveNoteDraft()) return;
       automationOutputNavigation.invalidate();
       automationCreateCoordinator.cancelOpen();
+      scheduleCreateCoordinator.cancelOpen();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.cancelOpen();
       taskCreateCoordinator.cancelOpen();
@@ -798,6 +940,7 @@ export function App() {
       inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
+      scheduleCreateCoordinator,
       taskCreateCoordinator,
       updatePreferences,
     ],
@@ -806,6 +949,7 @@ export function App() {
     (context: AssistantContextReference) => {
       if (!activeWorkspace || !confirmLeaveNoteDraft()) return;
       automationCreateCoordinator.cancelOpen();
+      scheduleCreateCoordinator.cancelOpen();
       inboxCaptureCoordinator.cancelOpen();
       inboxConversionNavigation.invalidate();
       inboxConversionRequestCoordinator.invalidate();
@@ -823,6 +967,7 @@ export function App() {
       inboxCaptureCoordinator,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
+      scheduleCreateCoordinator,
     ],
   );
   const openTerminalSettings = useCallback(() => {
@@ -840,6 +985,7 @@ export function App() {
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
       invalidateAutomationCreate();
+      invalidateScheduleCreate();
       assistantSavedNoteNavigation.invalidate();
       inboxCaptureCoordinator.invalidate();
       taskCreateCoordinator.invalidate();
@@ -857,6 +1003,7 @@ export function App() {
       searchNavigation,
       taskCreateCoordinator,
       invalidateAutomationCreate,
+      invalidateScheduleCreate,
       workspaceController,
     ],
   );
@@ -1267,6 +1414,278 @@ export function App() {
       workspaceController.pendingOperation,
       workspaceDialog,
     ],
+  );
+
+  const createManualSchedule = useCallback(
+    async (
+      workspaceId: string,
+      expectedDate: string,
+      title: string,
+      kind: ScheduleKind,
+      startMinute: number,
+      endMinute: number,
+    ): Promise<void> => {
+      const activation = scheduleCreateActivationRef.current;
+      const intent = scheduleCreateCoordinator.beginCreate(activation);
+      scheduleCreatePublicationGate.clear();
+      scheduleCreateFeedbackRef.current = null;
+      setScheduleCreateFeedbackState(null);
+      setScheduleCreateSyncWarningState(null);
+      try {
+        if (activation.workspaceId !== workspaceId) {
+          throw new ScheduleCreateSupersededError();
+        }
+        const commit = await scheduleController.create(
+          expectedDate,
+          title,
+          kind,
+          startMinute,
+          endMinute,
+        );
+        if (
+          !scheduleCreateCoordinator.isCreateCurrent(intent, scheduleCreateActivationRef.current)
+        ) {
+          return;
+        }
+        if (
+          !commit.committed ||
+          commit.createdSchedule === null ||
+          commit.committedTodayDate === null
+        ) {
+          if (commit.reconciliationWarning) {
+            scheduleCreatePublicationGate.stage(intent.workspace, {
+              kind: 'warning',
+              warning: {
+                activation: intent.workspace,
+                requestGeneration: intent.generation,
+                createdScheduleId: commit.result.createdScheduleId,
+                title: commit.createdSchedule?.title ?? title,
+                scheduledFor: commit.createdSchedule?.scheduledFor ?? expectedDate,
+                startMinute: commit.createdSchedule?.startMinute ?? startMinute,
+                endMinute: commit.createdSchedule?.endMinute ?? endMinute,
+                message: commit.reconciliationWarning,
+              },
+            });
+          }
+          return;
+        }
+        const feedback = scheduleCreateCoordinator.createFeedback(
+          intent,
+          scheduleCreateActivationRef.current,
+          commit.createdSchedule,
+          true,
+        );
+        scheduleCreatePublicationGate.stage(intent.workspace, {
+          kind: 'feedback',
+          activation: intent.workspace,
+          feedback,
+          todayDate: commit.committedTodayDate,
+        });
+      } catch (error) {
+        if (
+          !scheduleCreateCoordinator.isCreateCurrent(intent, scheduleCreateActivationRef.current) ||
+          error instanceof ScheduleCreateSupersededError
+        ) {
+          return;
+        }
+        throw error;
+      } finally {
+        scheduleCreateCoordinator.endCreate(intent);
+      }
+    },
+    [scheduleController, scheduleCreateCoordinator, scheduleCreatePublicationGate],
+  );
+
+  const openCreatedSchedule = useCallback(
+    async (feedback: ScheduleCreateFeedback): Promise<void> => {
+      searchNavigation.invalidate();
+      automationOutputNavigation.invalidate();
+      automationCreateCoordinator.cancelOpen();
+      assistantSavedNoteNavigation.invalidate();
+      inboxCaptureCoordinator.cancelOpen();
+      taskCreateCoordinator.cancelOpen();
+      inboxConversionNavigation.invalidate();
+      inboxConversionRequestCoordinator.invalidate();
+      try {
+        const intent = scheduleCreateCoordinator.beginOpen(
+          scheduleCreateActivationRef.current,
+          feedback,
+        );
+        const assertCurrent = () =>
+          scheduleCreateCoordinator.assertOpenCurrent(
+            intent,
+            scheduleCreateActivationRef.current,
+            scheduleCreateFeedbackRef.current,
+          );
+        const target = await resolveScheduleCreateNavigationTarget(
+          intent,
+          scheduleController.prepareSnapshotRefresh,
+          assertCurrent,
+        );
+        assertCurrent();
+        if (!activeWorkspace || activeWorkspace.id !== target.workspaceId) {
+          throw new ScheduleCreateSupersededError();
+        }
+        if (!confirmLeaveNoteDraft()) {
+          throw new ScheduleCreateNoteDraftPreservedError();
+        }
+        assertCurrent();
+        if (!isScheduleCreateTodayDateCurrent(target.todayDate, new Date())) {
+          throw new ScheduleCreateUnavailableError();
+        }
+        const discardConfirmedNoteDraft = noteDraftDirtyRef.current;
+        focusTodayActivityRailAnchor();
+        if (
+          !scheduleCreateCoordinator.dismiss(
+            feedback,
+            scheduleCreateActivationRef.current,
+            scheduleCreateFeedbackRef.current,
+          )
+        ) {
+          throw new ScheduleCreateSupersededError();
+        }
+
+        scheduleCreateFeedbackRef.current = null;
+        setScheduleCreateFeedbackState((current) =>
+          current?.feedback === feedback ? null : current,
+        );
+        if (discardConfirmedNoteDraft) {
+          setNotePageGeneration((generation) => generation + 1);
+        }
+        setPaletteOpen(false);
+        setAssistantSurfaceOpen(false);
+        setRequestedNoteId(null);
+        setInboxReveal(null);
+        updatePreferences({ activeView: 'today' }, true, target.workspaceId);
+        setScheduleDialog({
+          mode: 'edit',
+          workspaceId: target.workspaceId,
+          workspaceName: activeWorkspace.name,
+          expectedDate: target.item.scheduledFor,
+          item: target.item,
+        });
+      } catch (error) {
+        throw scheduleCreateNavigationError(error);
+      }
+    },
+    [
+      activeWorkspace,
+      assistantSavedNoteNavigation,
+      automationCreateCoordinator,
+      automationOutputNavigation,
+      confirmLeaveNoteDraft,
+      inboxCaptureCoordinator,
+      inboxConversionNavigation,
+      inboxConversionRequestCoordinator,
+      scheduleController.prepareSnapshotRefresh,
+      scheduleCreateCoordinator,
+      searchNavigation,
+      taskCreateCoordinator,
+      updatePreferences,
+    ],
+  );
+
+  const dismissScheduleCreate = useCallback(
+    (feedback: ScheduleCreateFeedback): boolean => {
+      if (
+        !scheduleCreateCoordinator.dismiss(
+          feedback,
+          scheduleCreateActivationRef.current,
+          scheduleCreateFeedbackRef.current,
+        )
+      ) {
+        return false;
+      }
+      scheduleCreateFeedbackRef.current = null;
+      setScheduleCreateFeedbackState((current) =>
+        current?.feedback === feedback ? null : current,
+      );
+      return true;
+    },
+    [scheduleCreateCoordinator],
+  );
+
+  const restoreScheduleCreateFocus = useCallback((): void => {
+    const heading = document.querySelector<HTMLElement>('.today-dashboard h1, .section-page h1');
+    heading?.focus({ preventScroll: true });
+    if (document.activeElement === heading) return;
+    document
+      .querySelector<HTMLElement>(
+        '.dashboard-hero__actions button:not(:disabled), .page-chrome__actions button:not(:disabled), .activity-rail button[aria-current="page"]',
+      )
+      ?.focus({ preventScroll: true });
+  }, []);
+
+  const dismissScheduleCreateSyncWarning = useCallback(
+    (warning: ScheduleCreateSyncWarningState): void => {
+      if (
+        !scheduleCreateCoordinator.isGenerationCurrent(
+          warning.requestGeneration,
+          warning.activation,
+        )
+      ) {
+        return;
+      }
+      invalidateScheduleCreate();
+      window.requestAnimationFrame(restoreScheduleCreateFocus);
+    },
+    [invalidateScheduleCreate, restoreScheduleCreateFocus, scheduleCreateCoordinator],
+  );
+
+  const refreshScheduleCreateSyncWarning = useCallback(
+    async (warning: ScheduleCreateSyncWarningState): Promise<void> => {
+      try {
+        if (
+          warning.activation !== scheduleCreateActivationRef.current ||
+          !scheduleCreateCoordinator.isGenerationCurrent(
+            warning.requestGeneration,
+            warning.activation,
+          )
+        ) {
+          throw new ScheduleCreateSupersededError();
+        }
+        const refresh = await scheduleController.prepareSnapshotRefresh();
+        if (
+          warning.activation !== scheduleCreateActivationRef.current ||
+          refresh.snapshot.workspaceId !== warning.activation.workspaceId ||
+          !scheduleCreateCoordinator.isGenerationCurrent(
+            warning.requestGeneration,
+            warning.activation,
+          )
+        ) {
+          throw new ScheduleCreateSupersededError();
+        }
+        const matches = refresh.snapshot.items.filter(
+          ({ id, scheduledFor }) =>
+            id === warning.createdScheduleId && scheduledFor === warning.scheduledFor,
+        );
+        if (matches.length !== 1) {
+          throw new ScheduleCreateSyncRefreshError(
+            '重新读取后仍无法确认刚创建的日程。请稍后再试；日程可能已经创建，请不要重复创建。',
+          );
+        }
+        if (!refresh.commit()) {
+          throw new ScheduleCreateSyncRefreshError(
+            '日程列表在读取期间发生变化。请重新读取；日程可能已经创建，请不要重复创建。',
+          );
+        }
+        const feedback = scheduleCreateCoordinator.createRecoveredFeedback(
+          warning.requestGeneration,
+          warning.activation,
+          matches[0]!,
+          true,
+        );
+        scheduleCreateFeedbackRef.current = feedback;
+        setScheduleCreateSyncWarningState((current) => (current === warning ? null : current));
+        setScheduleCreateFeedbackState({
+          activation: warning.activation,
+          feedback,
+        });
+      } catch (error) {
+        throw scheduleCreateSyncRefreshError(error);
+      }
+    },
+    [scheduleController, scheduleCreateCoordinator],
   );
 
   const createManualAutomation = useCallback(
@@ -2751,6 +3170,7 @@ export function App() {
       onClickCapture={() => {
         automationOutputNavigation.invalidate();
         automationCreateCoordinator.cancelOpen();
+        scheduleCreateCoordinator.cancelOpen();
         inboxCaptureCoordinator.cancelOpen();
       }}
     >
@@ -3352,12 +3772,13 @@ export function App() {
       {scheduleDialog ? (
         <ScheduleDialog
           state={scheduleDialog}
-          onClose={() => setScheduleDialog(null)}
+          onClose={closeScheduleDialog}
           onCreate={async (title, kind, startMinute, endMinute) => {
             if (scheduleDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开日程窗口。');
             }
-            await scheduleController.create(
+            await createManualSchedule(
+              scheduleDialog.workspaceId,
               scheduleDialog.expectedDate,
               title,
               kind,
@@ -3465,6 +3886,7 @@ export function App() {
           onConfirm={async () => {
             if (!confirmLeaveNoteDraft()) return;
             invalidateAutomationCreate();
+            invalidateScheduleCreate();
             dataReplacementApprovedRef.current = true;
             dataReplacementNoteDiscardApprovedRef.current = true;
             try {
@@ -3499,6 +3921,26 @@ export function App() {
             onOpen={openCreatedAutomation}
             onDismiss={dismissAutomationCreate}
             onFocusFallback={restoreAutomationCreateFocus}
+          />
+        ) : null}
+        {visibleScheduleCreateSyncWarning ? (
+          <ScheduleCreateSyncWarning
+            title={visibleScheduleCreateSyncWarning.title}
+            scheduledFor={visibleScheduleCreateSyncWarning.scheduledFor}
+            startMinute={visibleScheduleCreateSyncWarning.startMinute}
+            endMinute={visibleScheduleCreateSyncWarning.endMinute}
+            message={visibleScheduleCreateSyncWarning.message}
+            onRefresh={() => refreshScheduleCreateSyncWarning(visibleScheduleCreateSyncWarning)}
+            onDismiss={() => dismissScheduleCreateSyncWarning(visibleScheduleCreateSyncWarning)}
+          />
+        ) : null}
+        {visibleScheduleCreateFeedback ? (
+          <ScheduleCreateToast
+            feedback={visibleScheduleCreateFeedback}
+            focusBlocked={overlayOpen}
+            onOpen={openCreatedSchedule}
+            onDismiss={dismissScheduleCreate}
+            onFocusFallback={restoreScheduleCreateFocus}
           />
         ) : null}
         {visibleTaskCreateSyncWarning ? (

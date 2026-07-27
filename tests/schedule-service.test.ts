@@ -53,7 +53,7 @@ describe('schedule service', () => {
     });
     await service.open();
 
-    let snapshot = await service.createScheduleItem({
+    const firstCreation = await service.createScheduleItem({
       workspaceId: WORKSPACE_A,
       expectedDate: TODAY,
       title: '  深度工作 👩‍💻  ',
@@ -61,6 +61,8 @@ describe('schedule service', () => {
       startMinute: 540,
       endMinute: 660,
     });
+    expect(firstCreation.createdScheduleId).toBe(SCHEDULE_A);
+    let snapshot = firstCreation.scheduleSnapshot;
     expect(snapshot).toMatchObject({
       workspaceId: WORKSPACE_A,
       todayDate: TODAY,
@@ -85,7 +87,7 @@ describe('schedule service', () => {
       { token: 'day-5', date: '2026-07-27' },
       { token: 'day-6', date: '2026-07-28' },
     ]);
-    snapshot = await service.createScheduleItem({
+    const secondCreation = await service.createScheduleItem({
       workspaceId: WORKSPACE_A,
       expectedDate: TODAY,
       title: '允许重叠会议',
@@ -93,6 +95,8 @@ describe('schedule service', () => {
       startMinute: 600,
       endMinute: 720,
     });
+    expect(secondCreation.createdScheduleId).toBe(SCHEDULE_B);
+    snapshot = secondCreation.scheduleSnapshot;
     expect(snapshot.items.map(({ id }) => id)).toEqual([SCHEDULE_A, SCHEDULE_B]);
 
     snapshot = await service.updateScheduleItem({
@@ -202,7 +206,7 @@ describe('schedule service', () => {
       }),
     ).toThrow(ScheduleValidationError);
 
-    let snapshot = await service.createScheduleItem({
+    const tomorrowCreation = await service.createScheduleItem({
       workspaceId: WORKSPACE_A,
       expectedDate: TOMORROW,
       title: '明日评审',
@@ -210,6 +214,8 @@ describe('schedule service', () => {
       startMinute: 600,
       endMinute: 660,
     });
+    expect(tomorrowCreation.createdScheduleId).toBe(SCHEDULE_A);
+    let snapshot = tomorrowCreation.scheduleSnapshot;
     expect(snapshot.items).toEqual([
       expect.objectContaining({ id: SCHEDULE_A, scheduledFor: TOMORROW }),
     ]);
@@ -260,7 +266,7 @@ describe('schedule service', () => {
       items: [expect.objectContaining({ id: SCHEDULE_A, scheduledFor: TOMORROW })],
     });
 
-    snapshot = await service.createScheduleItem({
+    const midnightCreation = await service.createScheduleItem({
       workspaceId: WORKSPACE_A,
       expectedDate: TODAY,
       title: '跨午夜前的日程',
@@ -268,6 +274,8 @@ describe('schedule service', () => {
       startMinute: 1439,
       endMinute: 1440,
     });
+    expect(midnightCreation.createdScheduleId).toBe(SCHEDULE_C);
+    snapshot = midnightCreation.scheduleSnapshot;
     expect(snapshot.items.map(({ id }) => id)).toEqual([SCHEDULE_C, SCHEDULE_A]);
     today = TOMORROW;
     await expect(service.getScheduleSnapshot({ workspaceId: WORKSPACE_A })).resolves.toMatchObject({

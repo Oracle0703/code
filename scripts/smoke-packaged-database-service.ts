@@ -429,7 +429,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(schedule.todayDate, FIXED_TODAY);
     assert.deepEqual(schedule.planningDays, FIXED_PLANNING_DAYS);
     assert.deepEqual(schedule.items, []);
-    schedule = await service.createScheduleItem({
+    const firstScheduleCreation = await service.createScheduleItem({
       workspaceId: DEFAULT_WORKSPACE_ID,
       expectedDate: FIXED_TODAY,
       title: '打包后的晨会',
@@ -437,6 +437,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       startMinute: 9 * 60,
       endMinute: 10 * 60,
     });
+    assert.equal(firstScheduleCreation.createdScheduleId, FIRST_SCHEDULE_ID);
+    schedule = firstScheduleCreation.scheduleSnapshot;
     let scheduleItem = schedule.items.find(({ id }) => id === FIRST_SCHEDULE_ID);
     assert.ok(scheduleItem);
     assert.equal(scheduleItem.scheduledFor, FIXED_TODAY);
@@ -467,7 +469,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
         endMinute: 12 * 60,
       }),
     );
-    schedule = await service.createScheduleItem({
+    const secondScheduleCreation = await service.createScheduleItem({
       workspaceId: DEFAULT_WORKSPACE_ID,
       expectedDate: FIXED_DAY_SIX,
       title: '待归档的个人安排',
@@ -475,6 +477,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       startMinute: 18 * 60,
       endMinute: 19 * 60,
     });
+    assert.equal(secondScheduleCreation.createdScheduleId, SECOND_SCHEDULE_ID);
+    schedule = secondScheduleCreation.scheduleSnapshot;
     assert.equal(
       schedule.items.some(({ id }) => id === SECOND_SCHEDULE_ID),
       true,
@@ -583,7 +587,7 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
     assert.equal(secondWorkspaceNoteCreation.createdNoteId, SECOND_NOTE_ID);
     notes = secondWorkspaceNoteCreation.noteSnapshot;
     assert.equal(notes.notes[0]?.id, SECOND_NOTE_ID);
-    schedule = await service.createScheduleItem({
+    const thirdScheduleCreation = await service.createScheduleItem({
       workspaceId: SECOND_WORKSPACE_ID,
       expectedDate: FIXED_TODAY,
       title: '第二工作区回顾',
@@ -591,6 +595,8 @@ async function smokeCurrentService(dataDirectory: string): Promise<void> {
       startMinute: 16 * 60,
       endMinute: 16 * 60 + 30,
     });
+    assert.equal(thirdScheduleCreation.createdScheduleId, THIRD_SCHEDULE_ID);
+    schedule = thirdScheduleCreation.scheduleSnapshot;
     assert.equal(schedule.items[0]?.id, THIRD_SCHEDULE_ID);
     assert.equal(
       (await service.getInboxSnapshot({ workspaceId: DEFAULT_WORKSPACE_ID })).entries.length,
@@ -2507,7 +2513,7 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
     assert.equal(converted.noteSnapshot.notes.length, 1);
     assert.equal(converted.noteSnapshot.notes[0]?.id, CONVERTED_NOTE_ID);
     assert.equal(converted.noteSnapshot.notes[0]?.sourceInboxEntryId, NOTE_INBOX_ID);
-    const schedule = await service.createScheduleItem({
+    const scheduleCreation = await service.createScheduleItem({
       workspaceId: DEFAULT_WORKSPACE_ID,
       expectedDate: FIXED_TODAY,
       title: 'v4 → v7 新增的今日日程',
@@ -2515,6 +2521,8 @@ async function smokeVersionFourUpgrade(dataDirectory: string): Promise<void> {
       startMinute: 13 * 60,
       endMinute: 13 * 60 + 45,
     });
+    assert.equal(scheduleCreation.createdScheduleId, FIRST_SCHEDULE_ID);
+    const schedule = scheduleCreation.scheduleSnapshot;
     assert.equal(schedule.items[0]?.id, FIRST_SCHEDULE_ID);
     await service.close();
     service = undefined;
