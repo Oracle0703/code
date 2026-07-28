@@ -7,6 +7,7 @@ import { InboxUndoStack } from '../src/renderer/components/InboxUndoStack';
 import { TaskCreateSyncWarning } from '../src/renderer/components/TaskCreateSyncWarning';
 import { TaskCreateToast } from '../src/renderer/components/TaskCreateToast';
 import type { InboxUndoNotice } from '../src/renderer/hooks/useInboxController';
+import type { InboxEntry } from '../src/shared/contracts';
 import {
   taskCreateTitleSummary,
   type TaskCreateFeedback,
@@ -14,6 +15,8 @@ import {
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
 const TASK_ID = '22222222-2222-4222-8222-222222222222';
+const INBOX_ID = '33333333-3333-4333-8333-333333333333';
+const UNDO_TOKEN = '44444444-4444-4444-8444-444444444444';
 
 describe('task create renderer components', () => {
   it('renders one bounded polite success status with explicit open and close actions', () => {
@@ -41,11 +44,19 @@ describe('task create renderer components', () => {
   });
 
   it('hosts task and inbox notifications together in the generalized operation stack', () => {
+    const archivedEntry = inboxEntry();
+    const undoExpiresAt = '2026-07-27T12:00:15.000Z';
     const notice: InboxUndoNotice = {
-      undoToken: 'undo-1',
+      undoToken: UNDO_TOKEN,
       workspaceId: WORKSPACE_ID,
-      content: '稍后整理',
+      entry: archivedEntry,
+      undoExpiresAt,
       expiresAtMonotonicMs: 10_000,
+      phase: 'archived',
+      undoAvailable: true,
+      refreshing: false,
+      refreshError: null,
+      focusActionOnMount: false,
     };
     const markup = renderToStaticMarkup(
       createElement(
@@ -53,8 +64,16 @@ describe('task create renderer components', () => {
         {
           notices: [notice],
           pendingTokens: new Set<string>(),
+          focusBlocked: false,
+          blocked: false,
+          workspaceLeasePending: false,
+          workspaceLeaseBlockedReason: '另一项收件箱归档或撤销完成后，才能处理这条通知。',
+          workspaceRecoveryPending: false,
+          workspaceRecoveryBlockedReason: '请先完成已提交归档或撤销的重新读取，再处理其他通知。',
           onUndo: async () => undefined,
+          onRefresh: async () => undefined,
           onDismiss: () => undefined,
+          onFocusFallback: () => undefined,
         },
         taskToast(feedback()),
       ),
@@ -101,6 +120,16 @@ function feedback(): TaskCreateFeedback {
     createdTaskId: TASK_ID,
     title: '整理发布清单',
     plannedFor: '2026-07-27',
+  };
+}
+
+function inboxEntry(): InboxEntry {
+  return {
+    id: INBOX_ID,
+    content: '稍后整理',
+    category: 'uncategorized',
+    createdAt: '2026-07-27T12:00:00.000Z',
+    updatedAt: '2026-07-27T12:00:00.000Z',
   };
 }
 

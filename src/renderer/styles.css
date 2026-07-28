@@ -8161,7 +8161,18 @@ textarea:focus-visible,
   animation: palette-in 150ms var(--ease-out);
 }
 
-.inbox-undo-toast > div {
+.inbox-undo-toast--recovery {
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: start;
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border-strong));
+}
+
+.inbox-undo-toast--recovery > svg {
+  margin-top: 4px;
+  color: var(--warning);
+}
+
+.inbox-undo-toast__content {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -8181,6 +8192,29 @@ textarea:focus-visible,
   white-space: nowrap;
 }
 
+.inbox-undo-toast__message,
+.inbox-undo-toast__error {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: 8.5px;
+  line-height: 1.45;
+}
+
+.inbox-undo-toast__disabled-reason {
+  color: var(--text-tertiary);
+}
+
+.inbox-undo-toast__error {
+  color: var(--danger);
+}
+
+.inbox-undo-toast__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
 .inbox-undo-toast button {
   display: inline-flex;
   height: 28px;
@@ -8194,10 +8228,21 @@ textarea:focus-visible,
   font-size: 9px;
 }
 
+.inbox-undo-toast button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .inbox-undo-toast__action {
   border: 1px solid var(--accent-border);
   color: #c5bdff !important;
   background: var(--accent-soft) !important;
+}
+
+.inbox-undo-toast__refresh {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border-default));
+  color: var(--warning) !important;
+  background: color-mix(in srgb, var(--warning) 10%, transparent) !important;
 }
 
 .inbox-undo-toast__close {

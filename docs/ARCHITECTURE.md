@@ -181,7 +181,11 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 - 正文只去除首尾空白并验证良构 Unicode、控制字符和长度，不做 NFKC 改写，避免破坏 URL、代码和技术文本。
 - 分类固定为未分类、任务线索、笔记和链接。“任务线索”不代表已经创建任务。
 - 归档只写入 `archived_at`。成功提交后，Main 在内存中保存 15 秒有效的一次性 opaque 撤销令牌；后端有效期使用不受系统时钟回拨影响的单调时钟，令牌不能跨工作区、重复或过期使用，也不会在重启后恢复。
-- 多条归档通知可以并存；切换工作区后旧响应不会写入新工作区界面。
+- Renderer 冻结归档发起时的精确条目身份、Main 返回的 opaque token 与绝对 `undoExpiresAt`。通知只使用该绝对截止时间换算剩余的单调时长，不会在 IPC 返回、重新渲染或恢复读取后重新补足 15 秒；已经到期的 token 不会继续显示为可撤销。
+- `inbox:archive` 和 `inbox:undo-archive` 的 Main 成功都是不可重放的提交边界。Renderer 依次检查响应快照、ref-backed 最新已提交快照，并在必要时最多准备两轮权威 fresh-read；归档要求 exact ID 从当前工作区活动快照消失，撤销则要求响应中的 exact 条目唯一恢复，且对应快照必须真正 commit。
+- Main 已提交而上述事实仍不能发布时，App 会跨页面保留精确条目与 token 对应的“已归档/已撤销，请勿重复操作”警告。重新读取只继续同一对账，绝不再次调用归档或消费 token；恢复完成前会阻止同一工作区的竞争归档、撤销和相关条目操作。
+- 每个工作区的数据 epoch 统一约束归档链路，每个 opaque token 的撤销也保持 single-flight。迟到 response/read/commit/finally、工作区 A→B→A 或旧 epoch 不能结束或覆盖新 intent；取消或失败的数据恢复/导入保留原数据库对应警告，只有数据库替换真正提交后才使旧 epoch、通知与 token 失效。
+- 多条已确认归档通知仍可以并存；切换工作区后旧响应不会写入新工作区界面。上述对账只收紧 Renderer 发布与恢复语义，不改变 Main Service、preload/IPC 合约、schema v11、migration 或 `.dwbx` v3。
 - 工作区归档不会删除或改写其收件箱数据，但该工作区中的条目会变为只读，继续进入一致性备份。
 - 转换为任务或笔记时，在单一事务中创建目标、写入唯一来源关系并归档收件箱条目；失败时整体回滚。已转换或已归档条目不能重复转换。
 - 既有转换响应分别携带 Main 在该事务中实际插入的 `createdTaskId` 或 `createdNoteId`，以及事务后的任务/笔记与收件箱快照；这只扩展已有通道的返回契约，不新增 IPC 通道、schema 或 migration。

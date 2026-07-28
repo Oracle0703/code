@@ -50,6 +50,7 @@ export interface WorkspaceController {
   retry(): void;
   retryPreferences(): void;
   invalidatePreferenceEpoch(): void;
+  assertMutationAvailable(): void;
   create(name: string, color: WorkspaceColor): Promise<void>;
   rename(workspaceId: string, name: string): Promise<void>;
   activate(workspaceId: string): Promise<void>;
@@ -380,15 +381,19 @@ export function useWorkspaceController(): WorkspaceController {
     [],
   );
 
+  const assertMutationAvailable = useCallback((): void => {
+    if (mutationInFlightRef.current) {
+      throw new Error('另一项工作区操作正在进行，请稍候。');
+    }
+  }, []);
+
   const runMutation = useCallback(
     async (
       operation: Exclude<WorkspaceOperation, null>,
       workspaceId: string | null,
       action: () => Promise<WorkspaceSnapshot>,
     ): Promise<void> => {
-      if (mutationInFlightRef.current) {
-        throw new Error('另一项工作区操作正在进行，请稍候。');
-      }
+      assertMutationAvailable();
       mutationInFlightRef.current = true;
       deferPreferenceWritesRef.current = true;
       setPendingOperation(operation);
@@ -432,7 +437,7 @@ export function useWorkspaceController(): WorkspaceController {
         setPendingWorkspaceId(null);
       }
     },
-    [applySnapshot, flushDirtyPreferences, synchronizePreferenceState],
+    [applySnapshot, assertMutationAvailable, flushDirtyPreferences, synchronizePreferenceState],
   );
 
   const create = useCallback(
@@ -563,6 +568,7 @@ export function useWorkspaceController(): WorkspaceController {
       if (!deferPreferenceWritesRef.current) void flushDirtyPreferences();
     },
     invalidatePreferenceEpoch,
+    assertMutationAvailable,
     create,
     rename,
     activate,

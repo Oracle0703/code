@@ -95,7 +95,7 @@ import { TerminalPanel } from './components/TerminalPanel';
 import { TodayDashboard } from './components/TodayDashboard';
 import { WorkspaceDialog, type WorkspaceDialogState } from './components/WorkspaceDialog';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
-import { useInboxController } from './hooks/useInboxController';
+import { useInboxController, type InboxUndoNotice } from './hooks/useInboxController';
 import { useAssistantController } from './hooks/useAssistantController';
 import { useAutomationController } from './hooks/useAutomationController';
 import { useDataManagementController } from './hooks/useDataManagementController';
@@ -739,6 +739,67 @@ export function App() {
   const inboxController = useInboxController(snapshot?.currentWorkspaceId ?? null);
   const createInbox = inboxController.create;
   const prepareInboxSnapshotRefresh = inboxController.prepareSnapshotRefresh;
+  const assertInboxArchiveMutationAvailable = inboxController.assertArchiveMutationAvailable;
+  const invalidateInboxArchiveMutations = inboxController.invalidateArchiveMutations;
+  const assertWorkspaceMutationAvailable = workspaceController.assertMutationAvailable;
+  const assertInboxMutationAvailable = useCallback((): void => {
+    assertWorkspaceMutationAvailable();
+    assertInboxArchiveMutationAvailable();
+  }, [assertInboxArchiveMutationAvailable, assertWorkspaceMutationAvailable]);
+  const inboxWorkspaceChangeIsBlocked = useCallback((): boolean => {
+    try {
+      assertInboxArchiveMutationAvailable();
+      return false;
+    } catch {
+      return true;
+    }
+  }, [assertInboxArchiveMutationAvailable]);
+  const inboxWorkspaceChangeBlocked = inboxController.archiveMutationBlocked;
+  const inboxMutationBlocked =
+    workspaceController.pendingOperation !== null || inboxController.archiveMutationBlocked;
+  const inboxMutationBlockReason =
+    workspaceController.pendingOperation !== null
+      ? '工作区操作正在进行，请稍候再处理收件箱。'
+      : inboxController.archiveMutationBlockReason;
+  const categorizeInbox = useCallback(
+    async (...args: Parameters<typeof inboxController.categorize>): Promise<void> => {
+      assertInboxMutationAvailable();
+      await inboxController.categorize(...args);
+    },
+    [assertInboxMutationAvailable, inboxController],
+  );
+  const archiveInbox = useCallback(
+    async (...args: Parameters<typeof inboxController.archive>): Promise<void> => {
+      assertInboxMutationAvailable();
+      await inboxController.archive(...args);
+    },
+    [assertInboxMutationAvailable, inboxController],
+  );
+  const undoInboxArchive = useCallback(
+    async (notice: InboxUndoNotice): Promise<void> => {
+      assertWorkspaceMutationAvailable();
+      await inboxController.undoArchive(notice);
+    },
+    [assertWorkspaceMutationAvailable, inboxController],
+  );
+  const refreshInboxArchiveNotice = useCallback(
+    async (notice: InboxUndoNotice): Promise<void> => {
+      assertWorkspaceMutationAvailable();
+      await inboxController.refreshArchiveNotice(notice);
+    },
+    [assertWorkspaceMutationAvailable, inboxController],
+  );
+  const dismissInboxArchiveNotice = useCallback(
+    (undoToken: string): void => {
+      try {
+        assertWorkspaceMutationAvailable();
+      } catch {
+        return;
+      }
+      inboxController.dismissUndo(undoToken);
+    },
+    [assertWorkspaceMutationAvailable, inboxController],
+  );
   const visibleInboxCaptureFeedback =
     inboxCaptureFeedbackState?.activation === inboxCaptureActivation
       ? inboxCaptureFeedbackState.feedback
@@ -1930,6 +1991,7 @@ export function App() {
   );
   const restoreBackupWithApproval = useCallback(
     async (input: DatabaseBackupRestoreInput): Promise<DatabaseBackupRestoreResult | null> => {
+      assertInboxMutationAvailable();
       if (noteMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
         throw new Error('笔记写入仍在确认，请稍候再恢复备份。');
       }
@@ -1946,6 +2008,7 @@ export function App() {
           dataReplacementNoteDiscardApprovedRef.current = false;
         } else {
           invalidateWorkspacePreferenceEpoch();
+          invalidateInboxArchiveMutations();
           invalidateNoteMutations();
           invalidateScheduleMutations();
           invalidateManualBackupRecovery();
@@ -1958,7 +2021,9 @@ export function App() {
       }
     },
     [
+      assertInboxMutationAvailable,
       confirmLeaveNoteDraft,
+      invalidateInboxArchiveMutations,
       invalidateWorkspacePreferenceEpoch,
       invalidateManualBackupRecovery,
       invalidateNoteMutations,
@@ -1981,6 +2046,23 @@ export function App() {
     );
     if (!fallback) return;
     if (!fallback.hasAttribute('tabindex')) fallback.tabIndex = -1;
+    fallback.focus({ preventScroll: true });
+  }, []);
+  const restoreInboxArchiveNoticeFocus = useCallback((notice: InboxUndoNotice): void => {
+    const exactEntry = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-inbox-entry-id]'),
+    ).find(({ dataset }) => dataset.inboxEntryId === notice.entry.id);
+    if (exactEntry) {
+      exactEntry.focus({ preventScroll: true });
+      return;
+    }
+    const fallback = document.querySelector<HTMLElement>(
+      '.inbox-page h1, .section-page__header h1, .today-dashboard h1, main h1, .activity-rail button[aria-current="page"]',
+    );
+    if (!fallback) return;
+    if (!fallback.hasAttribute('tabindex') && !(fallback instanceof HTMLButtonElement)) {
+      fallback.tabIndex = -1;
+    }
     fallback.focus({ preventScroll: true });
   }, []);
   const requestActiveView = useCallback(
@@ -2050,7 +2132,13 @@ export function App() {
   const requestWorkspaceActivation = useCallback(
     (workspaceId: string) => {
       if (workspaceId === currentWorkspaceIdRef.current) return;
-      if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
+      if (
+        inboxWorkspaceChangeIsBlocked() ||
+        noteWorkspaceChangeIsBlocked() ||
+        scheduleWorkspaceChangeIsBlocked()
+      ) {
+        return;
+      }
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
@@ -2072,6 +2160,7 @@ export function App() {
       taskCreateCoordinator,
       invalidateAutomationCreate,
       invalidateScheduleCreate,
+      inboxWorkspaceChangeIsBlocked,
       noteWorkspaceChangeIsBlocked,
       scheduleWorkspaceChangeIsBlocked,
       workspaceController,
@@ -2079,24 +2168,40 @@ export function App() {
   );
   const createWorkspace = useCallback(
     async (name: string, color: WorkspaceColor): Promise<void> => {
-      if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) {
+      if (
+        inboxWorkspaceChangeIsBlocked() ||
+        noteWorkspaceChangeIsBlocked() ||
+        scheduleWorkspaceChangeIsBlocked()
+      ) {
         throw new Error('写入仍在确认，请先完成重新读取，再新建工作区。');
       }
       await workspaceController.create(name, color);
     },
-    [noteWorkspaceChangeIsBlocked, scheduleWorkspaceChangeIsBlocked, workspaceController],
+    [
+      inboxWorkspaceChangeIsBlocked,
+      noteWorkspaceChangeIsBlocked,
+      scheduleWorkspaceChangeIsBlocked,
+      workspaceController,
+    ],
   );
   const archiveWorkspace = useCallback(
     async (workspaceId: string): Promise<void> => {
       if (
         workspaceId === currentWorkspaceIdRef.current &&
-        (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked())
+        (inboxWorkspaceChangeIsBlocked() ||
+          noteWorkspaceChangeIsBlocked() ||
+          scheduleWorkspaceChangeIsBlocked())
       ) {
         throw new Error('写入仍在确认，请先完成重新读取，再归档当前工作区。');
       }
       await workspaceController.archive(workspaceId);
     },
-    [noteWorkspaceChangeIsBlocked, scheduleWorkspaceChangeIsBlocked, workspaceController],
+    [
+      inboxWorkspaceChangeIsBlocked,
+      noteWorkspaceChangeIsBlocked,
+      scheduleWorkspaceChangeIsBlocked,
+      workspaceController,
+    ],
   );
   const openQuickCapture = useCallback(() => {
     if (
@@ -3505,6 +3610,7 @@ export function App() {
 
   const convertInboxToTask = useCallback(
     async (entry: InboxEntry, planning: TaskPlanning): Promise<void> => {
+      assertInboxMutationAvailable();
       inboxConversionNavigation.invalidate();
       if (inboxConversionSyncWarningRef.current !== null) {
         throw new Error('请先重新读取上一条已转换记录，再继续处理收件箱。');
@@ -3597,6 +3703,7 @@ export function App() {
       }
     },
     [
+      assertInboxMutationAvailable,
       inboxController,
       inboxConversionNavigation,
       inboxConversionPublicationGate,
@@ -3609,6 +3716,7 @@ export function App() {
 
   const convertInboxToNote = useCallback(
     async (entry: InboxEntry): Promise<void> => {
+      assertInboxMutationAvailable();
       inboxConversionNavigation.invalidate();
       if (inboxConversionSyncWarningRef.current !== null) {
         throw new Error('请先重新读取上一条已转换记录，再继续处理收件箱。');
@@ -3717,6 +3825,7 @@ export function App() {
       }
     },
     [
+      assertInboxMutationAvailable,
       inboxController,
       inboxConversionNavigation,
       inboxConversionRequestCoordinator,
@@ -4416,6 +4525,14 @@ export function App() {
     async (selectedResult: SearchResult): Promise<void> => {
       if (
         selectedResult.workspaceId !== currentWorkspaceIdRef.current &&
+        inboxWorkspaceChangeIsBlocked()
+      ) {
+        throw new Error(
+          '收件箱归档或撤销仍在确认，请先返回当前工作区完成重新读取，再打开其他工作区的搜索结果。',
+        );
+      }
+      if (
+        selectedResult.workspaceId !== currentWorkspaceIdRef.current &&
         noteWorkspaceChangeIsBlocked()
       ) {
         throw new Error(
@@ -4617,6 +4734,7 @@ export function App() {
       confirmLeaveNoteDraft,
       inboxCaptureCoordinator,
       inboxConversionNavigation,
+      inboxWorkspaceChangeIsBlocked,
       noteController.pendingCreate,
       noteController.pendingMutation,
       noteMutationCoordinator,
@@ -4645,12 +4763,15 @@ export function App() {
     const manualBackupDisabledReason = manualBackupBlocked
       ? '备份已创建，请先重新读取确认'
       : dataDisabledReason;
-    const workspaceWriteBlocked = noteWorkspaceChangeBlocked || scheduleWorkspaceChangeBlocked;
+    const workspaceWriteBlocked =
+      inboxWorkspaceChangeBlocked || noteWorkspaceChangeBlocked || scheduleWorkspaceChangeBlocked;
     const workspaceWriteBlockedReason = scheduleWorkspaceChangeBlocked
       ? '请先确认当前日程写入'
       : noteWorkspaceChangeBlocked
         ? '请先确认当前笔记写入'
-        : undefined;
+        : inboxWorkspaceChangeBlocked
+          ? '请先确认当前收件箱归档或撤销'
+          : undefined;
     const workspaceCommands: PaletteCommand[] = snapshot.workspaces
       .filter(({ id }) => id !== activeWorkspace.id)
       .map((workspace) => ({
@@ -4742,7 +4863,13 @@ export function App() {
         disabled: workspaceWriteBlocked,
         disabledReason: workspaceWriteBlockedReason,
         action: () => {
-          if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
+          if (
+            inboxWorkspaceChangeIsBlocked() ||
+            noteWorkspaceChangeIsBlocked() ||
+            scheduleWorkspaceChangeIsBlocked()
+          ) {
+            return;
+          }
           if (!confirmLeaveNoteDraft()) return;
           setWorkspaceDialog({
             mode: 'create',
@@ -4786,7 +4913,13 @@ export function App() {
               disabled: workspaceWriteBlocked,
               disabledReason: workspaceWriteBlockedReason,
               action: () => {
-                if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
+                if (
+                  inboxWorkspaceChangeIsBlocked() ||
+                  noteWorkspaceChangeIsBlocked() ||
+                  scheduleWorkspaceChangeIsBlocked()
+                ) {
+                  return;
+                }
                 if (!confirmLeaveNoteDraft()) return;
                 setWorkspaceDialog({
                   mode: 'archive',
@@ -4901,6 +5034,8 @@ export function App() {
     openTerminalSettings,
     openTaskCreate,
     confirmLeaveNoteDraft,
+    inboxWorkspaceChangeBlocked,
+    inboxWorkspaceChangeIsBlocked,
     noteWorkspaceChangeBlocked,
     noteWorkspaceChangeIsBlocked,
     scheduleWorkspaceChangeBlocked,
@@ -5108,8 +5243,20 @@ export function App() {
             workspaces={snapshot.workspaces}
             busy={
               workspaceController.pendingOperation !== null ||
+              inboxWorkspaceChangeBlocked ||
               noteWorkspaceChangeBlocked ||
               scheduleWorkspaceChangeBlocked
+            }
+            busyReason={
+              workspaceController.pendingOperation !== null
+                ? '另一项工作区操作正在进行。'
+                : scheduleWorkspaceChangeBlocked
+                  ? '请先确认当前日程写入，再处理工作区。'
+                  : noteWorkspaceChangeBlocked
+                    ? '请先确认当前笔记写入，再处理工作区。'
+                    : inboxWorkspaceChangeBlocked
+                      ? '请先确认当前收件箱归档或撤销，再处理工作区。'
+                      : null
             }
             pendingWorkspaceId={workspaceController.pendingWorkspaceId}
             saveError={workspaceController.saveError}
@@ -5121,7 +5268,13 @@ export function App() {
             onSelectView={requestActiveView}
             onSelectWorkspace={requestWorkspaceActivation}
             onCreateWorkspace={() => {
-              if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
+              if (
+                inboxWorkspaceChangeIsBlocked() ||
+                noteWorkspaceChangeIsBlocked() ||
+                scheduleWorkspaceChangeIsBlocked()
+              ) {
+                return;
+              }
               if (!confirmLeaveNoteDraft()) return;
               setWorkspaceDialog({
                 mode: 'create',
@@ -5133,7 +5286,9 @@ export function App() {
             onArchiveWorkspace={(workspace) => {
               if (
                 workspace.id === snapshot.currentWorkspaceId &&
-                (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked())
+                (inboxWorkspaceChangeIsBlocked() ||
+                  noteWorkspaceChangeIsBlocked() ||
+                  scheduleWorkspaceChangeIsBlocked())
               ) {
                 return;
               }
@@ -5206,14 +5361,18 @@ export function App() {
                     scheduleCreatePending={scheduleController.pendingCreate}
                     scheduleMutationBlocked={scheduleWorkspaceChangeBlocked}
                     workspaceNavigationBlocked={
-                      noteWorkspaceChangeBlocked || scheduleWorkspaceChangeBlocked
+                      inboxWorkspaceChangeBlocked ||
+                      noteWorkspaceChangeBlocked ||
+                      scheduleWorkspaceChangeBlocked
                     }
                     workspaceNavigationBlockedReason={
                       scheduleWorkspaceChangeBlocked
                         ? '请先确认当前日程写入，再切换工作区。'
                         : noteWorkspaceChangeBlocked
                           ? '请先确认当前笔记写入，再切换工作区。'
-                          : null
+                          : inboxWorkspaceChangeBlocked
+                            ? '请先确认当前收件箱归档或撤销，再切换工作区。'
+                            : null
                     }
                     focusSnapshot={focusController.snapshot}
                     focusStatus={focusController.status}
@@ -5272,6 +5431,8 @@ export function App() {
                     conversionMutationPending={pendingInboxConversionIntents.has(
                       snapshot.currentWorkspaceId,
                     )}
+                    inboxMutationBlocked={inboxMutationBlocked}
+                    inboxMutationBlockedReason={inboxMutationBlockReason}
                     requestedEntryId={
                       inboxReveal?.workspaceId === snapshot.currentWorkspaceId &&
                       !inboxReveal.handled
@@ -5281,8 +5442,8 @@ export function App() {
                     onRequestedEntryHandled={handleRequestedInboxEntry}
                     onRetry={inboxController.retry}
                     onOpenCapture={openQuickCapture}
-                    onCategorize={inboxController.categorize}
-                    onArchive={inboxController.archive}
+                    onCategorize={categorizeInbox}
+                    onArchive={archiveInbox}
                     onDismissConversionFeedback={(feedback) => {
                       if (inboxConversionFeedbackRef.current === feedback) {
                         inboxConversionFeedbackRef.current = null;
@@ -5800,6 +5961,7 @@ export function App() {
           error={dataState.feedback?.tone === 'error' ? dataState.feedback.message : null}
           onCancel={cancelImport}
           onConfirm={async () => {
+            assertInboxMutationAvailable();
             if (noteMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
               throw new Error('笔记写入仍在确认，请稍候再导入数据。');
             }
@@ -5812,6 +5974,7 @@ export function App() {
             try {
               await commitImport();
               invalidateWorkspacePreferenceEpoch();
+              invalidateInboxArchiveMutations();
               invalidateNoteMutations();
               invalidateScheduleMutations();
               invalidateManualBackupRecovery();
@@ -5826,8 +5989,25 @@ export function App() {
       <InboxUndoStack
         notices={visibleUndoNotices}
         pendingTokens={inboxController.pendingUndoTokens}
-        onUndo={inboxController.undoArchive}
-        onDismiss={inboxController.dismissUndo}
+        focusBlocked={overlayOpen}
+        blocked={
+          dataState.activeOperation !== null || workspaceController.pendingOperation !== null
+        }
+        blockedReason={
+          dataState.activeOperation !== null
+            ? '当前数据操作完成后，才能继续处理归档通知。'
+            : workspaceController.pendingOperation !== null
+              ? '当前工作区操作完成后，才能继续处理归档通知。'
+              : null
+        }
+        workspaceLeasePending={inboxController.archiveOperationPending}
+        workspaceLeaseBlockedReason="另一项收件箱归档或撤销完成后，才能处理这条通知。"
+        workspaceRecoveryPending={inboxController.archiveRecoveryPending}
+        workspaceRecoveryBlockedReason="请先完成已提交归档或撤销的重新读取，再处理其他通知。"
+        onUndo={undoInboxArchive}
+        onRefresh={refreshInboxArchiveNotice}
+        onDismiss={dismissInboxArchiveNotice}
+        onFocusFallback={restoreInboxArchiveNoticeFocus}
       >
         {manualBackupSyncWarning ? (
           <BackupCreateSyncWarning
