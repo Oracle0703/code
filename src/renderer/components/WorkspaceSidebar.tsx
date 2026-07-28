@@ -25,6 +25,7 @@ interface WorkspaceSidebarProps {
   activeWorkspace: WorkspaceInfo;
   workspaces: readonly WorkspaceInfo[];
   busy: boolean;
+  busyReason?: string | null;
   pendingWorkspaceId: string | null;
   saveError: string | null;
   saveStatus: WorkspaceSaveStatus;
@@ -57,6 +58,7 @@ export function WorkspaceSidebar({
   activeWorkspace,
   workspaces,
   busy,
+  busyReason = null,
   pendingWorkspaceId,
   saveError,
   saveStatus,
@@ -78,6 +80,11 @@ export function WorkspaceSidebar({
   const retryButtonRef = useRef<HTMLButtonElement>(null);
   const retryFocusActiveRef = useRef(false);
   const retryFocusOwnerRef = useRef<Element | null>(null);
+  const busyDescriptionId = busy && busyReason !== null ? 'workspace-busy-reason' : undefined;
+  const archiveDisabledDescription =
+    [busyDescriptionId, workspaces.length <= 1 ? 'archive-disabled-reason' : null]
+      .filter((value): value is string => value !== null && value !== undefined)
+      .join(' ') || undefined;
   useEffect(() => {
     if (!menuOpen) return;
 
@@ -160,6 +167,11 @@ export function WorkspaceSidebar({
             aria-busy={busy}
           >
             <p className="workspace-menu__label">工作区</p>
+            {busyDescriptionId ? (
+              <p id={busyDescriptionId} className="workspace-menu__hint" role="status">
+                {busyReason}
+              </p>
+            ) : null}
             {workspaces.map((workspace) => (
               <button
                 key={workspace.id}
@@ -167,6 +179,7 @@ export function WorkspaceSidebar({
                 aria-current={workspace.id === activeWorkspace.id ? 'true' : undefined}
                 className={workspace.id === activeWorkspace.id ? 'is-selected' : ''}
                 disabled={busy}
+                aria-describedby={busyDescriptionId}
                 onClick={() => {
                   onSelectWorkspace(workspace.id);
                   setMenuOpen(false);
@@ -183,6 +196,7 @@ export function WorkspaceSidebar({
               <button
                 type="button"
                 disabled={busy}
+                aria-describedby={busyDescriptionId}
                 onClick={() => {
                   setMenuOpen(false);
                   onRenameWorkspace(activeWorkspace);
@@ -194,7 +208,7 @@ export function WorkspaceSidebar({
               <button
                 type="button"
                 disabled={busy || workspaces.length <= 1}
-                aria-describedby={workspaces.length <= 1 ? 'archive-disabled-reason' : undefined}
+                aria-describedby={archiveDisabledDescription}
                 onClick={() => {
                   setMenuOpen(false);
                   onArchiveWorkspace(activeWorkspace);
@@ -213,6 +227,7 @@ export function WorkspaceSidebar({
               type="button"
               className="workspace-menu__new"
               disabled={busy}
+              aria-describedby={busyDescriptionId}
               onClick={() => {
                 setMenuOpen(false);
                 onCreateWorkspace();
@@ -227,6 +242,7 @@ export function WorkspaceSidebar({
               type="button"
               className="workspace-menu__archive-manager"
               disabled={busy}
+              aria-describedby={busyDescriptionId}
               onClick={() => {
                 setMenuOpen(false);
                 onManageArchivedWorkspaces();

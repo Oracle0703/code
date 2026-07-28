@@ -44,6 +44,8 @@ interface InboxPageProps {
   pendingConversionEntryIds: ReadonlySet<string>;
   pendingNoteConversionEntryIds: ReadonlySet<string>;
   conversionMutationPending: boolean;
+  inboxMutationBlocked?: boolean;
+  inboxMutationBlockedReason?: string | null;
   requestedEntryId?: string | null;
   onRequestedEntryHandled?: () => void;
   onRetry: () => void;
@@ -86,6 +88,8 @@ export function InboxPage({
   pendingConversionEntryIds,
   pendingNoteConversionEntryIds,
   conversionMutationPending,
+  inboxMutationBlocked = false,
+  inboxMutationBlockedReason = null,
   requestedEntryId = null,
   onRequestedEntryHandled,
   onRetry,
@@ -260,6 +264,11 @@ export function InboxPage({
         </section>
       ) : (
         <section className="inbox-view">
+          {inboxMutationBlocked && inboxMutationBlockedReason !== null ? (
+            <p id="inbox-mutation-blocked-reason" className="sr-only" role="status">
+              {inboxMutationBlockedReason}
+            </p>
+          ) : null}
           <div className="page-toolbar inbox-toolbar">
             <label className="page-search">
               <Search size={15} />
@@ -377,9 +386,9 @@ export function InboxPage({
                 const pending =
                   pendingEntryIds.has(entry.id) ||
                   pendingConversionEntryIds.has(entry.id) ||
-                  pendingNoteConversionEntryIds.has(entry.id) ||
-                  conversionSyncWarning !== null;
-                const conversionPending = pending || conversionMutationPending;
+                  pendingNoteConversionEntryIds.has(entry.id);
+                const disabled = pending || conversionSyncWarning !== null || inboxMutationBlocked;
+                const conversionPending = disabled || conversionMutationPending;
                 const Icon = categoryIcon(entry.category);
                 return (
                   <li
@@ -390,6 +399,7 @@ export function InboxPage({
                     className={`inbox-entry ${
                       requestedEntryId === entry.id ? 'is-search-target' : ''
                     }`}
+                    data-inbox-entry-id={entry.id}
                     tabIndex={-1}
                     aria-current={requestedEntryId === entry.id ? 'true' : undefined}
                     key={entry.id}
@@ -408,7 +418,17 @@ export function InboxPage({
                       <span className="sr-only">修改“{entry.content}”的分类</span>
                       <select
                         value={entry.category}
-                        disabled={pending}
+                        disabled={disabled}
+                        aria-describedby={
+                          inboxMutationBlocked && inboxMutationBlockedReason !== null
+                            ? 'inbox-mutation-blocked-reason'
+                            : undefined
+                        }
+                        title={
+                          inboxMutationBlocked
+                            ? (inboxMutationBlockedReason ?? undefined)
+                            : undefined
+                        }
                         onChange={(event) => {
                           void onCategorize(entry.id, event.target.value as InboxCategory).catch(
                             () => undefined,
@@ -427,6 +447,16 @@ export function InboxPage({
                         className="inbox-entry__convert"
                         aria-label={`转为任务：${entry.content}`}
                         disabled={conversionPending}
+                        aria-describedby={
+                          inboxMutationBlocked && inboxMutationBlockedReason !== null
+                            ? 'inbox-mutation-blocked-reason'
+                            : undefined
+                        }
+                        title={
+                          inboxMutationBlocked
+                            ? (inboxMutationBlockedReason ?? undefined)
+                            : undefined
+                        }
                         onClick={() => onOpenConvert(entry)}
                       >
                         {pendingConversionEntryIds.has(entry.id) ? (
@@ -445,6 +475,16 @@ export function InboxPage({
                         className="inbox-entry__convert inbox-entry__convert--note"
                         aria-label={`转为笔记：${entry.content}`}
                         disabled={conversionPending}
+                        aria-describedby={
+                          inboxMutationBlocked && inboxMutationBlockedReason !== null
+                            ? 'inbox-mutation-blocked-reason'
+                            : undefined
+                        }
+                        title={
+                          inboxMutationBlocked
+                            ? (inboxMutationBlockedReason ?? undefined)
+                            : undefined
+                        }
                         onClick={() => {
                           void onConvertNote(entry).catch(() => {
                             window.requestAnimationFrame(() => {
@@ -469,8 +509,17 @@ export function InboxPage({
                     <button
                       type="button"
                       className="inbox-entry__archive"
+                      data-inbox-archive-id={entry.id}
                       aria-label={`归档：${entry.content}`}
-                      disabled={pending}
+                      disabled={disabled}
+                      aria-describedby={
+                        inboxMutationBlocked && inboxMutationBlockedReason !== null
+                          ? 'inbox-mutation-blocked-reason'
+                          : undefined
+                      }
+                      title={
+                        inboxMutationBlocked ? (inboxMutationBlockedReason ?? undefined) : undefined
+                      }
                       onClick={() => void onArchive(entry).catch(() => undefined)}
                     >
                       {pending ? (

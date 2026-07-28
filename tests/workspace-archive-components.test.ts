@@ -93,8 +93,12 @@ describe('workspace archive renderer surfaces', () => {
     expect(sidebar).toContain('aria-controls="workspace-switcher-popup"');
     expect(sidebarSource).toContain('管理归档工作区');
     expect(sidebarSource).toContain('onManageArchivedWorkspaces()');
+    expect(sidebarSource).toContain('const busyDescriptionId =');
+    expect(sidebarSource).toContain('aria-describedby={busyDescriptionId}');
+    expect(sidebarSource).toContain('aria-describedby={archiveDisabledDescription}');
     expect(appSource).toContain("id: 'workspace:archives'");
     expect(appSource).toContain('action: workspaceController.openArchiveManager');
+    expect(appSource).toContain("'请先确认当前收件箱归档或撤销，再处理工作区。'");
   });
 
   it('updates archive confirmation copy with the recovery path and irreversible runtime effects', () => {

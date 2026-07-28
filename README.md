@@ -159,6 +159,8 @@ flowchart TB
 
 Today 与全局 `Ctrl/Cmd + N` 快速记录继续使用既有 `inbox:create`，响应同时返回事务后快照与 Main 实际插入的 opaque `createdEntryId`；没有新增 IPC 通道或 schema。Renderer 先提交事务快照；若它被较新的读取抢先，会最多再读取两次当前工作区收件箱，并始终只按该 ID 唯一确认。保存并同步成功时仍停留在原页并共用同一条成功回执；只有用户显式点击“打开记录”后，Renderer 才再次 fresh-read 并精确复核。目标缺失、已归档或状态变化时不会按正文、时间或列表位置模糊回退。若 Main 已经创建记录但 Renderer 仍无法提交权威快照，输入面会关闭或清空，并显示独立警告要求重新读取且不要重复添加；重新读取只有在精确 ID 存在且快照真正提交后才升级为成功回执。只有真正的创建请求失败才保留原输入供用户重试。
 
+收件箱归档与一次性撤销继续使用既有 Main 返回值，但 Renderer 会把 Main 成功与当前列表发布分开对账：冻结精确条目、opaque 撤销令牌及 Main 签发的 `undoExpiresAt`，依次检查响应快照、ref-backed 最新已提交快照，并在必要时最多再做两轮权威读取。归档只有在 exact ID 从已提交活动列表消失后才发布撤销通知；撤销只有在响应中的精确条目重新出现且快照提交后才移除通知。Renderer 只使用 Main 截止时间的剩余时长，不会在响应到达后重新补足 15 秒。Main 已提交但列表仍不能确认时，App 会跨页面保留“已归档/已撤销，请勿重复操作”的恢复警告；同一工作区 epoch 内的归档与每个 token 的撤销都保持 single-flight，重新读取不会重放写入。取消或失败的数据替换保留原状态，只有真正提交的数据库替换才使旧 epoch 与 token 失效。这个协调只修改 Renderer，不改变 Main、preload/IPC、schema v11 或 `.dwbx` v3。
+
 Today、Tasks 与命令面板中的手动新建任务继续使用既有 `task:create`。Main 在同一事务中返回事务后的 `taskSnapshot` 与实际插入的 opaque `createdTaskId`；创建成功仍停留在发起页面并显示回执。只有用户显式点击“打开任务”后，Renderer 才 fresh-read 当前工作区任务、只按该 ID 精确复核，并在权威快照提交后进入 Tasks 的编辑界面；目标缺失时留在原页报错，工作区、页面、回执或较新请求变化时失败关闭，不会按标题、计划日期或列表位置回退。若 Main 已提交创建但 Renderer 仍无法提交权威快照，创建框会关闭并明确提示刷新且不要重复创建，同时不发布未经确认的成功回执。这个返回契约不改变 schema v11 或 `.dwbx` v3。
 
 Today 与 7 日计划中的手动新建日程继续使用既有 `schedule:create`。Main 在同一事务中返回事务后的 `scheduleSnapshot` 与实际插入的 opaque `createdScheduleId`；创建成功仍留在 Today，并显示包含日期和时段的回执。只有用户显式点击“编辑日程”后，Renderer 才 fresh-read 当前工作区日程、同时复核该 ID 与持久化日期，并在权威快照提交后打开既有编辑窗口；目标缺失、跨午夜、工作区 A→B→A、较新创建或迟到响应都不会按标题、类型、时段或列表位置回退。若日程已落库但 Renderer 仍无法同步，创建框会关闭并以独立警告提示刷新且不要重复创建。这个返回契约不新增 IPC 通道，也不改变 schema v11 或 `.dwbx` v3。

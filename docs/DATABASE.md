@@ -126,6 +126,10 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 `inbox:create` 沿用既有输入与通道，成功响应新增同一事务后的 `inboxSnapshot` 和 Main 实际插入的 `createdEntryId`；这不新增 schema、migration 或 IPC 通道。Renderer 先提交事务快照；若它被较新序号抢先，最多再做两次权威读取，并只接受当前工作区内唯一匹配该 opaque ID 的条目。Today 与全局快速记录同步成功后仍留在原页，并共用统一回执；只有用户显式打开时，Renderer 才再次 fresh-read 并精确复核。若 Main 已落库但两次读取后仍无法提交快照，输入面会关闭或清空并显示独立警告，要求重新读取且不要重复添加；重新读取只有在 exact ID 存在且快照提交成功后才发布回执。真正的创建请求失败仍保留原输入供重试。目标缺失、已归档、工作区 activation 或较新请求变化时不会按正文、时间或列表位置模糊回退。
 
+`inbox:archive` 继续返回事务后的完整活动快照、Main 内存账本签发的 opaque `undoToken` 与绝对 `undoExpiresAt`，`inbox:undo-archive` 继续返回恢复后的完整活动快照。Renderer 冻结发起条目及这些响应身份，把 Main resolve 视为已经提交而不可安全重放的事实：先验证响应快照，再检查 ref-backed 最新已提交快照，必要时最多执行两轮带 epoch/sequence 的权威读取并最终复查 ref。归档只在同一工作区的已提交活动快照中确认 exact ID 缺失；撤销只接受响应中唯一恢复的 exact 条目，且两种结果都必须实际提交快照。
+
+撤销通知从 `undoExpiresAt` 换算当前剩余时长，不会因 IPC 延迟、重新渲染或恢复读取而延长 Main 的 15 秒窗口。若归档或 token 已消费的撤销仍无法同步，App 会保留跨页面的精确恢复警告并禁止重复归档或再次使用该 token；显式“重新读取”只做同一对账。工作区 epoch 与 token 级 single-flight 会隔离迟到 response/read/commit/finally 和 A→B→A 激活周期。取消或失败的数据替换不清除原数据库对应警告与通知，只有真正提交的数据替换才使旧 epoch/token 失效。这些规则只改变 Renderer 的发布、门禁和恢复状态；Main 的事务、Service、preload/IPC 输入与返回、`inbox_entries` 表、schema v11、migration 和 `.dwbx` v3 均保持不变。
+
 任务 v4 也不会导入 `daily.today.tasks` 中的演示任务，或自动转换既有 `task` 分类收件箱条目。任务状态固定为 `todo`、`in_progress`、`completed`；`planned_for` 只保存 Main 计算的本地民用 `YYYY-MM-DD` 或 `NULL`，完成状态与 `completed_at` 必须一致。Renderer 只能提交 Main 快照签发语义下的 `day-0` 至 `day-6` 或 `none` 固定计划意图；Service 在数据库 FIFO 操作真正执行时把 token 映射到民用日期，不能由页面伪造日期、ID、时间戳或来源关系。这个扩展不改变 v4 表结构或当前 schema 版本。
 
 `task:create` 沿用既有输入与通道，在同一个 Main 事务中创建任务，并返回事务后的 `taskSnapshot` 与实际插入的 opaque `createdTaskId`。Today、Tasks 与命令面板中的手动创建成功后仍留在发起页面并显示回执；只有用户显式打开时，Renderer 才 fresh-read 当前工作区任务、只按该 ID 精确复核，并在权威快照提交后进入 Tasks 的编辑界面。目标缺失时会留在原页报错，工作区、页面、反馈或较新请求变化时失败关闭，不会按标题、计划日期或列表位置回退。若 Main 已提交创建但 Renderer 仍无法提交权威快照，创建框会关闭并明确提示刷新且不要重复创建，同时不发布未经确认的成功回执。这个返回契约不新增 schema 或 migration；当前 schema 仍为 v11，`.dwbx` 仍为 v3。

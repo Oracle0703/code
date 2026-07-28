@@ -137,6 +137,20 @@ describe('inbox renderer components', () => {
     expect(markup).not.toMatch(/class="inbox-entry__archive"[^>]*disabled=""/u);
   });
 
+  it('disables recovery-blocked entries without pretending every entry is busy', () => {
+    const blockedReason = '上一项收件箱归档或撤销仍在确认，请先重新读取完成对账。';
+    const markup = renderInbox(null, {
+      entries: [entry('22222222-2222-4222-8222-222222222222', '待确认记录')],
+      inboxMutationBlocked: true,
+      inboxMutationBlockedReason: blockedReason,
+    });
+
+    expect(markup.match(/disabled=""/gu)).toHaveLength(4);
+    expect(markup).toContain(blockedReason);
+    expect(markup).not.toContain('is-spinning');
+    expect(markup).toContain('lucide-archive');
+  });
+
   it('restores the failed note action and clears dialog-owned task errors before closing', () => {
     const pageSource = readFileSync(
       new URL('../src/renderer/components/InboxPage.tsx', import.meta.url),
@@ -212,6 +226,8 @@ function renderInbox(
   options: {
     readonly entries?: readonly InboxEntry[];
     readonly conversionMutationPending?: boolean;
+    readonly inboxMutationBlocked?: boolean;
+    readonly inboxMutationBlockedReason?: string | null;
   } = {},
 ): string {
   return renderToStaticMarkup(
@@ -227,6 +243,8 @@ function renderInbox(
       pendingConversionEntryIds: new Set<string>(),
       pendingNoteConversionEntryIds: new Set<string>(),
       conversionMutationPending: options.conversionMutationPending ?? false,
+      inboxMutationBlocked: options.inboxMutationBlocked ?? false,
+      inboxMutationBlockedReason: options.inboxMutationBlockedReason ?? null,
       onRetry: () => undefined,
       onOpenCapture: () => undefined,
       onCategorize: async () => undefined,
