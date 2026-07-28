@@ -74,6 +74,10 @@ export function WorkspaceSidebar({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const switcherButtonRef = useRef<HTMLButtonElement>(null);
+  const storageStatusRef = useRef<HTMLDivElement>(null);
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
+  const retryFocusActiveRef = useRef(false);
+  const retryFocusOwnerRef = useRef<Element | null>(null);
   useEffect(() => {
     if (!menuOpen) return;
 
@@ -94,6 +98,33 @@ export function WorkspaceSidebar({
       window.removeEventListener('keydown', closeOnEscape);
     };
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (!retryFocusActiveRef.current) return;
+    const storageStatus = storageStatusRef.current;
+    const activeElement = document.activeElement;
+    if (
+      storageStatus === null ||
+      (activeElement !== null &&
+        activeElement !== document.body &&
+        activeElement !== retryFocusOwnerRef.current &&
+        !storageStatus.contains(activeElement))
+    ) {
+      retryFocusActiveRef.current = false;
+      retryFocusOwnerRef.current = null;
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const target = saveStatus === 'error' ? retryButtonRef.current : storageStatusRef.current;
+      target?.focus({ preventScroll: true });
+      retryFocusOwnerRef.current = target;
+      if (saveStatus !== 'saving') {
+        retryFocusActiveRef.current = false;
+        retryFocusOwnerRef.current = null;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [saveStatus]);
 
   return (
     <aside className="workspace-sidebar" aria-label="工作区导航">
@@ -257,7 +288,14 @@ export function WorkspaceSidebar({
         </div>
       </div>
 
-      <div className="sidebar-storage" aria-label="本地数据使用情况" aria-live="polite">
+      <div
+        ref={storageStatusRef}
+        className="sidebar-storage"
+        aria-label="本地数据使用情况"
+        aria-live="polite"
+        aria-busy={saveStatus === 'saving'}
+        tabIndex={-1}
+      >
         <div>
           <span>SQLite 本地保存</span>
           <span>
@@ -269,7 +307,16 @@ export function WorkspaceSidebar({
           {saveStatus === 'saving' ? '正在保存工作区更改…' : (saveError ?? '工作区更改已自动保存')}
         </p>
         {saveStatus === 'error' ? (
-          <button type="button" className="sidebar-storage__retry" onClick={onRetrySave}>
+          <button
+            ref={retryButtonRef}
+            type="button"
+            className="sidebar-storage__retry"
+            onClick={(event) => {
+              retryFocusActiveRef.current = true;
+              retryFocusOwnerRef.current = event.currentTarget;
+              onRetrySave();
+            }}
+          >
             重试保存
           </button>
         ) : null}

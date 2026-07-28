@@ -116,6 +116,10 @@ v11 为每个工作区追加不可删除的 recovery revision。归档和恢复�
 
 恢复只让持久化工作区重新进入活动集合，不写入 `workspace_app_state`，所以不会自动切换当前工作区。归档时已被停用并清空 `effective_at` 的自动化保持停用；Service 预检与数据库触发器共同保证恢复后全部活动工作区的未归档自动化定义不超过 100 条。归档事务已把该工作区未结束的 Focus 会话写为 `cancelled`，终态不会因恢复而改写；归档时被清理的浏览器页面、下载、PTY 和 AI 请求等 Main 运行时也不会重建或复活。永久删除仍不暴露，恢复前后的持久数据继续进入完整备份和受支持的逻辑数据包。
 
+工作区界面偏好继续使用既有 `workspaceId + strict field patch` 写入，不给数据库行增加 Renderer 请求身份。Renderer 在内存中按 `workspaceId + field` 记录 epoch 与单调 sequence；只有与当前字段身份精确相同的成功才能清除 dirty，只有同一当前身份的失败才能进入可见保存错误，而 pending cleanup 只结算其原请求 epoch。这样同一字段的值从 A→B→A 时，第一笔 A 即使最后返回，也不能凭值相等误认成第三笔 A 已提交。重试只发送当前 epoch 仍未解决字段的最新值；读取重试或已确认提交的数据替换建立新 epoch，取消或失败的数据替换保持当前 epoch。旧 epoch 的成功、失败和清理结果全部隔离，不会清除当前失败或阻止当前重试。
+
+这项约束只修正 Renderer 对偏好保存回执的归属，不改变工作区 CRUD 的事务或快照语义，也不新增提交后 CRUD 对账。Main 的偏好 Repository/Service、preload/IPC 合约、`workspace_preferences` 表、schema v11 和 `.dwbx` v3 均保持不变。
+
 从原型版本首次进入 v2 时，Renderer 会严格读取旧 `localStorage` 中合法的页面、主题和布局值，并只在数据库仍为单一默认工作区时导入；只有 SQLite 写入成功后才清理旧键。旧版硬编码工作区选择不会被当作真实身份导入，写入失败时会保留可重试的 dirty patch 和旧键。
 
 收件箱 v3 不导入界面中的演示条目，也不会把原型 `localStorage` 任务当作真实收件箱数据。条目允许重复正文，分类只接受 `uncategorized`、`task`、`note`、`link`；其中 `task` 只是处理意图。归档工作区中的条目原样保留，但触发器和 Service 都拒绝继续修改。
