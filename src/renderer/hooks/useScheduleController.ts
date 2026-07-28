@@ -7,17 +7,23 @@ import type {
 } from '../../shared/contracts';
 import {
   createdScheduleFromResult,
+  createScheduleArchiveMutationIntent,
   createScheduleRequestIdentity,
+  createScheduleUpdateMutationIntent,
   createScheduleWorkspaceIdentity,
   isScheduleRequestCurrent,
   isScheduleRequestLatest,
   isScheduleSnapshotDateCurrent,
+  reconcileScheduleArchiveResult,
   reconcileScheduleCreateResult,
+  reconcileScheduleUpdateResult,
   scheduleSnapshotForActivation,
   shouldApplyScheduleSnapshot,
   sortScheduleItems,
+  type ScheduleArchiveMutationIntent,
   type ScheduleRequestIdentity,
   type ScheduleSnapshotState,
+  type ScheduleUpdateMutationIntent,
   type ScheduleWorkspaceIdentity,
 } from '../schedule-state';
 import { millisecondsUntilNextLocalDay } from '../task-state';
@@ -39,6 +45,10 @@ const EMPTY_ITEMS: readonly ScheduleItem[] = Object.freeze([]);
 const INACTIVE_ACTIVATION = Object.freeze(createScheduleWorkspaceIdentity(null));
 const SCHEDULE_CREATE_RECONCILIATION_ERROR =
   '日程已创建，但当前计划未能同步。请重新读取后查看，避免重复创建。';
+const SCHEDULE_UPDATE_RECONCILIATION_ERROR =
+  '日程已保存，但当前计划未能同步。请重新读取后查看，避免重复保存。';
+const SCHEDULE_ARCHIVE_RECONCILIATION_ERROR =
+  '日程已归档，但当前计划未能同步。请重新读取后确认，避免重复归档。';
 
 export interface ScheduleCreateCommit {
   readonly result: ScheduleCreateResult;
@@ -47,6 +57,46 @@ export interface ScheduleCreateCommit {
   readonly committedTodayDate: string | null;
   readonly reconciliationWarning: string | null;
 }
+
+export interface ScheduleUpdateCommit {
+  readonly intent: ScheduleUpdateMutationIntent;
+  readonly result: ScheduleSnapshot;
+  readonly updatedSchedule: ScheduleItem | null;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
+}
+
+export interface ScheduleArchiveCommit {
+  readonly intent: ScheduleArchiveMutationIntent;
+  readonly result: ScheduleSnapshot;
+  readonly confirmed: boolean;
+  readonly committed: boolean;
+  readonly reconciliationWarning: string | null;
+}
+
+export type ScheduleMutationRecovery =
+  | {
+      readonly kind: 'update';
+      readonly updatedSchedule: ScheduleItem | null;
+      readonly committed: boolean;
+    }
+  | {
+      readonly kind: 'archive';
+      readonly confirmed: boolean;
+      readonly committed: boolean;
+    };
+
+type ScheduleMutationRecoveryTarget =
+  | {
+      readonly kind: 'update';
+      readonly intent: ScheduleUpdateMutationIntent;
+      readonly resultSnapshot: ScheduleSnapshot;
+    }
+  | {
+      readonly kind: 'archive';
+      readonly intent: ScheduleArchiveMutationIntent;
+      readonly resultSnapshot: ScheduleSnapshot;
+    };
 
 export function useScheduleController(workspaceId: string | null) {
   const activation = useMemo(() => createScheduleWorkspaceIdentity(workspaceId), [workspaceId]);
@@ -388,75 +438,209 @@ export function useScheduleController(workspaceId: string | null) {
       kind: ScheduleKind,
       startMinute: number,
       endMinute: number,
-    ): Promise<void> => {
+    ): Promise<ScheduleUpdateCommit> => {
       const target = activeActivationRef.current;
-      if (target.workspaceId === null || !beginPendingItem(target, item.id)) {
+      if (target.workspaceId === null) {
+        throw new Error('当前工作区不可用，无法保存日程。');
+      }
+      const intent = createScheduleUpdateMutationIntent(
+        target.workspaceId,
+        item,
+        expectedDate,
+        title,
+        kind,
+        startMinute,
+        endMinute,
+      );
+      if (!beginPendingItem(target, intent.originalSchedule.id)) {
         throw new Error('这条日程正在保存。');
       }
       const request = beginRequest(target);
       if (!request) {
-        endPendingItem(target, item.id);
+        endPendingItem(target, intent.originalSchedule.id);
         throw new Error('当前工作区不可用，无法保存日程。');
       }
       setOperationErrorState(null);
       try {
-        applySnapshot(
-          await window.workbench.schedule.update({
+        let result: ScheduleSnapshot;
+        try {
+          result = await window.workbench.schedule.update({
             workspaceId: request.workspaceId,
-            scheduleId: item.id,
-            expectedDate,
-            expectedRevision: item.revision,
-            title,
-            kind,
-            startMinute,
-            endMinute,
-          }),
-          request,
-        );
-      } catch (error) {
-        throw operationFailure(
-          error,
-          request.workspace,
-          '日程保存失败，可能已经跨日或在其他操作中更新。',
-        );
+            scheduleId: intent.originalSchedule.id,
+            expectedDate: intent.expectedDate,
+            expectedRevision: intent.originalSchedule.revision,
+            title: intent.title,
+            kind: intent.scheduleKind,
+            startMinute: intent.startMinute,
+            endMinute: intent.endMinute,
+          });
+        } catch (error) {
+          throw operationFailure(
+            error,
+            request.workspace,
+            '日程保存失败，可能已经跨日或在其他操作中更新。',
+          );
+        }
+
+        const reconciliation = await reconcileScheduleUpdateResult({
+          intent,
+          resultSnapshot: result,
+          commitResultSnapshot: () => applySnapshot(result, request),
+          getCommittedSnapshot: () =>
+            scheduleSnapshotForActivation(request.workspace, storedSnapshotRef.current, new Date()),
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
+        });
+
+        return {
+          intent,
+          result,
+          updatedSchedule: reconciliation.authoritativeSchedule,
+          committed: reconciliation.committed,
+          reconciliationWarning: reconciliation.committed
+            ? null
+            : SCHEDULE_UPDATE_RECONCILIATION_ERROR,
+        };
       } finally {
-        endPendingItem(request.workspace, item.id);
+        endPendingItem(request.workspace, intent.originalSchedule.id);
       }
     },
-    [applySnapshot, beginPendingItem, beginRequest, endPendingItem, operationFailure],
+    [
+      applySnapshot,
+      beginPendingItem,
+      beginRequest,
+      endPendingItem,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
   );
 
   const archive = useCallback(
-    async (item: ScheduleItem, expectedDate: string): Promise<void> => {
+    async (item: ScheduleItem, expectedDate: string): Promise<ScheduleArchiveCommit> => {
       const target = activeActivationRef.current;
-      if (target.workspaceId === null || !beginPendingItem(target, item.id)) return;
+      if (target.workspaceId === null) {
+        throw new Error('当前工作区不可用，无法归档日程。');
+      }
+      const intent = createScheduleArchiveMutationIntent(target.workspaceId, item, expectedDate);
+      if (!beginPendingItem(target, intent.originalSchedule.id)) {
+        throw new Error('这条日程正在归档。');
+      }
       const request = beginRequest(target);
       if (!request) {
-        endPendingItem(target, item.id);
-        return;
+        endPendingItem(target, intent.originalSchedule.id);
+        throw new Error('当前工作区不可用，无法归档日程。');
       }
       setOperationErrorState(null);
       try {
-        applySnapshot(
-          await window.workbench.schedule.archive({
+        let result: ScheduleSnapshot;
+        try {
+          result = await window.workbench.schedule.archive({
             workspaceId: request.workspaceId,
-            scheduleId: item.id,
-            expectedDate,
-            expectedRevision: item.revision,
-          }),
-          request,
-        );
-      } catch (error) {
-        throw operationFailure(
-          error,
-          request.workspace,
-          '日程归档失败，可能已经跨日或在其他操作中更新。',
-        );
+            scheduleId: intent.originalSchedule.id,
+            expectedDate: intent.expectedDate,
+            expectedRevision: intent.originalSchedule.revision,
+          });
+        } catch (error) {
+          throw operationFailure(
+            error,
+            request.workspace,
+            '日程归档失败，可能已经跨日或在其他操作中更新。',
+          );
+        }
+
+        const reconciliation = await reconcileScheduleArchiveResult({
+          intent,
+          resultSnapshot: result,
+          commitResultSnapshot: () => applySnapshot(result, request),
+          getCommittedSnapshot: () =>
+            scheduleSnapshotForActivation(request.workspace, storedSnapshotRef.current, new Date()),
+          prepareSnapshotRefresh,
+          isCurrent: () => requestIsCurrent(request),
+        });
+
+        return {
+          intent,
+          result,
+          confirmed: reconciliation.confirmed,
+          committed: reconciliation.committed,
+          reconciliationWarning: reconciliation.committed
+            ? null
+            : SCHEDULE_ARCHIVE_RECONCILIATION_ERROR,
+        };
       } finally {
-        endPendingItem(request.workspace, item.id);
+        endPendingItem(request.workspace, intent.originalSchedule.id);
       }
     },
-    [applySnapshot, beginPendingItem, beginRequest, endPendingItem, operationFailure],
+    [
+      applySnapshot,
+      beginPendingItem,
+      beginRequest,
+      endPendingItem,
+      operationFailure,
+      prepareSnapshotRefresh,
+      requestIsCurrent,
+    ],
+  );
+
+  const recoverScheduleMutation = useCallback(
+    async (warning: ScheduleMutationRecoveryTarget): Promise<ScheduleMutationRecovery> => {
+      const target = activeActivationRef.current;
+      if (
+        target.workspaceId === null ||
+        target.workspaceId !== warning.intent.expectedWorkspaceId
+      ) {
+        return warning.kind === 'update'
+          ? { kind: 'update', updatedSchedule: null, committed: false }
+          : { kind: 'archive', confirmed: false, committed: false };
+      }
+      if (!beginPendingItem(target, warning.intent.originalSchedule.id)) {
+        throw new Error('这条日程正在处理另一项写入。');
+      }
+
+      try {
+        const reconciliationInput = {
+          resultSnapshot: warning.resultSnapshot,
+          commitResultSnapshot: () => false,
+          getCommittedSnapshot: () =>
+            scheduleSnapshotForActivation(target, storedSnapshotRef.current, new Date()),
+          prepareSnapshotRefresh,
+          isCurrent: () => activeActivationRef.current === target,
+        };
+        if (warning.kind === 'update') {
+          const reconciliation = await reconcileScheduleUpdateResult({
+            ...reconciliationInput,
+            intent: warning.intent,
+          });
+          return {
+            kind: 'update',
+            updatedSchedule: reconciliation.authoritativeSchedule,
+            committed: reconciliation.committed,
+          };
+        }
+        const reconciliation = await reconcileScheduleArchiveResult({
+          ...reconciliationInput,
+          intent: warning.intent,
+        });
+        return {
+          kind: 'archive',
+          confirmed: reconciliation.confirmed,
+          committed: reconciliation.committed,
+        };
+      } finally {
+        endPendingItem(target, warning.intent.originalSchedule.id);
+      }
+    },
+    [beginPendingItem, endPendingItem, prepareSnapshotRefresh],
+  );
+
+  const getCommittedSnapshot = useCallback(
+    (expectedWorkspaceId: string): ScheduleSnapshot | null => {
+      const current = activeActivationRef.current;
+      if (current.workspaceId !== expectedWorkspaceId) return null;
+      return scheduleSnapshotForActivation(current, storedSnapshotRef.current, new Date());
+    },
+    [],
   );
 
   const snapshot = scheduleSnapshotForActivation(activation, storedSnapshot, new Date());
@@ -497,6 +681,7 @@ export function useScheduleController(workspaceId: string | null) {
       if (current.workspaceId !== null) await load(current);
     },
     prepareSnapshotRefresh,
+    getCommittedSnapshot,
     retry: () => {
       const current = activeActivationRef.current;
       if (current.workspaceId !== null) void load(current).catch(() => undefined);
@@ -506,6 +691,7 @@ export function useScheduleController(workspaceId: string | null) {
     create,
     update,
     archive,
+    recoverScheduleMutation,
   };
 }
 

@@ -9,6 +9,8 @@ interface ScheduleCreateSyncWarningProps {
   startMinute: number;
   endMinute: number;
   message: string;
+  blocked: boolean;
+  blockedReason: string | null;
   onRefresh: () => Promise<void>;
   onDismiss: () => void;
 }
@@ -19,6 +21,8 @@ export function ScheduleCreateSyncWarning({
   startMinute,
   endMinute,
   message,
+  blocked,
+  blockedReason,
   onRefresh,
   onDismiss,
 }: ScheduleCreateSyncWarningProps) {
@@ -27,6 +31,7 @@ export function ScheduleCreateSyncWarning({
   const errorRef = useRef<HTMLParagraphElement>(null);
   const summary = scheduleCreateTitleSummary(title);
   const timing = `${scheduledFor} · ${formatScheduleInputMinute(startMinute)}–${formatScheduleInputMinute(endMinute)}`;
+  const blockedReasonId = 'schedule-create-sync-warning-blocked-reason';
 
   useEffect(() => {
     if (refreshError === null) return;
@@ -37,7 +42,7 @@ export function ScheduleCreateSyncWarning({
   }, [refreshError]);
 
   const refresh = async (): Promise<void> => {
-    if (refreshing) return;
+    if (blocked || refreshing) return;
     setRefreshing(true);
     setRefreshError(null);
     try {
@@ -72,7 +77,8 @@ export function ScheduleCreateSyncWarning({
         type="button"
         className="task-create-toast__action schedule-create-sync-warning__action"
         aria-label={`重新读取日程列表并确认：“${summary}”`}
-        disabled={refreshing}
+        aria-describedby={blocked && blockedReason ? blockedReasonId : undefined}
+        disabled={blocked || refreshing}
         onClick={() => void refresh()}
       >
         {refreshing ? (
@@ -82,6 +88,11 @@ export function ScheduleCreateSyncWarning({
         )}
         {refreshing ? '正在读取…' : '重新读取'}
       </button>
+      {blocked && blockedReason ? (
+        <span id={blockedReasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
       <button
         type="button"
         className="task-create-toast__close schedule-create-toast__close"

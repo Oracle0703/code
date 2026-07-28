@@ -57,6 +57,9 @@ export interface TodayDashboardProps {
   scheduleOperationError: string | null;
   pendingScheduleItemIds: ReadonlySet<string>;
   scheduleCreatePending: boolean;
+  scheduleMutationBlocked: boolean;
+  workspaceNavigationBlocked: boolean;
+  workspaceNavigationBlockedReason: string | null;
   focusSnapshot: FocusSnapshot | null;
   focusStatus: 'loading' | 'ready' | 'error';
   focusError: string | null;
@@ -106,6 +109,9 @@ export function TodayDashboard({
   scheduleOperationError,
   pendingScheduleItemIds,
   scheduleCreatePending,
+  scheduleMutationBlocked,
+  workspaceNavigationBlocked,
+  workspaceNavigationBlockedReason,
   focusSnapshot,
   focusStatus,
   focusError,
@@ -565,12 +571,23 @@ export function TodayDashboard({
                 <div className="focus-card__actions">
                   <button
                     type="button"
+                    aria-describedby={
+                      workspaceNavigationBlocked && workspaceNavigationBlockedReason
+                        ? 'focus-workspace-switch-blocked-reason'
+                        : undefined
+                    }
+                    disabled={workspaceNavigationBlocked}
                     onClick={() => onSwitchFocusWorkspace(foreignFocusSession.workspaceId)}
                   >
                     <LogIn size={14} aria-hidden="true" />
                     切换到该工作区
                   </button>
                 </div>
+                {workspaceNavigationBlocked && workspaceNavigationBlockedReason ? (
+                  <small id="focus-workspace-switch-blocked-reason">
+                    {workspaceNavigationBlockedReason}
+                  </small>
+                ) : null}
               </>
             ) : focusSession && focusSessionIsCurrent ? (
               <>
@@ -748,10 +765,13 @@ export function TodayDashboard({
               <button
                 type="button"
                 className="agenda-card__add"
+                data-schedule-create-action="true"
                 onClick={() =>
                   todayScheduleSnapshot && onCreateSchedule(todayScheduleSnapshot.todayDate)
                 }
-                disabled={scheduleCreatePending || !todayScheduleSnapshot}
+                disabled={
+                  scheduleCreatePending || scheduleMutationBlocked || !todayScheduleSnapshot
+                }
                 aria-label="添加今日日程"
               >
                 {scheduleCreatePending ? (
@@ -786,7 +806,8 @@ export function TodayDashboard({
                       type="button"
                       className="agenda-row"
                       key={item.id}
-                      disabled={pending}
+                      data-schedule-id={item.id}
+                      disabled={pending || scheduleMutationBlocked}
                       onClick={() => onOpenSchedule(item)}
                       aria-label={`编辑日程：${item.title}，${formatScheduleInputMinute(item.startMinute)} 到 ${formatScheduleInputMinute(item.endMinute)}`}
                     >
@@ -811,10 +832,11 @@ export function TodayDashboard({
                 <span>安排一段明确的开始与结束时间。</span>
                 <button
                   type="button"
+                  data-schedule-create-action="true"
                   onClick={() =>
                     todayScheduleSnapshot && onCreateSchedule(todayScheduleSnapshot.todayDate)
                   }
-                  disabled={!todayScheduleSnapshot}
+                  disabled={scheduleMutationBlocked || !todayScheduleSnapshot}
                 >
                   <Plus size={13} /> 添加日程
                 </button>
@@ -839,6 +861,7 @@ export function TodayDashboard({
         pendingScheduleItemIds={pendingScheduleItemIds}
         taskCreatePending={taskCreatePending}
         scheduleCreatePending={scheduleCreatePending}
+        scheduleMutationBlocked={scheduleMutationBlocked}
         onRetryTasks={onRetryTasks}
         onRetrySchedule={onRetrySchedule}
         onCreateTask={onCreateTask}

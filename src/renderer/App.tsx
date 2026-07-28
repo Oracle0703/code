@@ -48,7 +48,9 @@ import {
   type DatabaseBackupRestoreInput,
   type DatabaseBackupRestoreResult,
   type InboxEntry,
+  type ScheduleItem,
   type ScheduleKind,
+  type ScheduleSnapshot,
   type SearchResult,
   type TaskPlanning,
   type WorkspaceColor,
@@ -83,6 +85,7 @@ import { QuickCaptureDialog, type QuickCaptureTarget } from './components/QuickC
 import { ScheduleCreateSyncWarning } from './components/ScheduleCreateSyncWarning';
 import { ScheduleCreateToast } from './components/ScheduleCreateToast';
 import { ScheduleDialog, type ScheduleDialogState } from './components/ScheduleDialog';
+import { ScheduleMutationSyncWarning } from './components/ScheduleMutationSyncWarning';
 import { SettingsPage, type SettingsSection } from './components/SettingsPage';
 import { TaskCreateSyncWarning } from './components/TaskCreateSyncWarning';
 import { TaskCreateToast } from './components/TaskCreateToast';
@@ -105,7 +108,12 @@ import {
   type NoteMutationRecovery,
   type NoteUpdateCommit,
 } from './hooks/useNoteController';
-import { useScheduleController } from './hooks/useScheduleController';
+import {
+  useScheduleController,
+  type ScheduleArchiveCommit,
+  type ScheduleMutationRecovery,
+  type ScheduleUpdateCommit,
+} from './hooks/useScheduleController';
 import { useTaskController } from './hooks/useTaskController';
 import { useWorkspaceController } from './hooks/useWorkspaceController';
 import { openBrowserUrlInWorkspace } from './browser-state';
@@ -209,7 +217,17 @@ import {
   type ScheduleCreateFeedback,
   type ScheduleCreateWorkspaceIdentity,
 } from './schedule-create-navigation';
-import { defaultScheduleRangeForPlanningDate } from './schedule-state';
+import {
+  createScheduleWorkspaceIdentity,
+  defaultScheduleRangeForPlanningDate,
+  type ScheduleArchiveMutationIntent,
+  type ScheduleUpdateMutationIntent,
+  type ScheduleWorkspaceIdentity,
+} from './schedule-state';
+import {
+  ScheduleMutationCoordinator,
+  type ScheduleMutationCoordinatorIntent,
+} from './schedule-mutation-coordinator';
 import {
   SearchNavigationCoordinator,
   assertSearchTargetExists,
@@ -380,6 +398,27 @@ type NoteMutationSyncWarningPublication = NoteMutationSyncWarningState & {
   readonly refreshError: string | null;
 };
 
+type ScheduleMutationSyncWarningTarget =
+  | {
+      readonly kind: 'update';
+      readonly intent: ScheduleUpdateMutationIntent;
+      readonly resultSnapshot: ScheduleSnapshot;
+      readonly message: string;
+    }
+  | {
+      readonly kind: 'archive';
+      readonly intent: ScheduleArchiveMutationIntent;
+      readonly resultSnapshot: ScheduleSnapshot;
+      readonly message: string;
+    };
+
+type ScheduleMutationSyncWarningPublication = ScheduleMutationSyncWarningTarget & {
+  readonly activation: ScheduleWorkspaceIdentity;
+  readonly focusActionOnMount: boolean;
+  readonly refreshing: boolean;
+  readonly refreshError: string | null;
+};
+
 function noteUpdateSyncWarning(commit: NoteUpdateCommit): NoteMutationSyncWarningTarget {
   return {
     kind: 'update',
@@ -401,6 +440,32 @@ function noteArchiveSyncWarning(commit: NoteArchiveCommit): NoteMutationSyncWarn
     message:
       commit.reconciliationWarning ??
       '笔记已归档，但当前笔记列表未能同步。请重新读取后确认，避免重复归档。',
+  };
+}
+
+function scheduleUpdateSyncWarning(
+  commit: ScheduleUpdateCommit,
+): ScheduleMutationSyncWarningTarget {
+  return {
+    kind: 'update',
+    intent: commit.intent,
+    resultSnapshot: commit.result,
+    message:
+      commit.reconciliationWarning ??
+      '日程已保存，但当前计划未能同步。请重新读取后查看，避免重复保存。',
+  };
+}
+
+function scheduleArchiveSyncWarning(
+  commit: ScheduleArchiveCommit,
+): ScheduleMutationSyncWarningTarget {
+  return {
+    kind: 'archive',
+    intent: commit.intent,
+    resultSnapshot: commit.result,
+    message:
+      commit.reconciliationWarning ??
+      '日程已归档，但当前计划未能同步。请重新读取后确认，避免重复归档。',
   };
 }
 
@@ -493,6 +558,9 @@ export function App() {
   } | null>(null);
   const [scheduleCreateSyncWarningState, setScheduleCreateSyncWarningState] =
     useState<ScheduleCreateSyncWarningState | null>(null);
+  const [scheduleMutationSyncWarningState, setScheduleMutationSyncWarningState] =
+    useState<ScheduleMutationSyncWarningPublication | null>(null);
+  const [scheduleNavigationPending, setScheduleNavigationPending] = useState(false);
   const [automationCreateFeedbackState, setAutomationCreateFeedbackState] = useState<{
     readonly activation: AutomationCreateWorkspaceIdentity;
     readonly feedback: AutomationCreateFeedback;
@@ -544,6 +612,7 @@ export function App() {
   );
   const [assistantSavedNoteSaveGate] = useState(() => new AssistantSavedNoteSaveGate());
   const [noteMutationCoordinator] = useState(() => new NoteMutationCoordinator());
+  const [scheduleMutationCoordinator] = useState(() => new ScheduleMutationCoordinator());
   const [focusTaskCompletionCoordinator] = useState(() => new FocusTaskCompletionCoordinator());
   const [focusTaskCompletionGate] = useState(() => new FocusTaskCompletionGate());
   const [maximized, setMaximized] = useState(false);
@@ -583,6 +652,13 @@ export function App() {
   );
   const scheduleCreateFeedbackRef = useRef<ScheduleCreateFeedback | null>(null);
   const scheduleCreateSurfaceRef = useRef<AppSurfaceId>('today');
+  const scheduleMutationActivationRef = useRef<ScheduleWorkspaceIdentity>(
+    createScheduleWorkspaceIdentity(null),
+  );
+  const scheduleMutationSyncWarningRef = useRef<ScheduleMutationSyncWarningPublication | null>(
+    null,
+  );
+  const scheduleNavigationIntentRef = useRef<ScheduleMutationCoordinatorIntent | null>(null);
   const automationCreateActivationRef = useRef<AutomationCreateWorkspaceIdentity>(
     createAutomationCreateWorkspaceIdentity(null),
   );
@@ -722,6 +798,10 @@ export function App() {
   const prepareTaskSnapshotRefresh = taskController.prepareSnapshotRefresh;
   const prepareNoteSnapshotRefresh = noteController.prepareSnapshotRefresh;
   const scheduleController = useScheduleController(snapshot?.currentWorkspaceId ?? null);
+  const visibleScheduleMutationSyncWarning =
+    scheduleMutationSyncWarningState?.activation === scheduleController.activation
+      ? scheduleMutationSyncWarningState
+      : null;
   const focusController = useFocusController(snapshot?.currentWorkspaceId ?? null);
   const focusTaskCompletion = useMemo(
     () =>
@@ -1190,6 +1270,10 @@ export function App() {
     visibleScheduleCreateFeedback,
   ]);
   useLayoutEffect(() => {
+    scheduleMutationActivationRef.current = scheduleController.activation;
+    scheduleMutationSyncWarningRef.current = visibleScheduleMutationSyncWarning;
+  }, [scheduleController.activation, visibleScheduleMutationSyncWarning]);
+  useLayoutEffect(() => {
     const previousActivation = inboxConversionActivationRef.current;
     inboxConversionActivationRef.current = inboxController.activation;
     inboxConversionFeedbackRef.current = visibleInboxConversionFeedback;
@@ -1562,6 +1646,257 @@ export function App() {
     setNoteCreateSyncWarningState(null);
     setNoteMutationSyncWarningState(null);
   }, [noteMutationCoordinator]);
+  const publishScheduleMutationSyncWarning = useCallback(
+    (
+      activation: ScheduleWorkspaceIdentity,
+      warning: ScheduleMutationSyncWarningTarget,
+      focusActionOnMount: boolean,
+    ): void => {
+      if (scheduleMutationActivationRef.current.workspaceId !== activation.workspaceId) return;
+      const current = scheduleMutationSyncWarningRef.current;
+      const publication: ScheduleMutationSyncWarningPublication =
+        current?.activation === activation &&
+        current.kind === warning.kind &&
+        current.intent === warning.intent &&
+        current.resultSnapshot === warning.resultSnapshot
+          ? {
+              ...current,
+              focusActionOnMount: current.focusActionOnMount || focusActionOnMount,
+            }
+          : {
+              activation,
+              ...warning,
+              focusActionOnMount,
+              refreshing: false,
+              refreshError: null,
+            };
+      scheduleMutationSyncWarningRef.current = publication;
+      setScheduleMutationSyncWarningState(publication);
+    },
+    [],
+  );
+  const scheduleWriteIsBlocked = useCallback((activation: ScheduleWorkspaceIdentity): boolean => {
+    const warning = scheduleMutationSyncWarningRef.current;
+    return (
+      warning !== null &&
+      warning.activation.workspaceId !== null &&
+      warning.activation.workspaceId === activation.workspaceId
+    );
+  }, []);
+  const scheduleWorkspaceChangeIsBlocked = useCallback((): boolean => {
+    const activation = scheduleMutationActivationRef.current;
+    return (
+      scheduleMutationCoordinator.isPending(activation.workspaceId) ||
+      scheduleWriteIsBlocked(activation)
+    );
+  }, [scheduleMutationCoordinator, scheduleWriteIsBlocked]);
+  const scheduleWorkspaceChangeBlocked =
+    scheduleNavigationPending || scheduleWorkspaceChangeIsBlocked();
+  const updateSchedule = useCallback(
+    async (
+      item: Parameters<typeof scheduleController.update>[0],
+      expectedDate: string,
+      title: string,
+      kind: ScheduleKind,
+      startMinute: number,
+      endMinute: number,
+    ): Promise<ScheduleUpdateCommit> => {
+      const activation = scheduleMutationActivationRef.current;
+      if (scheduleWriteIsBlocked(activation)) {
+        throw new Error('请先重新读取上一项已提交的日程写入，再继续保存。');
+      }
+      const coordinatorIntent = scheduleMutationCoordinator.begin(activation, 'update');
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在处理另一项日程写入。');
+      }
+      try {
+        const commit = await scheduleController.update(
+          item,
+          expectedDate,
+          title,
+          kind,
+          startMinute,
+          endMinute,
+        );
+        const publicationActivation = scheduleMutationActivationRef.current;
+        if (
+          !commit.committed &&
+          scheduleMutationCoordinator.canPublishWarning(coordinatorIntent, publicationActivation)
+        ) {
+          publishScheduleMutationSyncWarning(
+            publicationActivation,
+            scheduleUpdateSyncWarning(commit),
+            true,
+          );
+        }
+        return commit;
+      } finally {
+        scheduleMutationCoordinator.end(coordinatorIntent);
+      }
+    },
+    [
+      publishScheduleMutationSyncWarning,
+      scheduleController,
+      scheduleMutationCoordinator,
+      scheduleWriteIsBlocked,
+    ],
+  );
+  const archiveSchedule = useCallback(
+    async (
+      item: Parameters<typeof scheduleController.archive>[0],
+      expectedDate: string,
+    ): Promise<ScheduleArchiveCommit> => {
+      const activation = scheduleMutationActivationRef.current;
+      if (scheduleWriteIsBlocked(activation)) {
+        throw new Error('请先重新读取上一项已提交的日程写入，再继续归档。');
+      }
+      const coordinatorIntent = scheduleMutationCoordinator.begin(activation, 'archive');
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在处理另一项日程写入。');
+      }
+      try {
+        const commit = await scheduleController.archive(item, expectedDate);
+        const publicationActivation = scheduleMutationActivationRef.current;
+        if (
+          !commit.committed &&
+          scheduleMutationCoordinator.canPublishWarning(coordinatorIntent, publicationActivation)
+        ) {
+          publishScheduleMutationSyncWarning(
+            publicationActivation,
+            scheduleArchiveSyncWarning(commit),
+            true,
+          );
+        }
+        return commit;
+      } finally {
+        scheduleMutationCoordinator.end(coordinatorIntent);
+      }
+    },
+    [
+      publishScheduleMutationSyncWarning,
+      scheduleController,
+      scheduleMutationCoordinator,
+      scheduleWriteIsBlocked,
+    ],
+  );
+  const refreshScheduleMutationSyncWarning = useCallback(
+    async (warning: ScheduleMutationSyncWarningPublication): Promise<ScheduleMutationRecovery> => {
+      const publication = scheduleMutationSyncWarningRef.current;
+      if (publication === null || publication !== warning) {
+        throw new Error('这项日程同步状态已被较新的结果替代。');
+      }
+      const coordinatorIntent = scheduleMutationCoordinator.begin(
+        publication.activation,
+        'recover',
+      );
+      if (coordinatorIntent === null) {
+        throw new Error('这个工作区正在处理另一项日程写入。');
+      }
+      const isSamePublication = (
+        current: ScheduleMutationSyncWarningPublication | null,
+      ): current is ScheduleMutationSyncWarningPublication =>
+        current?.activation === publication.activation &&
+        current.kind === publication.kind &&
+        current.intent === publication.intent &&
+        current.resultSnapshot === publication.resultSnapshot;
+      const updatePublication = (
+        update: (
+          current: ScheduleMutationSyncWarningPublication,
+        ) => ScheduleMutationSyncWarningPublication,
+      ): void => {
+        const current = scheduleMutationSyncWarningRef.current;
+        if (!isSamePublication(current)) return;
+        const next = update(current);
+        scheduleMutationSyncWarningRef.current = next;
+        setScheduleMutationSyncWarningState(next);
+      };
+      updatePublication((current) => ({
+        ...current,
+        refreshing: true,
+        refreshError: null,
+        focusActionOnMount: false,
+      }));
+      try {
+        const recovery = await scheduleController.recoverScheduleMutation(publication);
+        if (
+          !scheduleMutationCoordinator.isCurrent(
+            coordinatorIntent,
+            scheduleMutationActivationRef.current,
+          ) ||
+          !isSamePublication(scheduleMutationSyncWarningRef.current)
+        ) {
+          throw new Error('这项日程同步状态已被较新的结果替代。');
+        }
+        const recovered =
+          recovery.kind === 'update'
+            ? recovery.committed &&
+              recovery.updatedSchedule !== null &&
+              recovery.updatedSchedule.id === publication.intent.originalSchedule.id
+            : recovery.committed && recovery.confirmed;
+        if (!recovered) {
+          throw new Error(
+            publication.kind === 'update'
+              ? '重新读取后仍无法确认刚保存的日程。请稍后再试；日程已经保存，请不要再次保存。'
+              : '重新读取后仍无法确认已归档的日程。请稍后再试；日程已经归档，请不要再次归档。',
+          );
+        }
+        if (isSamePublication(scheduleMutationSyncWarningRef.current)) {
+          scheduleMutationSyncWarningRef.current = null;
+          setScheduleMutationSyncWarningState(null);
+        }
+        return recovery;
+      } catch (error) {
+        updatePublication((current) => ({
+          ...current,
+          refreshing: false,
+          refreshError:
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : '重新读取日程失败，请稍后再试。',
+        }));
+        throw error;
+      } finally {
+        scheduleMutationCoordinator.end(coordinatorIntent);
+        updatePublication((current) =>
+          current.refreshing ? { ...current, refreshing: false } : current,
+        );
+      }
+    },
+    [scheduleController, scheduleMutationCoordinator],
+  );
+  const invalidateScheduleMutations = useCallback((): void => {
+    scheduleMutationCoordinator.invalidateAll();
+    scheduleMutationSyncWarningRef.current = null;
+    scheduleNavigationIntentRef.current = null;
+    setScheduleMutationSyncWarningState(null);
+    setScheduleNavigationPending(false);
+  }, [scheduleMutationCoordinator]);
+  const restoreScheduleMutationWarningFocus = useCallback(
+    (warning: ScheduleMutationSyncWarningPublication): void => {
+      if (warning.kind === 'update') {
+        const target = Array.from(
+          document.querySelectorAll<HTMLElement>('[data-schedule-id]'),
+        ).find(
+          (element) =>
+            element.dataset.scheduleId === warning.intent.originalSchedule.id &&
+            !(element instanceof HTMLButtonElement && element.disabled),
+        );
+        if (target) {
+          target.focus({ preventScroll: true });
+          return;
+        }
+      }
+      const fallback = document.querySelector<HTMLElement>(
+        '[data-schedule-id]:not(:disabled), [data-schedule-create-action]:not(:disabled), .today-dashboard h1, .section-page h1, .activity-rail button[aria-current="page"]',
+      );
+      if (!fallback) return;
+      if (!fallback.hasAttribute('tabindex') && !(fallback instanceof HTMLButtonElement)) {
+        fallback.tabIndex = -1;
+      }
+      fallback.focus({ preventScroll: true });
+    },
+    [],
+  );
   const handleRequestedInboxEntry = useCallback(() => {
     const expectedGeneration = inboxReveal?.generation;
     if (expectedGeneration === undefined) return;
@@ -1597,6 +1932,9 @@ export function App() {
       if (noteMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
         throw new Error('笔记写入仍在确认，请稍候再恢复备份。');
       }
+      if (scheduleMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
+        throw new Error('日程写入仍在确认，请稍候再恢复备份。');
+      }
       if (!confirmLeaveNoteDraft()) return null;
       dataReplacementApprovedRef.current = true;
       dataReplacementNoteDiscardApprovedRef.current = true;
@@ -1607,6 +1945,7 @@ export function App() {
           dataReplacementNoteDiscardApprovedRef.current = false;
         } else {
           invalidateNoteMutations();
+          invalidateScheduleMutations();
           invalidateManualBackupRecovery();
         }
         return result;
@@ -1620,8 +1959,10 @@ export function App() {
       confirmLeaveNoteDraft,
       invalidateManualBackupRecovery,
       invalidateNoteMutations,
+      invalidateScheduleMutations,
       noteMutationCoordinator,
       restoreBackup,
+      scheduleMutationCoordinator,
     ],
   );
   const restoreManualBackupSyncWarningFocus = useCallback((): void => {
@@ -1706,7 +2047,7 @@ export function App() {
   const requestWorkspaceActivation = useCallback(
     (workspaceId: string) => {
       if (workspaceId === currentWorkspaceIdRef.current) return;
-      if (noteWorkspaceChangeIsBlocked()) return;
+      if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
       if (!confirmLeaveNoteDraft()) return;
       searchNavigation.invalidate();
       automationOutputNavigation.invalidate();
@@ -1729,26 +2070,30 @@ export function App() {
       invalidateAutomationCreate,
       invalidateScheduleCreate,
       noteWorkspaceChangeIsBlocked,
+      scheduleWorkspaceChangeIsBlocked,
       workspaceController,
     ],
   );
   const createWorkspace = useCallback(
     async (name: string, color: WorkspaceColor): Promise<void> => {
-      if (noteWorkspaceChangeIsBlocked()) {
-        throw new Error('笔记写入仍在确认，请先返回笔记页面完成重新读取，再新建工作区。');
+      if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) {
+        throw new Error('写入仍在确认，请先完成重新读取，再新建工作区。');
       }
       await workspaceController.create(name, color);
     },
-    [noteWorkspaceChangeIsBlocked, workspaceController],
+    [noteWorkspaceChangeIsBlocked, scheduleWorkspaceChangeIsBlocked, workspaceController],
   );
   const archiveWorkspace = useCallback(
     async (workspaceId: string): Promise<void> => {
-      if (workspaceId === currentWorkspaceIdRef.current && noteWorkspaceChangeIsBlocked()) {
-        throw new Error('笔记写入仍在确认，请先返回笔记页面完成重新读取，再归档当前工作区。');
+      if (
+        workspaceId === currentWorkspaceIdRef.current &&
+        (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked())
+      ) {
+        throw new Error('写入仍在确认，请先完成重新读取，再归档当前工作区。');
       }
       await workspaceController.archive(workspaceId);
     },
-    [noteWorkspaceChangeIsBlocked, workspaceController],
+    [noteWorkspaceChangeIsBlocked, scheduleWorkspaceChangeIsBlocked, workspaceController],
   );
   const openQuickCapture = useCallback(() => {
     if (
@@ -2205,6 +2550,7 @@ export function App() {
       if (
         !activeWorkspace ||
         archiveManager.open ||
+        visibleScheduleMutationSyncWarning !== null ||
         !scheduleController.snapshot ||
         !scheduleController.snapshot.planningDays.some(({ date }) => date === expectedDate) ||
         workspaceDialog !== null ||
@@ -2245,7 +2591,28 @@ export function App() {
       taskDialog,
       workspaceController.pendingOperation,
       workspaceDialog,
+      visibleScheduleMutationSyncWarning,
     ],
+  );
+  const openScheduleEdit = useCallback(
+    (item: ScheduleItem): void => {
+      const activation = scheduleMutationActivationRef.current;
+      if (
+        !activeWorkspace ||
+        scheduleMutationCoordinator.isPending(activation.workspaceId) ||
+        scheduleWriteIsBlocked(activation)
+      ) {
+        return;
+      }
+      setScheduleDialog({
+        mode: 'edit',
+        workspaceId: activeWorkspace.id,
+        workspaceName: activeWorkspace.name,
+        expectedDate: item.scheduledFor,
+        item,
+      });
+    },
+    [activeWorkspace, scheduleMutationCoordinator, scheduleWriteIsBlocked],
   );
 
   const createManualSchedule = useCallback(
@@ -2257,87 +2624,118 @@ export function App() {
       startMinute: number,
       endMinute: number,
     ): Promise<void> => {
-      const activation = scheduleCreateActivationRef.current;
-      const intent = scheduleCreateCoordinator.beginCreate(activation);
-      scheduleCreatePublicationGate.clear();
-      scheduleCreateFeedbackRef.current = null;
-      setScheduleCreateFeedbackState(null);
-      setScheduleCreateSyncWarningState(null);
+      const mutationActivation = scheduleMutationActivationRef.current;
+      if (scheduleWriteIsBlocked(mutationActivation)) {
+        throw new Error('请先重新读取上一项已提交的日程写入，再继续创建日程。');
+      }
+      const mutationIntent = scheduleMutationCoordinator.begin(mutationActivation, 'create');
+      if (mutationIntent === null) {
+        throw new Error('这个工作区正在处理另一项日程写入。');
+      }
       try {
-        if (activation.workspaceId !== workspaceId) {
-          throw new ScheduleCreateSupersededError();
-        }
-        const commit = await scheduleController.create(
-          expectedDate,
-          title,
-          kind,
-          startMinute,
-          endMinute,
-        );
-        if (
-          !scheduleCreateCoordinator.isCreateCurrent(intent, scheduleCreateActivationRef.current)
-        ) {
-          return;
-        }
-        if (
-          !commit.committed ||
-          commit.createdSchedule === null ||
-          commit.committedTodayDate === null
-        ) {
-          if (commit.reconciliationWarning) {
-            scheduleCreatePublicationGate.stage(intent.workspace, {
-              kind: 'warning',
-              warning: {
-                activation: intent.workspace,
-                requestGeneration: intent.generation,
-                createdScheduleId: commit.result.createdScheduleId,
-                title: commit.createdSchedule?.title ?? title,
-                scheduledFor: commit.createdSchedule?.scheduledFor ?? expectedDate,
-                startMinute: commit.createdSchedule?.startMinute ?? startMinute,
-                endMinute: commit.createdSchedule?.endMinute ?? endMinute,
-                message: commit.reconciliationWarning,
-              },
-            });
+        const activation = scheduleCreateActivationRef.current;
+        const intent = scheduleCreateCoordinator.beginCreate(activation);
+        scheduleCreatePublicationGate.clear();
+        scheduleCreateFeedbackRef.current = null;
+        setScheduleCreateFeedbackState(null);
+        setScheduleCreateSyncWarningState(null);
+        try {
+          if (activation.workspaceId !== workspaceId) {
+            throw new ScheduleCreateSupersededError();
           }
-          return;
+          const commit = await scheduleController.create(
+            expectedDate,
+            title,
+            kind,
+            startMinute,
+            endMinute,
+          );
+          if (
+            !scheduleCreateCoordinator.isCreateCurrent(intent, scheduleCreateActivationRef.current)
+          ) {
+            return;
+          }
+          if (
+            !commit.committed ||
+            commit.createdSchedule === null ||
+            commit.committedTodayDate === null
+          ) {
+            if (commit.reconciliationWarning) {
+              scheduleCreatePublicationGate.stage(intent.workspace, {
+                kind: 'warning',
+                warning: {
+                  activation: intent.workspace,
+                  requestGeneration: intent.generation,
+                  createdScheduleId: commit.result.createdScheduleId,
+                  title: commit.createdSchedule?.title ?? title,
+                  scheduledFor: commit.createdSchedule?.scheduledFor ?? expectedDate,
+                  startMinute: commit.createdSchedule?.startMinute ?? startMinute,
+                  endMinute: commit.createdSchedule?.endMinute ?? endMinute,
+                  message: commit.reconciliationWarning,
+                },
+              });
+            }
+            return;
+          }
+          const feedback = scheduleCreateCoordinator.createFeedback(
+            intent,
+            scheduleCreateActivationRef.current,
+            commit.createdSchedule,
+            true,
+          );
+          scheduleCreatePublicationGate.stage(intent.workspace, {
+            kind: 'feedback',
+            activation: intent.workspace,
+            feedback,
+            todayDate: commit.committedTodayDate,
+          });
+        } catch (error) {
+          if (
+            !scheduleCreateCoordinator.isCreateCurrent(
+              intent,
+              scheduleCreateActivationRef.current,
+            ) ||
+            error instanceof ScheduleCreateSupersededError
+          ) {
+            return;
+          }
+          throw error;
+        } finally {
+          scheduleCreateCoordinator.endCreate(intent);
         }
-        const feedback = scheduleCreateCoordinator.createFeedback(
-          intent,
-          scheduleCreateActivationRef.current,
-          commit.createdSchedule,
-          true,
-        );
-        scheduleCreatePublicationGate.stage(intent.workspace, {
-          kind: 'feedback',
-          activation: intent.workspace,
-          feedback,
-          todayDate: commit.committedTodayDate,
-        });
-      } catch (error) {
-        if (
-          !scheduleCreateCoordinator.isCreateCurrent(intent, scheduleCreateActivationRef.current) ||
-          error instanceof ScheduleCreateSupersededError
-        ) {
-          return;
-        }
-        throw error;
       } finally {
-        scheduleCreateCoordinator.endCreate(intent);
+        scheduleMutationCoordinator.end(mutationIntent);
       }
     },
-    [scheduleController, scheduleCreateCoordinator, scheduleCreatePublicationGate],
+    [
+      scheduleController,
+      scheduleCreateCoordinator,
+      scheduleCreatePublicationGate,
+      scheduleMutationCoordinator,
+      scheduleWriteIsBlocked,
+    ],
   );
 
   const openCreatedSchedule = useCallback(
     async (feedback: ScheduleCreateFeedback): Promise<void> => {
-      searchNavigation.invalidate();
-      automationOutputNavigation.invalidate();
-      automationCreateCoordinator.cancelOpen();
-      assistantSavedNoteNavigation.invalidate();
-      inboxCaptureCoordinator.cancelOpen();
-      taskCreateCoordinator.cancelOpen();
-      inboxConversionNavigation.invalidate();
+      const mutationActivation = scheduleMutationActivationRef.current;
+      if (scheduleWriteIsBlocked(mutationActivation)) {
+        throw new Error('请先完成当前日程写入的重新读取，再编辑刚创建的日程。');
+      }
+      const mutationIntent = scheduleMutationCoordinator.begin(mutationActivation, 'recover');
+      if (mutationIntent === null) {
+        throw new Error('这个工作区正在处理另一项日程写入。');
+      }
+      scheduleNavigationIntentRef.current = mutationIntent;
+      setScheduleNavigationPending(true);
       try {
+        searchNavigation.invalidate();
+        automationOutputNavigation.invalidate();
+        automationCreateCoordinator.cancelOpen();
+        assistantSavedNoteNavigation.invalidate();
+        inboxCaptureCoordinator.cancelOpen();
+        taskCreateCoordinator.cancelOpen();
+        inboxConversionNavigation.invalidate();
         const intent = scheduleCreateCoordinator.beginOpen(
           scheduleCreateActivationRef.current,
           feedback,
@@ -2397,6 +2795,12 @@ export function App() {
         });
       } catch (error) {
         throw scheduleCreateNavigationError(error);
+      } finally {
+        scheduleMutationCoordinator.end(mutationIntent);
+        if (scheduleNavigationIntentRef.current === mutationIntent) {
+          scheduleNavigationIntentRef.current = null;
+          setScheduleNavigationPending(false);
+        }
       }
     },
     [
@@ -2409,6 +2813,8 @@ export function App() {
       inboxConversionNavigation,
       scheduleController.prepareSnapshotRefresh,
       scheduleCreateCoordinator,
+      scheduleMutationCoordinator,
+      scheduleWriteIsBlocked,
       searchNavigation,
       taskCreateCoordinator,
       updatePreferences,
@@ -2464,6 +2870,18 @@ export function App() {
 
   const refreshScheduleCreateSyncWarning = useCallback(
     async (warning: ScheduleCreateSyncWarningState): Promise<void> => {
+      const mutationActivation = scheduleMutationActivationRef.current;
+      if (scheduleWriteIsBlocked(mutationActivation)) {
+        throw new ScheduleCreateSyncRefreshError(
+          '请先完成当前日程写入的重新读取，再确认刚创建的日程。',
+        );
+      }
+      const mutationIntent = scheduleMutationCoordinator.begin(mutationActivation, 'recover');
+      if (mutationIntent === null) {
+        throw new ScheduleCreateSyncRefreshError('这个工作区正在处理另一项日程写入。');
+      }
+      scheduleNavigationIntentRef.current = mutationIntent;
+      setScheduleNavigationPending(true);
       try {
         if (
           warning.activation !== scheduleCreateActivationRef.current ||
@@ -2513,9 +2931,20 @@ export function App() {
         });
       } catch (error) {
         throw scheduleCreateSyncRefreshError(error);
+      } finally {
+        scheduleMutationCoordinator.end(mutationIntent);
+        if (scheduleNavigationIntentRef.current === mutationIntent) {
+          scheduleNavigationIntentRef.current = null;
+          setScheduleNavigationPending(false);
+        }
       }
     },
-    [scheduleController, scheduleCreateCoordinator],
+    [
+      scheduleController,
+      scheduleCreateCoordinator,
+      scheduleMutationCoordinator,
+      scheduleWriteIsBlocked,
+    ],
   );
 
   const createManualAutomation = useCallback(
@@ -3842,6 +4271,7 @@ export function App() {
             invalidateAutomationCreate();
             invalidateScheduleCreate();
             invalidateNoteMutations();
+            invalidateScheduleMutations();
           }
           return true;
         }
@@ -3861,6 +4291,7 @@ export function App() {
       invalidateInboxConversion,
       invalidateNoteMutations,
       invalidateScheduleCreate,
+      invalidateScheduleMutations,
       isImportCommitInFlight,
     ],
   );
@@ -3987,6 +4418,21 @@ export function App() {
         throw new Error(
           '笔记写入仍在确认，请先返回当前工作区完成重新读取，再打开其他工作区的搜索结果。',
         );
+      }
+      if (
+        selectedResult.workspaceId !== currentWorkspaceIdRef.current &&
+        scheduleWorkspaceChangeIsBlocked()
+      ) {
+        throw new Error(
+          '日程写入仍在确认，请先在当前工作区完成重新读取，再打开其他工作区的搜索结果。',
+        );
+      }
+      if (
+        selectedResult.kind === 'schedule' &&
+        (scheduleMutationCoordinator.isPending(currentWorkspaceIdRef.current) ||
+          scheduleWriteIsBlocked(scheduleMutationActivationRef.current))
+      ) {
+        throw new Error('日程写入仍在确认，请先完成重新读取，再打开其他日程。');
       }
       if (
         isNoteCreateNavigationBlocked(noteController.pendingCreate, visibleNoteCreateSyncWarning)
@@ -4172,6 +4618,9 @@ export function App() {
       noteController.pendingMutation,
       noteMutationCoordinator,
       noteWorkspaceChangeIsBlocked,
+      scheduleMutationCoordinator,
+      scheduleWorkspaceChangeIsBlocked,
+      scheduleWriteIsBlocked,
       searchNavigation,
       taskCreateCoordinator,
       updatePreferences,
@@ -4193,6 +4642,12 @@ export function App() {
     const manualBackupDisabledReason = manualBackupBlocked
       ? '备份已创建，请先重新读取确认'
       : dataDisabledReason;
+    const workspaceWriteBlocked = noteWorkspaceChangeBlocked || scheduleWorkspaceChangeBlocked;
+    const workspaceWriteBlockedReason = scheduleWorkspaceChangeBlocked
+      ? '请先确认当前日程写入'
+      : noteWorkspaceChangeBlocked
+        ? '请先确认当前笔记写入'
+        : undefined;
     const workspaceCommands: PaletteCommand[] = snapshot.workspaces
       .filter(({ id }) => id !== activeWorkspace.id)
       .map((workspace) => ({
@@ -4202,8 +4657,8 @@ export function App() {
         group: '工作区',
         icon: Layers3,
         keywords: `工作区 切换 ${workspace.name}`,
-        disabled: noteWorkspaceChangeBlocked,
-        disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
+        disabled: workspaceWriteBlocked,
+        disabledReason: workspaceWriteBlockedReason,
         action: () => {
           requestWorkspaceActivation(workspace.id);
         },
@@ -4281,10 +4736,10 @@ export function App() {
         group: '工作区',
         icon: FolderPlus,
         keywords: '工作区 新建 创建',
-        disabled: noteWorkspaceChangeBlocked,
-        disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
+        disabled: workspaceWriteBlocked,
+        disabledReason: workspaceWriteBlockedReason,
         action: () => {
-          if (noteWorkspaceChangeIsBlocked()) return;
+          if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
           if (!confirmLeaveNoteDraft()) return;
           setWorkspaceDialog({
             mode: 'create',
@@ -4299,13 +4754,11 @@ export function App() {
         group: '工作区',
         icon: ArchiveRestore,
         keywords: '工作区 归档 恢复 restore archive',
-        disabled: workspaceController.pendingOperation !== null || noteWorkspaceChangeBlocked,
+        disabled: workspaceController.pendingOperation !== null || workspaceWriteBlocked,
         disabledReason:
           workspaceController.pendingOperation !== null
             ? '另一项工作区操作正在进行'
-            : noteWorkspaceChangeBlocked
-              ? '请先确认当前笔记写入'
-              : undefined,
+            : workspaceWriteBlockedReason,
         action: workspaceController.openArchiveManager,
       },
       {
@@ -4314,8 +4767,8 @@ export function App() {
         description: activeWorkspace.name,
         group: '工作区',
         icon: Pencil,
-        disabled: noteWorkspaceChangeBlocked,
-        disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
+        disabled: workspaceWriteBlocked,
+        disabledReason: workspaceWriteBlockedReason,
         action: () => setWorkspaceDialog({ mode: 'rename', workspace: activeWorkspace }),
       },
       ...workspaceCommands,
@@ -4327,10 +4780,10 @@ export function App() {
               description: '保留数据并从活动列表隐藏',
               group: '工作区',
               icon: Archive,
-              disabled: noteWorkspaceChangeBlocked,
-              disabledReason: noteWorkspaceChangeBlocked ? '请先确认当前笔记写入' : undefined,
+              disabled: workspaceWriteBlocked,
+              disabledReason: workspaceWriteBlockedReason,
               action: () => {
-                if (noteWorkspaceChangeIsBlocked()) return;
+                if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
                 if (!confirmLeaveNoteDraft()) return;
                 setWorkspaceDialog({
                   mode: 'archive',
@@ -4447,6 +4900,8 @@ export function App() {
     confirmLeaveNoteDraft,
     noteWorkspaceChangeBlocked,
     noteWorkspaceChangeIsBlocked,
+    scheduleWorkspaceChangeBlocked,
+    scheduleWorkspaceChangeIsBlocked,
     requestActiveView,
     requestWorkspaceActivation,
     snapshot,
@@ -4648,7 +5103,11 @@ export function App() {
             activeView={activeSurface}
             activeWorkspace={activeWorkspace}
             workspaces={snapshot.workspaces}
-            busy={workspaceController.pendingOperation !== null || noteWorkspaceChangeBlocked}
+            busy={
+              workspaceController.pendingOperation !== null ||
+              noteWorkspaceChangeBlocked ||
+              scheduleWorkspaceChangeBlocked
+            }
             pendingWorkspaceId={workspaceController.pendingWorkspaceId}
             saveError={workspaceController.saveError}
             saveStatus={workspaceController.saveStatus}
@@ -4659,7 +5118,7 @@ export function App() {
             onSelectView={requestActiveView}
             onSelectWorkspace={requestWorkspaceActivation}
             onCreateWorkspace={() => {
-              if (noteWorkspaceChangeIsBlocked()) return;
+              if (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked()) return;
               if (!confirmLeaveNoteDraft()) return;
               setWorkspaceDialog({
                 mode: 'create',
@@ -4669,7 +5128,10 @@ export function App() {
             }}
             onRenameWorkspace={(workspace) => setWorkspaceDialog({ mode: 'rename', workspace })}
             onArchiveWorkspace={(workspace) => {
-              if (workspace.id === snapshot.currentWorkspaceId && noteWorkspaceChangeIsBlocked()) {
+              if (
+                workspace.id === snapshot.currentWorkspaceId &&
+                (noteWorkspaceChangeIsBlocked() || scheduleWorkspaceChangeIsBlocked())
+              ) {
                 return;
               }
               if (!confirmLeaveNoteDraft()) return;
@@ -4739,6 +5201,17 @@ export function App() {
                     scheduleOperationError={scheduleController.operationError}
                     pendingScheduleItemIds={scheduleController.pendingItemIds}
                     scheduleCreatePending={scheduleController.pendingCreate}
+                    scheduleMutationBlocked={scheduleWorkspaceChangeBlocked}
+                    workspaceNavigationBlocked={
+                      noteWorkspaceChangeBlocked || scheduleWorkspaceChangeBlocked
+                    }
+                    workspaceNavigationBlockedReason={
+                      scheduleWorkspaceChangeBlocked
+                        ? '请先确认当前日程写入，再切换工作区。'
+                        : noteWorkspaceChangeBlocked
+                          ? '请先确认当前笔记写入，再切换工作区。'
+                          : null
+                    }
                     focusSnapshot={focusController.snapshot}
                     focusStatus={focusController.status}
                     focusError={focusController.error}
@@ -4764,15 +5237,7 @@ export function App() {
                     onUpdateTaskPlanning={taskController.updatePlanning}
                     onRetrySchedule={scheduleController.retry}
                     onCreateSchedule={openScheduleCreate}
-                    onOpenSchedule={(item) =>
-                      setScheduleDialog({
-                        mode: 'edit',
-                        workspaceId: snapshot.currentWorkspaceId,
-                        workspaceName: activeWorkspace.name,
-                        expectedDate: item.scheduledFor,
-                        item,
-                      })
-                    }
+                    onOpenSchedule={openScheduleEdit}
                     onRetryFocus={focusController.retry}
                     onOpenFocus={openFocusDialog}
                     onPauseFocus={focusController.pause}
@@ -5238,7 +5703,7 @@ export function App() {
             if (scheduleDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开日程窗口。');
             }
-            await scheduleController.update(
+            await updateSchedule(
               item,
               scheduleDialog.expectedDate,
               title,
@@ -5251,7 +5716,7 @@ export function App() {
             if (scheduleDialog.workspaceId !== snapshot.currentWorkspaceId) {
               throw new Error('工作区已经切换，请重新打开日程窗口。');
             }
-            await scheduleController.archive(item, scheduleDialog.expectedDate);
+            await archiveSchedule(item, scheduleDialog.expectedDate);
           }}
         />
       ) : null}
@@ -5335,12 +5800,16 @@ export function App() {
             if (noteMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
               throw new Error('笔记写入仍在确认，请稍候再导入数据。');
             }
+            if (scheduleMutationCoordinator.isPending(currentWorkspaceIdRef.current)) {
+              throw new Error('日程写入仍在确认，请稍候再导入数据。');
+            }
             if (!confirmLeaveNoteDraft()) return;
             dataReplacementApprovedRef.current = true;
             dataReplacementNoteDiscardApprovedRef.current = true;
             try {
               await commitImport();
               invalidateNoteMutations();
+              invalidateScheduleMutations();
               invalidateManualBackupRecovery();
             } catch (error) {
               dataReplacementApprovedRef.current = false;
@@ -5393,14 +5862,64 @@ export function App() {
             startMinute={visibleScheduleCreateSyncWarning.startMinute}
             endMinute={visibleScheduleCreateSyncWarning.endMinute}
             message={visibleScheduleCreateSyncWarning.message}
+            blocked={scheduleWorkspaceChangeBlocked}
+            blockedReason={
+              scheduleWorkspaceChangeBlocked
+                ? '请先完成当前日程写入的重新读取，再确认刚创建的日程。'
+                : null
+            }
             onRefresh={() => refreshScheduleCreateSyncWarning(visibleScheduleCreateSyncWarning)}
             onDismiss={() => dismissScheduleCreateSyncWarning(visibleScheduleCreateSyncWarning)}
+          />
+        ) : null}
+        {visibleScheduleMutationSyncWarning ? (
+          <ScheduleMutationSyncWarning
+            kind={visibleScheduleMutationSyncWarning.kind}
+            title={
+              visibleScheduleMutationSyncWarning.kind === 'update'
+                ? visibleScheduleMutationSyncWarning.intent.title
+                : visibleScheduleMutationSyncWarning.intent.originalSchedule.title
+            }
+            scheduledFor={visibleScheduleMutationSyncWarning.intent.expectedDate}
+            startMinute={
+              visibleScheduleMutationSyncWarning.kind === 'update'
+                ? visibleScheduleMutationSyncWarning.intent.startMinute
+                : visibleScheduleMutationSyncWarning.intent.originalSchedule.startMinute
+            }
+            endMinute={
+              visibleScheduleMutationSyncWarning.kind === 'update'
+                ? visibleScheduleMutationSyncWarning.intent.endMinute
+                : visibleScheduleMutationSyncWarning.intent.originalSchedule.endMinute
+            }
+            message={visibleScheduleMutationSyncWarning.message}
+            focusActionOnMount={visibleScheduleMutationSyncWarning.focusActionOnMount}
+            focusBlocked={overlayOpen}
+            blocked={dataState.activeOperation !== null}
+            blockedReason={
+              dataState.activeOperation !== null
+                ? '当前数据操作完成后，才能重新读取日程列表。'
+                : null
+            }
+            refreshing={visibleScheduleMutationSyncWarning.refreshing}
+            refreshError={visibleScheduleMutationSyncWarning.refreshError}
+            onRefresh={async () => {
+              await refreshScheduleMutationSyncWarning(visibleScheduleMutationSyncWarning);
+            }}
+            onFocusFallback={() =>
+              restoreScheduleMutationWarningFocus(visibleScheduleMutationSyncWarning)
+            }
           />
         ) : null}
         {visibleScheduleCreateFeedback ? (
           <ScheduleCreateToast
             feedback={visibleScheduleCreateFeedback}
             focusBlocked={overlayOpen}
+            blocked={scheduleWorkspaceChangeBlocked}
+            blockedReason={
+              scheduleWorkspaceChangeBlocked
+                ? '请先完成当前日程写入的重新读取，再编辑刚创建的日程。'
+                : null
+            }
             onOpen={openCreatedSchedule}
             onDismiss={dismissScheduleCreate}
             onFocusFallback={restoreScheduleCreateFocus}
