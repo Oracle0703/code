@@ -1908,6 +1908,7 @@ export function App() {
   }, [inboxReveal?.generation]);
 
   const updatePreferences = workspaceController.updatePreferences;
+  const invalidateWorkspacePreferenceEpoch = workspaceController.invalidatePreferenceEpoch;
   const openUrlInWorkspace = useCallback(
     (workspaceId: string, url: string) => {
       if (currentWorkspaceIdRef.current !== workspaceId) return;
@@ -1944,6 +1945,7 @@ export function App() {
           dataReplacementApprovedRef.current = false;
           dataReplacementNoteDiscardApprovedRef.current = false;
         } else {
+          invalidateWorkspacePreferenceEpoch();
           invalidateNoteMutations();
           invalidateScheduleMutations();
           invalidateManualBackupRecovery();
@@ -1957,6 +1959,7 @@ export function App() {
     },
     [
       confirmLeaveNoteDraft,
+      invalidateWorkspacePreferenceEpoch,
       invalidateManualBackupRecovery,
       invalidateNoteMutations,
       invalidateScheduleMutations,
@@ -5808,6 +5811,7 @@ export function App() {
             dataReplacementNoteDiscardApprovedRef.current = true;
             try {
               await commitImport();
+              invalidateWorkspacePreferenceEpoch();
               invalidateNoteMutations();
               invalidateScheduleMutations();
               invalidateManualBackupRecovery();

@@ -8,11 +8,12 @@ import type {
 } from '../../shared/contracts';
 import {
   LEGACY_WORKSPACE_STORAGE_KEYS,
+  WorkspacePreferenceRetryGate,
+  WorkspacePreferenceWriteCoordinator,
   isLegacyWorkspaceImportCommitted,
-  mergeWorkspacePreferencePatches,
   readLegacyWorkspacePreferences,
   rebaseWorkspaceMutationSnapshot,
-  removeCommittedWorkspacePreferencePatch,
+  type WorkspacePreferenceWriteIntent,
 } from '../../shared/workspace-preference-state';
 import {
   WorkspaceArchiveRequestGate,
@@ -21,6 +22,12 @@ import {
 
 type WorkspaceOperation = 'create' | 'rename' | 'activate' | 'archive' | 'restore' | null;
 export type WorkspaceSaveStatus = 'saved' | 'saving' | 'error';
+
+interface WorkspacePreferenceWriteResult {
+  readonly status: 'succeeded' | 'failed';
+  readonly current: boolean;
+  readonly preferences: WorkspaceSnapshot['preferences'] | null;
+}
 
 export interface WorkspaceArchiveManager {
   readonly open: boolean;
@@ -42,6 +49,7 @@ export interface WorkspaceController {
   readonly canRetry: boolean;
   retry(): void;
   retryPreferences(): void;
+  invalidatePreferenceEpoch(): void;
   create(name: string, color: WorkspaceColor): Promise<void>;
   rename(workspaceId: string, name: string): Promise<void>;
   activate(workspaceId: string): Promise<void>;
@@ -83,9 +91,10 @@ export function useWorkspaceController(): WorkspaceController {
   const mutationInFlightRef = useRef(false);
   const lastPaintThemeRef = useRef<string | null>(null);
   const preferenceRevisionRef = useRef(0);
-  const preferenceWritesRef = useRef(new Set<Promise<boolean>>());
-  const dirtyPreferencesRef = useRef(new Map<string, WorkspacePreferencesPatch>());
-  const retryPreferencesRef = useRef<Promise<boolean> | null>(null);
+  const preferenceWritesRef = useRef(new Set<Promise<WorkspacePreferenceWriteResult>>());
+  const pendingPreferenceWriteCountsRef = useRef(new Map<number, number>());
+  const preferenceCoordinatorRef = useRef(new WorkspacePreferenceWriteCoordinator());
+  const preferenceRetryGateRef = useRef(new WorkspacePreferenceRetryGate());
   const deferPreferenceWritesRef = useRef(false);
   const legacyImportWorkspaceIdRef = useRef<string | null>(null);
   const archiveRequestGateRef = useRef(new WorkspaceArchiveRequestGate());
@@ -109,82 +118,129 @@ export function useWorkspaceController(): WorkspaceController {
     }
   }, []);
 
+  const synchronizePreferenceState = useCallback((failureMessage?: string) => {
+    const coordinator = preferenceCoordinatorRef.current;
+    setDirtyPreferenceCount(coordinator.dirtyWorkspaceCount);
+    if (coordinator.hasFailedPreferences) {
+      setSaveError((current) => failureMessage ?? current ?? '工作区设置尚未保存，请重试。');
+    } else {
+      setSaveError(null);
+    }
+  }, []);
+
+  const invalidatePreferenceEpoch = useCallback((): void => {
+    preferenceCoordinatorRef.current.invalidate();
+    pendingPreferenceWriteCountsRef.current.clear();
+    preferenceWritesRef.current.clear();
+    preferenceRetryGateRef.current.invalidate();
+    legacyImportWorkspaceIdRef.current = null;
+    setPendingSaveCount(0);
+    synchronizePreferenceState();
+  }, [synchronizePreferenceState]);
+
   const sendPreferencePatch = useCallback(
-    (workspaceId: string, patch: WorkspacePreferencesPatch): Promise<boolean> => {
+    (intent: WorkspacePreferenceWriteIntent): Promise<WorkspacePreferenceWriteResult> => {
+      const coordinator = preferenceCoordinatorRef.current;
       if (!workspaceApi) {
-        setSaveError('工作区设置尚未保存；桌面桥接不可用。');
-        return Promise.resolve(false);
+        const current = coordinator.settleFailure(intent);
+        if (current) {
+          synchronizePreferenceState('工作区设置尚未保存；桌面桥接不可用。');
+        }
+        return Promise.resolve({ status: 'failed', current, preferences: null });
       }
 
-      setPendingSaveCount((count) => count + 1);
-      const task = (async () => {
+      const pendingCounts = pendingPreferenceWriteCountsRef.current;
+      const pendingCount = (pendingCounts.get(intent.epoch) ?? 0) + 1;
+      pendingCounts.set(intent.epoch, pendingCount);
+      if (coordinator.isCurrent(intent)) setPendingSaveCount(pendingCount);
+      const task = (async (): Promise<WorkspacePreferenceWriteResult> => {
         try {
-          await workspaceApi.updatePreferences({ workspaceId, patch });
-          const dirty = dirtyPreferencesRef.current.get(workspaceId) ?? {};
-          const remaining = removeCommittedWorkspacePreferencePatch(dirty, patch);
-          if (Object.keys(remaining).length === 0) {
-            dirtyPreferencesRef.current.delete(workspaceId);
-          } else {
-            dirtyPreferencesRef.current.set(workspaceId, remaining);
+          const preferences = await workspaceApi.updatePreferences({
+            workspaceId: intent.workspaceId,
+            patch: intent.patch,
+          });
+          const current = coordinator.isCurrent(intent);
+          const confirmed = coordinator.settleSuccess(intent, preferences);
+          if (!current) {
+            return { status: 'succeeded', current: false, preferences };
           }
+          const remaining = coordinator.getDirtyPatch(intent.workspaceId);
           if (
             isLegacyWorkspaceImportCommitted(
               legacyImportWorkspaceIdRef.current,
-              workspaceId,
+              intent.workspaceId,
               remaining,
             )
           ) {
             clearLegacyWorkspaceStorage();
             legacyImportWorkspaceIdRef.current = null;
           }
-          setDirtyPreferenceCount(dirtyPreferencesRef.current.size);
-          if (dirtyPreferencesRef.current.size === 0) setSaveError(null);
-          return true;
+          synchronizePreferenceState(
+            confirmed ? undefined : '工作区设置已写入，但权威结果不匹配，请重试。',
+          );
+          return {
+            status: confirmed ? 'succeeded' : 'failed',
+            current: true,
+            preferences,
+          };
         } catch {
-          setSaveError('工作区设置尚未保存，请重试。');
-          return false;
+          const current = coordinator.settleFailure(intent);
+          if (current) synchronizePreferenceState('工作区设置尚未保存，请重试。');
+          return { status: 'failed', current, preferences: null };
         } finally {
-          setPendingSaveCount((count) => Math.max(0, count - 1));
+          const remainingPending = Math.max(0, (pendingCounts.get(intent.epoch) ?? 0) - 1);
+          if (remainingPending === 0) {
+            pendingCounts.delete(intent.epoch);
+          } else {
+            pendingCounts.set(intent.epoch, remainingPending);
+          }
+          if (coordinator.isCurrent(intent)) {
+            setPendingSaveCount(remainingPending);
+          }
         }
       })();
       preferenceWritesRef.current.add(task);
       void task.then(() => preferenceWritesRef.current.delete(task));
       return task;
     },
-    [workspaceApi],
+    [synchronizePreferenceState, workspaceApi],
   );
 
-  const flushDirtyPreferences = useCallback(async (): Promise<boolean> => {
-    if (retryPreferencesRef.current) return retryPreferencesRef.current;
-
-    const retry = (async () => {
+  const flushDirtyPreferences = useCallback((): Promise<boolean> => {
+    return preferenceRetryGateRef.current.run(async () => {
+      const epoch = preferenceCoordinatorRef.current.epoch;
       while (true) {
         while (preferenceWritesRef.current.size > 0) {
           await Promise.all([...preferenceWritesRef.current]);
         }
-        const dirty = [...dirtyPreferencesRef.current.entries()];
-        if (dirty.length === 0) return true;
-        if (!workspaceApi) {
-          setSaveError('工作区设置尚未保存；桌面桥接不可用。');
+        const coordinator = preferenceCoordinatorRef.current;
+        if (coordinator.epoch !== epoch) return true;
+        const dirtyWorkspaceIds = coordinator.getDirtyWorkspaces();
+        if (dirtyWorkspaceIds.length === 0) return true;
+        const intents = dirtyWorkspaceIds.flatMap((workspaceId) => {
+          const intent = coordinator.beginRetry(workspaceId);
+          return intent ? [intent] : [];
+        });
+        synchronizePreferenceState();
+        const results = await Promise.all(intents.map(sendPreferencePatch));
+        if (coordinator.epoch !== epoch) return true;
+        if (
+          results.some(({ status, current }) => status === 'failed' && current) &&
+          coordinator.hasFailedPreferences
+        ) {
           return false;
         }
-        const results = await Promise.all(
-          dirty.map(([workspaceId, patch]) => sendPreferencePatch(workspaceId, patch)),
-        );
-        if (results.some((succeeded) => !succeeded)) return false;
       }
-    })();
-    retryPreferencesRef.current = retry;
-    try {
-      return await retry;
-    } finally {
-      if (retryPreferencesRef.current === retry) retryPreferencesRef.current = null;
-    }
-  }, [sendPreferencePatch, workspaceApi]);
+    });
+  }, [sendPreferencePatch, synchronizePreferenceState]);
 
   useEffect(() => {
     let active = true;
     if (!workspaceApi) return;
+    const coordinator = preferenceCoordinatorRef.current;
+    const pendingCounts = pendingPreferenceWriteCountsRef.current;
+    const preferenceWrites = preferenceWritesRef.current;
+    const retryGate = preferenceRetryGateRef.current;
 
     void (async () => {
       try {
@@ -193,26 +249,26 @@ export function useWorkspaceController(): WorkspaceController {
         if (legacy.found) {
           const canImport = nextSnapshot.workspaces.length === 1;
           if (canImport && Object.keys(legacy.patch).length > 0) {
-            try {
-              const preferences = await workspaceApi.updatePreferences({
-                workspaceId: nextSnapshot.currentWorkspaceId,
-                patch: legacy.patch,
-              });
-              nextSnapshot = { ...nextSnapshot, preferences };
-              clearLegacyWorkspaceStorage();
-              legacyImportWorkspaceIdRef.current = null;
-            } catch {
-              legacyImportWorkspaceIdRef.current = nextSnapshot.currentWorkspaceId;
-              dirtyPreferencesRef.current.set(nextSnapshot.currentWorkspaceId, legacy.patch);
-              setDirtyPreferenceCount(dirtyPreferencesRef.current.size);
+            legacyImportWorkspaceIdRef.current = nextSnapshot.currentWorkspaceId;
+            const intent = preferenceCoordinatorRef.current.beginWrite(
+              nextSnapshot.currentWorkspaceId,
+              legacy.patch,
+            );
+            synchronizePreferenceState();
+            const result = await sendPreferencePatch(intent);
+            if (!active || !result.current) return;
+            if (result.status === 'succeeded' && result.preferences) {
+              nextSnapshot = { ...nextSnapshot, preferences: result.preferences };
+            } else {
               nextSnapshot = {
                 ...nextSnapshot,
                 preferences: { ...nextSnapshot.preferences, ...legacy.patch },
               };
-              setSaveError('旧版布局尚未迁移，请重试保存。');
+              synchronizePreferenceState('旧版布局尚未迁移，请重试保存。');
             }
           } else {
             clearLegacyWorkspaceStorage();
+            legacyImportWorkspaceIdRef.current = null;
           }
         }
         if (active) applySnapshot(nextSnapshot);
@@ -224,8 +280,19 @@ export function useWorkspaceController(): WorkspaceController {
     })();
     return () => {
       active = false;
+      coordinator.invalidate();
+      pendingCounts.clear();
+      preferenceWrites.clear();
+      retryGate.invalidate();
+      legacyImportWorkspaceIdRef.current = null;
     };
-  }, [applySnapshot, loadGeneration, workspaceApi]);
+  }, [
+    applySnapshot,
+    loadGeneration,
+    sendPreferencePatch,
+    synchronizePreferenceState,
+    workspaceApi,
+  ]);
 
   const loadArchiveManager = useCallback(async (): Promise<void> => {
     const gate = archiveRequestGateRef.current;
@@ -337,14 +404,10 @@ export function useWorkspaceController(): WorkspaceController {
         const activeWorkspaceIds = new Set(
           mutationSnapshot.workspaces.map((workspace) => workspace.id),
         );
-        for (const dirtyWorkspaceId of dirtyPreferencesRef.current.keys()) {
-          if (!activeWorkspaceIds.has(dirtyWorkspaceId)) {
-            dirtyPreferencesRef.current.delete(dirtyWorkspaceId);
-          }
-        }
-        setDirtyPreferenceCount(dirtyPreferencesRef.current.size);
-        const targetPatch =
-          dirtyPreferencesRef.current.get(mutationSnapshot.currentWorkspaceId) ?? {};
+        const coordinator = preferenceCoordinatorRef.current;
+        coordinator.discardMissingWorkspaces(activeWorkspaceIds);
+        synchronizePreferenceState();
+        const targetPatch = coordinator.getDirtyPatch(mutationSnapshot.currentWorkspaceId);
         applySnapshot(
           rebaseWorkspaceMutationSnapshot(
             mutationSnapshot,
@@ -358,7 +421,7 @@ export function useWorkspaceController(): WorkspaceController {
         await flushDirtyPreferences();
       } catch (error) {
         deferPreferenceWritesRef.current = false;
-        if (dirtyPreferencesRef.current.size > 0) void flushDirtyPreferences();
+        if (preferenceCoordinatorRef.current.hasDirtyPreferences) void flushDirtyPreferences();
         const message = workspaceErrorMessage(error);
         setOperationError(message);
         throw new Error(message, { cause: error });
@@ -369,7 +432,7 @@ export function useWorkspaceController(): WorkspaceController {
         setPendingWorkspaceId(null);
       }
     },
-    [applySnapshot, flushDirtyPreferences],
+    [applySnapshot, flushDirtyPreferences, synchronizePreferenceState],
   );
 
   const create = useCallback(
@@ -455,20 +518,24 @@ export function useWorkspaceController(): WorkspaceController {
       }
       if (!persist) return;
 
-      const dirty = dirtyPreferencesRef.current.get(workspaceId) ?? {};
-      dirtyPreferencesRef.current.set(workspaceId, mergeWorkspacePreferencePatches(dirty, patch));
-      setDirtyPreferenceCount(dirtyPreferencesRef.current.size);
-      if (!deferPreferenceWritesRef.current) void sendPreferencePatch(workspaceId, patch);
+      const coordinator = preferenceCoordinatorRef.current;
+      if (deferPreferenceWritesRef.current) {
+        coordinator.stage(workspaceId, patch);
+        synchronizePreferenceState();
+        return;
+      }
+      const intent = coordinator.beginWrite(workspaceId, patch);
+      synchronizePreferenceState();
+      void sendPreferencePatch(intent);
     },
-    [applySnapshot, sendPreferencePatch],
+    [applySnapshot, sendPreferencePatch, synchronizePreferenceState],
   );
 
-  const saveStatus: WorkspaceSaveStatus =
-    pendingSaveCount > 0 || (dirtyPreferenceCount > 0 && !saveError)
+  const saveStatus: WorkspaceSaveStatus = saveError
+    ? 'error'
+    : pendingSaveCount > 0 || dirtyPreferenceCount > 0
       ? 'saving'
-      : saveError
-        ? 'error'
-        : 'saved';
+      : 'saved';
 
   return {
     status,
@@ -487,6 +554,7 @@ export function useWorkspaceController(): WorkspaceController {
         setLoadError('桌面工作区桥接不可用，请重新启动应用。');
         return;
       }
+      invalidatePreferenceEpoch();
       setStatus('loading');
       setLoadError(null);
       setLoadGeneration((generation) => generation + 1);
@@ -494,6 +562,7 @@ export function useWorkspaceController(): WorkspaceController {
     retryPreferences: () => {
       if (!deferPreferenceWritesRef.current) void flushDirtyPreferences();
     },
+    invalidatePreferenceEpoch,
     create,
     rename,
     activate,

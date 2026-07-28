@@ -162,7 +162,9 @@ AI Controller 与 provider 只存在于 Main。API key 会由用户短暂输入�
 - v11 的归档快照只暴露受控工作区元数据、归档时间与 Main 维护的 recovery revision。恢复必须提交快照中的 `workspaceId`、`expectedRevision` 和显式名称；revision CAS 在同一事务中防止迟到或重复恢复。
 - 归档名称可能已被新的活动工作区占用。Main 不会静默生成后缀，Renderer 必须让用户显式改名后重试；成功恢复只刷新活动/归档快照，不写当前工作区选择，因此不会自动切换。
 - 当前页面、主题、侧栏、浏览器/终端面板开关和尺寸按工作区保存。
-- Renderer 对偏好使用乐观显示、字段级 dirty 追踪和有序重试；工作区 mutation 返回的完整快照会按 workspace/revision 重基，不能覆盖其间已提交或待重试的偏好。
+- Renderer 对偏好使用乐观显示，并为每个 `workspaceId + field` 维护 epoch、单调 sequence、最新期望值和失败所有权。写入成功或失败只有精确匹配当前字段的 epoch/sequence 时才能清 dirty 或发布保存错误；pending cleanup 则绑定发起它的请求 epoch。值相同不代表请求相同，所以字段值 A→B→A 后，最早 A 的迟到完成不能误清最后 A。
+- “重试保存”只冻结并重发当前 epoch 中仍 dirty/失败字段的最新值，当前保存状态也不吸收已被更新写入取代的旧失败。读取重试或已确认提交的数据替换会同步推进 epoch，取消或失败的数据替换不会；旧 epoch 的 success/failure/cleanup 均不能改变新 epoch 的 dirty、错误或 pending。工作区 mutation 返回的完整快照仍按既有 workspace/revision 规则重基，不能覆盖其间已提交或待重试的偏好。
+- 逐字段身份只用于 Renderer 的工作区偏好 patch，不扩展为工作区创建、重命名、激活、归档或恢复的提交后对账。Main 的偏好 Service、现有 IPC 输入/返回和 SQLite schema 均保持不变。
 - 浏览器标签元数据、活动标签和收藏夹按工作区隔离；切换时销毁旧工作区远程视图，但共享的浏览器 session/Cookie/登录态仍为应用级上下文。下载记录只存在于 Main 运行时并按工作区过滤，归档工作区时会被清理。
 - 终端进程、冻结启动描述与缓冲区只存在于 Main 运行时并绑定创建时的工作区；Profile、本机 CWD 与 WSL 选择则按工作区保存为机器本地偏好。切换会保留后台 PTY，归档成功会清理目标工作区，其他工作区不受影响。
 - 归档时已停用的自动化保持停用，恢复前还会同时在 Service 与数据库校验全部活动工作区最多 100 条未归档定义。归档时已取消的未结束 Focus 会话保持终态；浏览器页面、下载、PTY 和 AI 请求等已释放运行时也不会因恢复而重建。

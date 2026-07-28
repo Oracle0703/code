@@ -1,6 +1,7 @@
 import {
   WORKSPACE_THEMES,
   WORKSPACE_VIEW_IDS,
+  type WorkspacePreferences,
   type WorkspacePreferencesPatch,
   type WorkspaceSnapshot,
   type WorkspaceTheme,
@@ -22,6 +23,208 @@ export const LEGACY_WORKSPACE_STORAGE_KEYS = [
 export interface LegacyWorkspacePreferences {
   readonly found: boolean;
   readonly patch: WorkspacePreferencesPatch;
+}
+
+export type WorkspacePreferenceKey = keyof WorkspacePreferencesPatch;
+
+export interface WorkspacePreferenceWriteIntent {
+  readonly epoch: number;
+  readonly sequence: number;
+  readonly workspaceId: string;
+  readonly patch: WorkspacePreferencesPatch;
+  readonly generations: Readonly<Partial<Record<WorkspacePreferenceKey, number>>>;
+}
+
+export class WorkspacePreferenceRetryGate {
+  #generation = 0;
+  #active: Promise<boolean> | null = null;
+
+  run(task: () => Promise<boolean>): Promise<boolean> {
+    if (this.#active) return this.#active;
+    const generation = this.#generation;
+    const active = task();
+    this.#active = active;
+    void active.then(
+      () => this.#finish(active, generation),
+      () => this.#finish(active, generation),
+    );
+    return active;
+  }
+
+  invalidate(): void {
+    this.#generation += 1;
+    this.#active = null;
+  }
+
+  #finish(active: Promise<boolean>, generation: number): void {
+    if (generation === this.#generation && this.#active === active) {
+      this.#active = null;
+    }
+  }
+}
+
+interface WorkspacePreferenceDirtyField {
+  readonly value: WorkspacePreferencesPatch[WorkspacePreferenceKey];
+  readonly generation: number;
+  readonly failed: boolean;
+}
+
+type WorkspacePreferenceDirtyFields = Partial<
+  Record<WorkspacePreferenceKey, WorkspacePreferenceDirtyField>
+>;
+
+/**
+ * Owns the identity of optimistic workspace-preference writes.
+ *
+ * A value comparison alone cannot distinguish A → B → A: the completion for
+ * the first A must not clear the retry payload for the later A. Each dirty
+ * field therefore carries the generation of the write (or staged change) that
+ * currently owns it, and completions can only affect matching generations in
+ * the current database epoch.
+ */
+export class WorkspacePreferenceWriteCoordinator {
+  #epoch = 1;
+  #sequence = 0;
+  readonly #dirty = new Map<string, WorkspacePreferenceDirtyFields>();
+
+  get epoch(): number {
+    return this.#epoch;
+  }
+
+  get dirtyWorkspaceCount(): number {
+    return this.#dirty.size;
+  }
+
+  get hasDirtyPreferences(): boolean {
+    return this.#dirty.size > 0;
+  }
+
+  get hasFailedPreferences(): boolean {
+    for (const fields of this.#dirty.values()) {
+      if (Object.values(fields).some((field) => field?.failed)) return true;
+    }
+    return false;
+  }
+
+  isCurrent(intent: WorkspacePreferenceWriteIntent): boolean {
+    return intent.epoch === this.#epoch;
+  }
+
+  beginWrite(
+    workspaceId: string,
+    patch: WorkspacePreferencesPatch,
+  ): WorkspacePreferenceWriteIntent {
+    const normalizedPatch = immutablePreferencePatch(patch);
+    const sequence = ++this.#sequence;
+    const fields = this.#dirty.get(workspaceId) ?? {};
+    const generations: Partial<Record<WorkspacePreferenceKey, number>> = {};
+    for (const key of preferenceKeys(normalizedPatch)) {
+      fields[key] = {
+        value: normalizedPatch[key],
+        generation: sequence,
+        failed: false,
+      };
+      generations[key] = sequence;
+    }
+    this.#dirty.set(workspaceId, fields);
+    return immutableWriteIntent(this.#epoch, sequence, workspaceId, normalizedPatch, generations);
+  }
+
+  stage(workspaceId: string, patch: WorkspacePreferencesPatch): void {
+    const normalizedPatch = immutablePreferencePatch(patch);
+    const generation = ++this.#sequence;
+    const fields = this.#dirty.get(workspaceId) ?? {};
+    for (const key of preferenceKeys(normalizedPatch)) {
+      fields[key] = {
+        value: normalizedPatch[key],
+        generation,
+        failed: false,
+      };
+    }
+    this.#dirty.set(workspaceId, fields);
+  }
+
+  beginRetry(workspaceId: string): WorkspacePreferenceWriteIntent | null {
+    const fields = this.#dirty.get(workspaceId);
+    if (!fields) return null;
+    const patch = preferencePatchFromFields(fields);
+    if (preferenceKeys(patch).length === 0) {
+      this.#dirty.delete(workspaceId);
+      return null;
+    }
+    return this.beginWrite(workspaceId, patch);
+  }
+
+  settleSuccess(
+    intent: WorkspacePreferenceWriteIntent,
+    authoritative: WorkspacePreferences,
+  ): boolean {
+    if (intent.epoch !== this.#epoch) return false;
+    const fields = this.#dirty.get(intent.workspaceId);
+    if (!fields) return true;
+    let confirmed = true;
+    for (const key of preferenceKeys(intent.patch)) {
+      const field = fields[key];
+      if (!field || field.generation !== intent.generations[key]) continue;
+      if (authoritative[key] === intent.patch[key]) {
+        delete fields[key];
+      } else {
+        fields[key] = {
+          value: field.value,
+          generation: field.generation,
+          failed: true,
+        };
+        confirmed = false;
+      }
+    }
+    if (preferenceKeysFromFields(fields).length === 0) {
+      this.#dirty.delete(intent.workspaceId);
+    }
+    return confirmed;
+  }
+
+  settleFailure(intent: WorkspacePreferenceWriteIntent): boolean {
+    if (intent.epoch !== this.#epoch) return false;
+    const fields = this.#dirty.get(intent.workspaceId);
+    if (!fields) return false;
+    let marked = false;
+    for (const key of preferenceKeys(intent.patch)) {
+      const field = fields[key];
+      if (!field || field.generation !== intent.generations[key]) continue;
+      fields[key] = {
+        value: field.value,
+        generation: field.generation,
+        failed: true,
+      };
+      marked = true;
+    }
+    return marked;
+  }
+
+  getDirtyPatch(workspaceId: string): WorkspacePreferencesPatch {
+    const fields = this.#dirty.get(workspaceId);
+    return fields ? preferencePatchFromFields(fields) : {};
+  }
+
+  getDirtyWorkspaces(): readonly string[] {
+    return [...this.#dirty.keys()];
+  }
+
+  isFieldFailed(workspaceId: string, key: WorkspacePreferenceKey): boolean {
+    return this.#dirty.get(workspaceId)?.[key]?.failed ?? false;
+  }
+
+  discardMissingWorkspaces(activeWorkspaceIds: ReadonlySet<string>): void {
+    for (const workspaceId of this.#dirty.keys()) {
+      if (!activeWorkspaceIds.has(workspaceId)) this.#dirty.delete(workspaceId);
+    }
+  }
+
+  invalidate(): void {
+    this.#epoch += 1;
+    this.#sequence = 0;
+    this.#dirty.clear();
+  }
 }
 
 export function readLegacyWorkspacePreferences(
@@ -72,26 +275,6 @@ export function readLegacyWorkspacePreferences(
   };
 }
 
-export function mergeWorkspacePreferencePatches(
-  current: WorkspacePreferencesPatch,
-  next: WorkspacePreferencesPatch,
-): WorkspacePreferencesPatch {
-  return { ...current, ...next };
-}
-
-export function removeCommittedWorkspacePreferencePatch(
-  dirty: WorkspacePreferencesPatch,
-  committed: WorkspacePreferencesPatch,
-): WorkspacePreferencesPatch {
-  const remaining = { ...dirty };
-  for (const key of Object.keys(committed) as Array<keyof WorkspacePreferencesPatch>) {
-    if (remaining[key] === committed[key]) {
-      delete remaining[key];
-    }
-  }
-  return remaining;
-}
-
 export function isLegacyWorkspaceImportCommitted(
   pendingWorkspaceId: string | null,
   committedWorkspaceId: string,
@@ -120,6 +303,49 @@ export function rebaseWorkspaceMutationSnapshot(
   return Object.keys(targetPatch).length > 0
     ? { ...rebased, preferences: { ...rebased.preferences, ...targetPatch } }
     : rebased;
+}
+
+function immutablePreferencePatch(
+  patch: WorkspacePreferencesPatch,
+): Readonly<WorkspacePreferencesPatch> {
+  return Object.freeze({ ...normalizeWorkspacePreferencesPatch(patch) });
+}
+
+function immutableWriteIntent(
+  epoch: number,
+  sequence: number,
+  workspaceId: string,
+  patch: Readonly<WorkspacePreferencesPatch>,
+  generations: Partial<Record<WorkspacePreferenceKey, number>>,
+): WorkspacePreferenceWriteIntent {
+  return Object.freeze({
+    epoch,
+    sequence,
+    workspaceId,
+    patch,
+    generations: Object.freeze({ ...generations }),
+  });
+}
+
+function preferenceKeys(patch: WorkspacePreferencesPatch): readonly WorkspacePreferenceKey[] {
+  return Object.keys(patch) as WorkspacePreferenceKey[];
+}
+
+function preferenceKeysFromFields(
+  fields: WorkspacePreferenceDirtyFields,
+): readonly WorkspacePreferenceKey[] {
+  return Object.keys(fields) as WorkspacePreferenceKey[];
+}
+
+function preferencePatchFromFields(
+  fields: WorkspacePreferenceDirtyFields,
+): WorkspacePreferencesPatch {
+  return Object.fromEntries(
+    preferenceKeysFromFields(fields).flatMap((key) => {
+      const field = fields[key];
+      return field ? [[key, field.value] as const] : [];
+    }),
+  ) as WorkspacePreferencesPatch;
 }
 
 function copyBoolean(
